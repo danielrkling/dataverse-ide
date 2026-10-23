@@ -13,11 +13,27 @@ import '@codingame/monaco-vscode-markdown-basics-default-extension'
 import '@codingame/monaco-vscode-configuration-editing-default-extension'
 import '@codingame/monaco-vscode-log-default-extension'
 import '@codingame/monaco-vscode-npm-default-extension'
-// Language features running real language servers in the extension host
+// web-frontend language grammars
+import '@codingame/monaco-vscode-xml-default-extension'
+import '@codingame/monaco-vscode-less-default-extension'
+import '@codingame/monaco-vscode-scss-default-extension'
+import '@codingame/monaco-vscode-pug-default-extension'
+// language features running real language servers in the extension host
 import '@codingame/monaco-vscode-typescript-language-features-default-extension'
 import '@codingame/monaco-vscode-json-language-features-default-extension'
 import '@codingame/monaco-vscode-html-language-features-default-extension'
 import '@codingame/monaco-vscode-css-language-features-default-extension'
+// markdown preview (works fully client-side)
+import '@codingame/monaco-vscode-markdown-language-features-default-extension'
+// editor UX utilities
+import '@codingame/monaco-vscode-emmet-default-extension'
+import '@codingame/monaco-vscode-references-view-default-extension'
+import '@codingame/monaco-vscode-search-result-default-extension'
+import '@codingame/monaco-vscode-merge-conflict-default-extension'
+import '@codingame/monaco-vscode-media-preview-default-extension'
+// git-related built-ins (hosted in an environment without a real git process)
+import '@codingame/monaco-vscode-git-base-default-extension'
+import '@codingame/monaco-vscode-github-authentication-default-extension'
 
 import './style.css'
 import { openWorkspaceDirectory, restoreWorkspaceDirectory } from './fsProvider.js'

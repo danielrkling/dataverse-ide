@@ -52,7 +52,11 @@ function Invoke-VsApi {
 
 if (-not (Test-Path $DistFolder)) { throw "dist folder not found: $DistFolder" }
 
-$files = Get-ChildItem -Path $DistFolder -Recurse -File
+# Skip source maps: .map is not a supported web resource file extension, and
+# the vendor bundles are minified anyway (build has sourcemap: false). Skipping
+# them halves the deploy payload (~50 MB of maps) and avoids 404s - browsers only
+# request them when devtools is open.
+$files = Get-ChildItem -Path $DistFolder -Recurse -File | Where-Object { $_.Extension -ne '.map' }
 if (-not $files) { throw "dist folder is empty: $DistFolder" }
 
 # Build the (possibly batched) set of upserts

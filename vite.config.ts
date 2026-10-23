@@ -51,6 +51,17 @@ export default defineConfig({
   // In Dataverse, assets are published as web resources under a path prefix,
   // e.g. DV_BASE=/webresources/dv_/ide
   base: process.env.DV_BASE ?? '/',
+  resolve: {
+    alias: [
+      {
+        // Optional xterm addon (dynamically imported by the terminal service
+        // override) - its node builtin imports break the browser bundle, and
+        // font-ligature shaping is irrelevant here
+        find: /^@xterm\/addon-ligatures$/,
+        replacement: path.resolve(import.meta.dirname, 'src/stubs/xtermLigatures.ts')
+      }
+    ]
+  },
   build: {
     // monaco-vscode-api relies on dynamic imports of wasm / large chunks
     chunkSizeWarningLimit: 5000,

@@ -27,6 +27,14 @@ import getThemeServiceOverride from '@codingame/monaco-vscode-theme-service-over
 import getStorageServiceOverride from '@codingame/monaco-vscode-storage-service-override'
 import * as vscode from 'vscode'
 import { rootUri } from './fsProvider.js'
+import getBulkEditServiceOverride from '@codingame/monaco-vscode-bulk-edit-service-override'
+import getWorkspaceTrustServiceOverride from '@codingame/monaco-vscode-workspace-trust-service-override'
+import getViewsServiceOverride from '@codingame/monaco-vscode-views-service-override'
+import getEmmetServiceOverride from '@codingame/monaco-vscode-emmet-service-override'
+import getSecretStorageServiceOverride from '@codingame/monaco-vscode-secret-storage-service-override'
+import getTerminalServiceOverride from '@codingame/monaco-vscode-terminal-service-override'
+import getSCMServiceOverride from '@codingame/monaco-vscode-scm-service-override'
+import getDebugServiceOverride from '@codingame/monaco-vscode-debug-service-override'
 
 // The extension host (and other vscode service workers) run in web workers.
 // Vite bundles them here via `?worker&url` so the URL is fully resolved at
@@ -128,6 +136,18 @@ export async function startWorkbench (container: HTMLElement): Promise<void> {
 
       ...getStorageServiceOverride(),
       ...getEnvironmentServiceOverride(),
+      ...getBulkEditServiceOverride(),
+      ...getWorkspaceTrustServiceOverride(),
+      ...getViewsServiceOverride(),
+      ...getEmmetServiceOverride(),
+      ...getSecretStorageServiceOverride(),
+
+      // heavy: features that expect a real backend (pty/git/debug adapter/
+      // LLM endpoints) - present for completeness, mostly inert in-browser
+      ...getTerminalServiceOverride(),
+      ...getSCMServiceOverride(),
+      ...getDebugServiceOverride(),
+
       ...getLocalizationServiceOverride({
         async clearLocale() {
           const url = new URL(window.location.href)
