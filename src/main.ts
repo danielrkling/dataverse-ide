@@ -38,8 +38,18 @@ import './style.css'
 import {
   ensureWorkspacePermission,
   openWorkspaceDirectory,
-  restoreWorkspaceDirectory,
 } from './fsProvider.js'
+
+import {
+  createOpfsWorkspace,
+  listRecentWorkspaces,
+  openOpfsWorkspace,
+  removeRecentWorkspace,
+  saveLocalWorkspace,
+  supportsOpfs,
+  type OpfsWorkspaceRecent,
+  type RecentWorkspace,
+} from './recentWorkspaces.js'
 
 import { startWorkbench } from './workbench.js'
 
@@ -47,29 +57,76 @@ const splash = document.getElementById('splash')!
 const container = document.getElementById('workbench-container')!
 const status = document.getElementById('splashStatus')!
 
-const openPreviousFolderButton =
-  document.getElementById('openPreviousFolderBtn') as HTMLButtonElement
-
 const chooseFolderButton =
   document.getElementById('chooseFolderBtn') as HTMLButtonElement
 
-let storedHandle: FileSystemDirectoryHandle | undefined
+const newLocalFolderButton =
+  document.getElementById('newLocalFolderBtn') as HTMLButtonElement
 
-async function boot (
+const newOpfsWorkspaceButton =
+  document.getElementById('newOpfsWorkspaceBtn') as HTMLButtonElement
+
+const refreshRecentWorkspacesButton =
+  document.getElementById(
+    'refreshRecentWorkspacesBtn',
+  ) as HTMLButtonElement
+
+const recentWorkspacesList =
+  document.getElementById(
+    'recentWorkspacesList',
+  ) as HTMLUListElement
+
+const recentWorkspacesEmpty =
+  document.getElementById(
+    'recentWorkspacesEmpty',
+  ) as HTMLParagraphElement
+
+function setStatus(message: string): void {
+  status.textContent = message
+}
+
+function formatOpenedAt(timestamp: string): string {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(new Date(timestamp))
+  } catch {
+    return timestamp
+  }
+}
+
+function setButtonsDisabled(disabled: boolean): void {
+  chooseFolderButton.disabled = disabled
+  newLocalFolderButton.disabled = disabled
+  newOpfsWorkspaceButton.disabled =
+    disabled || !supportsOpfs()
+  refreshRecentWorkspacesButton.disabled = disabled
+}
+
+async function bootLocalWorkspace(
   directoryHandle: FileSystemDirectoryHandle,
 ): Promise<void> {
-  status.textContent = 'Verifying folder permission…'
+  setButtonsDisabled(true)
+  setStatus('Verifying folder permission…')
 
   const permitted = await ensureWorkspacePermission(directoryHandle)
 
   if (!permitted) {
-    status.textContent =
-      'Read/write permission was not granted for the selected folder.'
+    setButtonsDisabled(false)
+
+    setStatus(
+      'Read/write permission was not granted for the selected folder.',
+    )
 
     return
   }
 
-  status.textContent = 'Mounting workspace…'
+  setStatus('Saving recent workspace…')
+
+  await saveLocalWorkspace(directoryHandle)
+
+  setStatus('Mounting workspace…')
 
   await openWorkspaceDirectory(directoryHandle)
 
@@ -79,70 +136,264 @@ async function boot (
   await startWorkbench(container)
 }
 
-async function chooseNewFolder (): Promise<void> {
+async function bootOpfsWorkspace(
+  directoryHandle: FileSystemDirectoryHandle,
+): Promise<void> {
+  setButtonsDisabled(true)
+  setStatus('Mounting browser workspace…')
+
+  await openWorkspaceDirectory(directoryHandle)
+
+  splash.remove()
+  container.hidden = false
+
+  await startWorkbench(container)
+}
+
+async function openLocalFolder(): Promise<void> {
   try {
     const directoryHandle = await window.showDirectoryPicker({
       id: 'dataverse-ide-workspace',
       mode: 'readwrite',
     })
 
-    await boot(directoryHandle)
+    await bootLocalWorkspace(directoryHandle)
   } catch (error) {
+    setButtonsDisabled(false)
+
     if (error instanceof DOMException && error.name === 'AbortError') {
-      status.textContent = 'Folder selection cancelled.'
+      setStatus('Folder selection cancelled.')
       return
     }
 
-    status.textContent =
+    setStatus(
       error instanceof Error
         ? error.message
-        : String(error)
+        : String(error),
+    )
   }
 }
 
-async function openPreviousFolder (): Promise<void> {
-  if (storedHandle == null) {
-    await chooseNewFolder()
+async function createLocalFolder(): Promise<void> {
+  try {
+    const parentHandle = await window.showDirectoryPicker({
+      id: 'dataverse-ide-workspace-parent',
+      mode: 'readwrite',
+    })
+
+    const requestedName = window.prompt(
+      'Name for the new local workspace folder:',
+      'dataverse-ide-workspace',
+    )
+
+    if (requestedName == null) {
+      setStatus('New local workspace cancelled.')
+      return
+    }
+
+    const name = requestedName.trim()
+
+    if (
+      name.length === 0 ||
+      name === '.' ||
+      name === '..' ||
+      name.includes('/') ||
+      name.includes('\\')
+    ) {
+      setStatus(
+        'Enter a folder name without slashes or path traversal values.',
+      )
+
+      return
+    }
+
+    setStatus('Creating local workspace folder…')
+
+    const workspaceHandle = await parentHandle.getDirectoryHandle(
+      name,
+      {
+        create: true,
+      },
+    )
+
+    await bootLocalWorkspace(workspaceHandle)
+  } catch (error) {
+    setButtonsDisabled(false)
+
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      setStatus('Folder selection cancelled.')
+      return
+    }
+
+    setStatus(
+      error instanceof Error
+        ? error.message
+        : String(error),
+    )
+  }
+}
+
+async function createBrowserWorkspace(): Promise<void> {
+  if (!supportsOpfs()) {
+    setStatus(
+      'Origin Private File System workspaces are not supported by this browser.',
+    )
+
+    return
+  }
+
+  const requestedName = window.prompt(
+    'Name for the new browser workspace:',
+    'dataverse-ide-workspace',
+  )
+
+  if (requestedName == null) {
+    setStatus('New browser workspace cancelled.')
     return
   }
 
   try {
-    await boot(storedHandle)
+    setButtonsDisabled(true)
+    setStatus('Creating browser workspace…')
+
+    const { handle } = await createOpfsWorkspace(requestedName)
+
+    await bootOpfsWorkspace(handle)
   } catch (error) {
-    status.textContent =
+    setButtonsDisabled(false)
+
+    setStatus(
       error instanceof Error
         ? error.message
-        : String(error)
+        : String(error),
+    )
   }
 }
 
-/*
- * Restore only the handle reference. Do not open it automatically.
- */
-storedHandle = await restoreWorkspaceDirectory()
+async function openRecentWorkspace(
+  record: RecentWorkspace,
+): Promise<void> {
+  try {
+    if (record.kind === 'local') {
+      await bootLocalWorkspace(record.handle)
+      return
+    }
 
-if (storedHandle != null) {
-  const permission = await storedHandle.queryPermission({
-    mode: 'readwrite',
-  })
+    setButtonsDisabled(true)
+    setStatus('Opening browser workspace…')
 
-  openPreviousFolderButton.hidden = false
+    const handle = await openOpfsWorkspace(record as OpfsWorkspaceRecent)
 
-  if (permission === 'granted') {
-    status.textContent =
-      'A previously authorized folder is available. Choose an action to continue.'
-  } else {
-    status.textContent =
-      'A previous folder is available but requires permission before opening.'
+    await bootOpfsWorkspace(handle)
+  } catch (error) {
+    setButtonsDisabled(false)
+
+    if (
+      error instanceof DOMException &&
+      error.name === 'NotFoundError'
+    ) {
+      setStatus(
+        `"${record.name}" is no longer available. It may have been cleared from browser storage.`,
+      )
+
+      return
+    }
+
+    setStatus(
+      error instanceof Error
+        ? error.message
+        : String(error),
+    )
   }
-} else {
-  status.textContent = 'Choose a local folder to open in Dataverse IDE.'
 }
 
-openPreviousFolderButton.addEventListener('click', () => {
-  void openPreviousFolder()
-})
+async function renderRecentWorkspaces(): Promise<void> {
+  recentWorkspacesList.replaceChildren()
+
+  const records = await listRecentWorkspaces()
+
+  recentWorkspacesEmpty.hidden = records.length > 0
+
+  for (const record of records) {
+    const item = document.createElement('li')
+    item.className = 'recent-workspace-item'
+
+    const openButton = document.createElement('button')
+    openButton.className = 'recent-workspace-open'
+    openButton.type = 'button'
+
+    const name = document.createElement('span')
+    name.className = 'recent-workspace-name'
+    name.textContent = record.name
+
+    const meta = document.createElement('span')
+    meta.className = 'recent-workspace-meta'
+
+    const locationLabel =
+      record.kind === 'local'
+        ? 'Local folder'
+        : 'Browser workspace (OPFS)'
+
+    meta.textContent =
+      `${locationLabel} · Opened ${formatOpenedAt(record.lastOpenedAt)}`
+
+    openButton.append(name, meta)
+
+    openButton.addEventListener('click', () => {
+      void openRecentWorkspace(record)
+    })
+
+    const removeButton = document.createElement('button')
+    removeButton.className = 'recent-workspace-remove'
+    removeButton.type = 'button'
+    removeButton.title = `Remove ${record.name} from recent workspaces`
+    removeButton.setAttribute(
+      'aria-label',
+      `Remove ${record.name} from recent workspaces`,
+    )
+    removeButton.textContent = 'Remove'
+
+    removeButton.addEventListener('click', (event) => {
+      event.stopPropagation()
+
+      void (async () => {
+        await removeRecentWorkspace(record.id)
+        await renderRecentWorkspaces()
+
+        setStatus(
+          `"${record.name}" was removed from recent workspaces.`,
+        )
+      })()
+    })
+
+    item.append(openButton, removeButton)
+
+    recentWorkspacesList.append(item)
+  }
+}
+
+if (!supportsOpfs()) {
+  newOpfsWorkspaceButton.disabled = true
+  newOpfsWorkspaceButton.title =
+    'This browser does not support Origin Private File System workspaces.'
+}
 
 chooseFolderButton.addEventListener('click', () => {
-  void chooseNewFolder()
+  void openLocalFolder()
 })
+
+newLocalFolderButton.addEventListener('click', () => {
+  void createLocalFolder()
+})
+
+newOpfsWorkspaceButton.addEventListener('click', () => {
+  void createBrowserWorkspace()
+})
+
+refreshRecentWorkspacesButton.addEventListener('click', () => {
+  void renderRecentWorkspaces()
+})
+
+setStatus('Choose a workspace to begin.')
+
+void renderRecentWorkspaces()

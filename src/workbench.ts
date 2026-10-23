@@ -33,7 +33,7 @@ import getWorkspaceTrustServiceOverride from '@codingame/monaco-vscode-workspace
 import getEmmetServiceOverride from '@codingame/monaco-vscode-emmet-service-override'
 import getSecretStorageServiceOverride from '@codingame/monaco-vscode-secret-storage-service-override'
 // import getTerminalServiceOverride from '@codingame/monaco-vscode-terminal-service-override'
-// import getSCMServiceOverride from '@codingame/monaco-vscode-scm-service-override'
+import getSCMServiceOverride from '@codingame/monaco-vscode-scm-service-override'
 // import getDebugServiceOverride from '@codingame/monaco-vscode-debug-service-override'
 
 // The extension host (and other vscode service workers) run in web workers.
@@ -47,6 +47,14 @@ import textMateWorkerUrl from '@codingame/monaco-vscode-textmate-service-overrid
 import localFileSearchWorkerUrl from '@codingame/monaco-vscode-search-service-override/worker?worker&url'
 import outputLinkComputerWorkerUrl from '@codingame/monaco-vscode-output-service-override/worker?worker&url'
 import outputLinkDetectionWorkerUrl from '@codingame/monaco-vscode-output-service-override/worker?worker&url'
+
+import {
+  installDataverseGitExtension,
+} from './git/dataverseGitExtension.js'
+
+import {
+  workspaceDirectoryHandle,
+} from './fsProvider.js'
 
 const workerUrls: Record<string, string> = {
   editorWorkerService: editorWorkerUrl,
@@ -416,7 +424,7 @@ export async function startWorkbench(
       // heavy: features that expect a real backend (pty/git/debug adapter/
       // LLM endpoints) - present for completeness, mostly inert in-browser
       // ...getTerminalServiceOverride(),
-      // ...getSCMServiceOverride(),
+      ...getSCMServiceOverride(),
       // ...getDebugServiceOverride(),
 
       ...getLocalizationServiceOverride({
@@ -460,7 +468,7 @@ export async function startWorkbench(
       vscode.workspace
         .getConfiguration('files')
         .get<string>('autoSave'),
-  
+
     filesAutoSaveDelay:
       vscode.workspace
         .getConfiguration('files')
@@ -469,11 +477,17 @@ export async function startWorkbench(
 
   const autoSaveDisposable = installDocumentAutoSave(1000);
 
-window.addEventListener(
-  'beforeunload',
-  () => {
-    autoSaveDisposable.dispose();
-  },
-  { once: true },
-);
+  const gitScmController = await installDataverseGitExtension(
+    workspaceDirectoryHandle,
+    rootUri,
+  )
+
+  window.addEventListener(
+    'beforeunload',
+    () => {
+      autoSaveDisposable.dispose();
+      gitScmController.dispose()
+    },
+    { once: true },
+  );
 }
