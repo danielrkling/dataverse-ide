@@ -1,0 +1,19 @@
+{
+    "id": "./index.html",
+    "name": "Dataverse IDE",
+    "short_name": "DV IDE",
+    "description": "A browser IDE powered by monaco-vscode-api.",
+    "start_url": "./index.html",
+    "scope": "./",
+    "display": "standalone",
+    "background_color": "#1f1f1f",
+    "theme_color": "#0078d4",
+    "icons": [
+      {
+        "src": "./icons/dataverse-ide.svg",
+        "sizes": "any",
+        "type": "image/svg+xml",
+        "purpose": "any"
+      }
+    ]
+  }
