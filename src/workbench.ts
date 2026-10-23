@@ -56,6 +56,10 @@ import {
   workspaceDirectoryHandle,
 } from './fsProvider.js'
 
+import {
+  installDataverseUploadExtension,
+} from './dataverse/dataverseUploadExtension.js'
+
 const workerUrls: Record<string, string> = {
   editorWorkerService: editorWorkerUrl,
   extensionHostWorkerMain: extensionHostWorkerUrl,
@@ -482,11 +486,15 @@ export async function startWorkbench(
     rootUri,
   )
 
+  const dataverseUploadController =
+  await installDataverseUploadExtension(rootUri)
+
   window.addEventListener(
     'beforeunload',
     () => {
       autoSaveDisposable.dispose();
-      gitScmController.dispose()
+      gitScmController.dispose(),
+      dataverseUploadController.dispose()
     },
     { once: true },
   );
