@@ -71,6 +71,7 @@
     "@codingame/monaco-vscode-xml-default-extension": "^38.0.4",
     "@codingame/monaco-vscode-yaml-default-extension": "^38.0.4",
     "@types/wicg-file-system-access": "^2023.10.7",
+    "buffer": "^6.0.3",
     "isomorphic-git": "^1.44.4",
     "monaco-editor": "npm:@codingame/monaco-vscode-editor-api@^38.0.4",
     "vscode": "npm:@codingame/monaco-vscode-extension-api@^38.0.4"

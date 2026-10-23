@@ -1,3 +1,4 @@
+import './browserPolyfills.js'
 import 'vscode/localExtensionHost'
 
 // Built-in language support
