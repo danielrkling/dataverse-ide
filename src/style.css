@@ -51,3 +51,15 @@ body {
   color: #f14c4c;
   min-height: 1.4em;
 }
+
+
+.splash-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  margin-top: 24px;
+}
+
+.splash-actions .btn {
+  margin-top: 0;
+}

@@ -29,12 +29,12 @@ import * as vscode from 'vscode'
 import { rootUri } from './fsProvider.js'
 import getBulkEditServiceOverride from '@codingame/monaco-vscode-bulk-edit-service-override'
 import getWorkspaceTrustServiceOverride from '@codingame/monaco-vscode-workspace-trust-service-override'
-import getViewsServiceOverride from '@codingame/monaco-vscode-views-service-override'
+// import getViewsServiceOverride from '@codingame/monaco-vscode-views-service-override'
 import getEmmetServiceOverride from '@codingame/monaco-vscode-emmet-service-override'
 import getSecretStorageServiceOverride from '@codingame/monaco-vscode-secret-storage-service-override'
-import getTerminalServiceOverride from '@codingame/monaco-vscode-terminal-service-override'
-import getSCMServiceOverride from '@codingame/monaco-vscode-scm-service-override'
-import getDebugServiceOverride from '@codingame/monaco-vscode-debug-service-override'
+// import getTerminalServiceOverride from '@codingame/monaco-vscode-terminal-service-override'
+// import getSCMServiceOverride from '@codingame/monaco-vscode-scm-service-override'
+// import getDebugServiceOverride from '@codingame/monaco-vscode-debug-service-override'
 
 // The extension host (and other vscode service workers) run in web workers.
 // Vite bundles them here via `?worker&url` so the URL is fully resolved at
@@ -45,35 +45,289 @@ import editorWorkerUrl from 'monaco-editor/esm/vs/editor/editor.worker.js?worker
 import extensionHostWorkerUrl from '@codingame/monaco-vscode-api/workers/extensionHost.worker?worker&url'
 import textMateWorkerUrl from '@codingame/monaco-vscode-textmate-service-override/worker?worker&url'
 import localFileSearchWorkerUrl from '@codingame/monaco-vscode-search-service-override/worker?worker&url'
+import outputLinkComputerWorkerUrl from '@codingame/monaco-vscode-output-service-override/worker?worker&url'
+import outputLinkDetectionWorkerUrl from '@codingame/monaco-vscode-output-service-override/worker?worker&url'
 
-const workerUrls: Partial<Record<string, string>> = {
+const workerUrls: Record<string, string> = {
   editorWorkerService: editorWorkerUrl,
   extensionHostWorkerMain: extensionHostWorkerUrl,
+
+  // Different monaco-vscode-api services/releases use different casing.
+  textMateWorker: textMateWorkerUrl,
   TextMateWorker: textMateWorkerUrl,
-  LocalFileSearchWorker: localFileSearchWorkerUrl
+
+  outputLinkComputer: outputLinkComputerWorkerUrl,
+  LocalFileSearchWorker: localFileSearchWorkerUrl,
+  OutputLinkDetectionWorker: outputLinkDetectionWorkerUrl,
+}
+
+function resolveWorkerUrl(workerUrl: string): string {
+  /*
+   * With Vite base: "./", worker URLs may be emitted as relative paths such
+   * as "./assets/editor.worker-<hash>.js".
+   *
+   * Resolve relative to the actual Dataverse web-resource document location:
+   * /WebResources/vs_code/dist/index.html
+   */
+  return new URL(workerUrl, document.baseURI).href
+}
+
+async function verifyWorker(
+  workerName: string,
+  workerUrl: string,
+): Promise<void> {
+  const resolvedUrl = resolveWorkerUrl(workerUrl);
+
+  console.info(
+    `[Dataverse IDE] Testing ${workerName} worker:`,
+    resolvedUrl,
+  );
+
+  await new Promise<void>((resolve, reject) => {
+    const worker = new Worker(resolvedUrl, {
+      type: "module",
+      name: `dataverse-ide-test-${workerName}`,
+    });
+
+    const timeout = window.setTimeout(() => {
+      worker.terminate();
+
+      console.info(
+        `[Dataverse IDE] ${workerName} worker loaded without a startup error.`,
+      );
+
+      resolve();
+    }, 1000);
+
+    worker.addEventListener(
+      "error",
+      (event) => {
+        window.clearTimeout(timeout);
+        worker.terminate();
+
+        reject(
+          new Error(
+            `${workerName} worker failed: ${event.message || "unknown error"}`,
+          ),
+        );
+      },
+      { once: true },
+    );
+
+    worker.addEventListener(
+      "messageerror",
+      () => {
+        window.clearTimeout(timeout);
+        worker.terminate();
+
+        reject(
+          new Error(
+            `${workerName} worker emitted a message deserialization error.`,
+          ),
+        );
+      },
+      { once: true },
+    );
+  });
 }
 
 window.MonacoEnvironment = {
-  getWorkerUrl (_workerId, label) {
-    const url = workerUrls[label]
-    if (url == null) {
-      throw new Error(`Worker ${label} not found`)
+  getWorkerUrl(_workerId, label) {
+    const workerUrl = workerUrls[label];
+
+    if (workerUrl == null) {
+      console.error(
+        `[Dataverse IDE] Monaco requested an unmapped worker URL: "${label}"`,
+      );
+
+      throw new Error(
+        `[Dataverse IDE] Worker URL for "${label}" is not configured.`,
+      );
     }
-    return url
+
+    const resolvedUrl = resolveWorkerUrl(workerUrl);
+
+    console.info(
+      `[Dataverse IDE] Monaco requested worker URL "${label}":`,
+      resolvedUrl,
+    );
+
+    return resolvedUrl;
   },
-  getWorkerOptions (_workerId, _label) {
-    return { type: 'module' }
-  },
-  getWorker (_workerId, label) {
-    const url = workerUrls[label]
-    if (url == null) {
-      throw new Error(`Worker ${label} not found`)
+
+  getWorkerOptions() {
+    return {
+      type: 'module',
     }
-    return new Worker(url, { type: 'module' })
-  }
+  },
+
+  getWorker(_workerId, label) {
+    const workerUrl = workerUrls[label]
+
+    if (workerUrl == null) {
+      console.error(
+        `[Dataverse IDE] Monaco requested an unmapped worker: "${label}"`,
+      )
+
+      throw new Error(
+        `[Dataverse IDE] Worker "${label}" is not configured.`,
+      )
+    }
+
+    const resolvedUrl = resolveWorkerUrl(workerUrl)
+
+    console.info(
+      `[Dataverse IDE] Monaco requested worker "${label}":`,
+      resolvedUrl,
+    )
+
+    const worker = new Worker(resolvedUrl, {
+      type: 'module',
+      name: `dataverse-ide-${label}`,
+    })
+
+    worker.addEventListener('error', (event) => {
+      console.error(
+        `[Dataverse IDE] Worker "${label}" failed after creation.`,
+        {
+          url: resolvedUrl,
+          message: event.message,
+          filename: event.filename,
+          line: event.lineno,
+          column: event.colno,
+          error: event.error,
+          event,
+        },
+      )
+    })
+
+    return worker
+  },
 }
 
-export async function startWorkbench (container: HTMLElement): Promise<void> {
+function installDocumentAutoSave(
+  delayMs = 1000,
+): vscode.Disposable {
+  const timers = new Map<string, number>();
+
+  function clearTimer(uri: vscode.Uri): void {
+    const key = uri.toString();
+    const timer = timers.get(key);
+
+    if (timer != null) {
+      window.clearTimeout(timer);
+      timers.delete(key);
+    }
+  }
+
+  const changeSubscription =
+    vscode.workspace.onDidChangeTextDocument((event) => {
+      const document = event.document;
+
+      /*
+       * Ignore non-file resources:
+       * - output channels
+       * - extension documents
+       * - virtual typings
+       * - untitled editors
+       */
+      if (document.uri.scheme !== 'file' || document.isUntitled) {
+        return;
+      }
+
+      /*
+       * Only autosave files that belong to the currently opened workspace.
+       */
+      if (vscode.workspace.getWorkspaceFolder(document.uri) == null) {
+        return;
+      }
+
+      /*
+       * Ignore metadata-only change events.
+       */
+      if (event.contentChanges.length === 0 || !document.isDirty) {
+        return;
+      }
+
+      clearTimer(document.uri);
+
+      const timer = window.setTimeout(() => {
+        timers.delete(document.uri.toString());
+
+        void (async () => {
+          /*
+           * The document might have been manually saved, closed, or changed
+           * again while this timer waited.
+           */
+          if (!document.isDirty) {
+            return;
+          }
+
+          try {
+            const saved = await document.save();
+
+            console.info(
+              '[Dataverse IDE] Autosave attempted:',
+              {
+                file: document.uri.fsPath,
+                saved,
+              },
+            );
+          } catch (error) {
+            console.error(
+              '[Dataverse IDE] Autosave failed:',
+              document.uri.toString(),
+              error,
+            );
+          }
+        })();
+      }, delayMs);
+
+      timers.set(document.uri.toString(), timer);
+    });
+
+  const saveSubscription =
+    vscode.workspace.onDidSaveTextDocument((document) => {
+      clearTimer(document.uri);
+    });
+
+  const closeSubscription =
+    vscode.workspace.onDidCloseTextDocument((document) => {
+      clearTimer(document.uri);
+    });
+
+  return new vscode.Disposable(() => {
+    changeSubscription.dispose();
+    saveSubscription.dispose();
+    closeSubscription.dispose();
+
+    for (const timer of timers.values()) {
+      window.clearTimeout(timer);
+    }
+
+    timers.clear();
+  });
+}
+
+export async function startWorkbench(
+  container: HTMLElement,
+): Promise<void> {
+  console.table({
+    origin: window.location.origin,
+    crossOriginIsolated: window.crossOriginIsolated,
+    sharedArrayBufferAvailable:
+      typeof SharedArrayBuffer !== "undefined",
+  });
+
+  // await Promise.all([
+  //   verifyWorker("editor", editorWorkerUrl),
+  //   verifyWorker("extension-host", extensionHostWorkerUrl),
+  //   verifyWorker("textmate", textMateWorkerUrl),
+  //   verifyWorker("search", localFileSearchWorkerUrl),
+  //   verifyWorker("output-link-computer", outputLinkComputerWorkerUrl),
+  // ]);
+
+  // Existing startWorkbench code follows...
   // Like the demo: on localhost, run the web worker extension host in a sandboxed
   // iframe under a wildcard subdomain (localhost subdomains resolve for free).
   // It is required by the typescript-language-features extension (tsserver forks
@@ -98,11 +352,28 @@ export async function startWorkbench (container: HTMLElement): Promise<void> {
     configurationDefaults: {
       'workbench.colorTheme': 'Default Dark Modern',
       'workbench.iconTheme': 'vs-seti',
-      'window.title': 'Dataverse IDE${separator}${dirty}${activeEditorShort}'
+      'window.title': 'Dataverse IDE${separator}${dirty}${activeEditorShort}',
+
+      /*
+      * Write dirty editor buffers through the File System Access API provider.
+      */
+      'files.autoSave': 'afterDelay',
+      'files.autoSaveDelay': 1000,
+
+      /*
+       * Optional editor hygiene.
+       */
+      'files.trimTrailingWhitespace': true,
+      'files.insertFinalNewline': true,
+
+      /*
+       * Avoid remote SchemaStore CORS noise in Dataverse.
+       */
+      'json.schemaDownload.enable': false,
     },
     workspaceProvider: {
       trusted: true,
-      async open () {
+      async open() {
         window.open(window.location.href)
         return true
       },
@@ -138,15 +409,15 @@ export async function startWorkbench (container: HTMLElement): Promise<void> {
       ...getEnvironmentServiceOverride(),
       ...getBulkEditServiceOverride(),
       ...getWorkspaceTrustServiceOverride(),
-      ...getViewsServiceOverride(),
+      // ...getViewsServiceOverride(),
       ...getEmmetServiceOverride(),
       ...getSecretStorageServiceOverride(),
 
       // heavy: features that expect a real backend (pty/git/debug adapter/
       // LLM endpoints) - present for completeness, mostly inert in-browser
-      ...getTerminalServiceOverride(),
-      ...getSCMServiceOverride(),
-      ...getDebugServiceOverride(),
+      // ...getTerminalServiceOverride(),
+      // ...getSCMServiceOverride(),
+      // ...getDebugServiceOverride(),
 
       ...getLocalizationServiceOverride({
         async clearLocale() {
@@ -183,4 +454,26 @@ export async function startWorkbench (container: HTMLElement): Promise<void> {
       userHome: vscode.Uri.file('/')
     }
   )
+
+  console.table({
+    filesAutoSave:
+      vscode.workspace
+        .getConfiguration('files')
+        .get<string>('autoSave'),
+  
+    filesAutoSaveDelay:
+      vscode.workspace
+        .getConfiguration('files')
+        .get<number>('autoSaveDelay'),
+  });
+
+  const autoSaveDisposable = installDocumentAutoSave(1000);
+
+window.addEventListener(
+  'beforeunload',
+  () => {
+    autoSaveDisposable.dispose();
+  },
+  { once: true },
+);
 }

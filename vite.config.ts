@@ -50,7 +50,7 @@ const forcePreventTransformAssets: Plugin = {
 export default defineConfig({
   // In Dataverse, assets are published as web resources under a path prefix,
   // e.g. DV_BASE=/webresources/dv_/ide
-  base: process.env.DV_BASE ?? '/',
+  base: './',
   resolve: {
     alias: [
       {
@@ -77,6 +77,7 @@ export default defineConfig({
     // inline all binary assets (onig.wasm 466KB, diff_wasm_bg.wasm 118KB,
     // codicon.ttf 153KB) as base64 data URLs into the JS chunks instead
     assetsInlineLimit: 1000000
+    
   },
   worker: {
     format: 'es'

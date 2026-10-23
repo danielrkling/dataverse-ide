@@ -11,8 +11,15 @@
       <div class="splash-inner">
         <h1>Dataverse IDE</h1>
         <p>A browser IDE powered by monaco-vscode-api</p>
-        <button id="openFolderBtn" class="btn">Open Folder…</button>
-        <p id="splashStatus" class="status"></p>
+        <div class="splash-actions">
+          <button id="openPreviousFolderBtn" class="btn" hidden>
+            Open Previous Folder
+          </button>
+        
+          <button id="chooseFolderBtn" class="btn">
+            Choose Folder…
+          </button>
+        </div>        <p id="splashStatus" class="status"></p>
       </div>
     </div>
     <div id="workbench-container" hidden></div>

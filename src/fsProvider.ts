@@ -33,21 +33,38 @@ export async function openWorkspaceDirectory (dirHandle?: FileSystemDirectoryHan
   return rootUri
 }
 
-export async function restoreWorkspaceDirectory (): Promise<FileSystemDirectoryHandle | undefined> {
+export async function restoreWorkspaceDirectory (): Promise<
+  FileSystemDirectoryHandle | undefined
+> {
   try {
-    const handle = (await get()) as FileSystemDirectoryHandle | undefined
-    if (handle == null) {
-      return undefined
-    }
-    if ((await handle.queryPermission({ mode: 'readwrite' })) !== 'granted') {
-      if ((await handle.requestPermission({ mode: 'readwrite' })) !== 'granted') {
-        return undefined
-      }
-    }
-    return handle
+    return (await get()) as FileSystemDirectoryHandle | undefined
   } catch {
-    // Safari `<17` and Firefox have no File System Access API
     return undefined
+  }
+}
+
+export async function ensureWorkspacePermission (
+  handle: FileSystemDirectoryHandle,
+): Promise<boolean> {
+  const options: FileSystemHandlePermissionDescriptor = {
+    mode: 'readwrite',
+  }
+
+  try {
+    const currentPermission = await handle.queryPermission(options)
+
+    if (currentPermission === 'granted') {
+      return true
+    }
+
+    /*
+     * Call only from a user click handler.
+     */
+    return (
+      await handle.requestPermission(options)
+    ) === 'granted'
+  } catch {
+    return false
   }
 }
 
