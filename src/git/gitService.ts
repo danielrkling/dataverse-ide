@@ -404,7 +404,6 @@ export async function initializeRepository(
       fs,
       dir: GIT_DIR,
       gitdir: GIT_METADATA_DIR,
-      noOverwrite: true,
     })
   
     /*

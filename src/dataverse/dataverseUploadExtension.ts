@@ -497,7 +497,7 @@ export async function installDataverseUploadExtension(
 
         const client = new DataverseWebResourceClient({
             apiBaseUrl: settings.apiBaseUrl,
-            solutionUniqueName: settings.solutionUniqueName,
+            solutionUniqueName: settings.solution,
         })
 
         const uploaded: DataverseWebResource[] = []
