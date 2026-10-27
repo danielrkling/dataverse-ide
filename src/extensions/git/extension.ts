@@ -5,21 +5,37 @@ import {
   import type * as vscodeType from 'vscode'
   
   import {
+    addRemote,
+    cloneRepository,
     createBranch,
     createCommit,
     deleteLocalBranch,
+    deleteRemote,
+    fetchRemote,
     getGitRepositorySnapshot,
     getRecentCommits,
     initializeRepository,
     listLocalBranches,
+    listRemotes,
+    pullRemote,
+    pushRemote,
     stageAll,
     stagePaths,
     switchBranch,
     unstageAll,
     unstagePaths,
+    type GitBranch,
+    type GitCredentialsProvider,
     type GitFileStatus,
+    type GitRemote,
     type GitTreeEntry,
-  } from './gitService.js'
+  } from './service.js'
+
+  import {
+    createCredentialProvider,
+    forgetCredentials,
+    type GitCredentialPrompt,
+  } from './credentials.js'
   
   export type DataverseGitScmController = {
     refresh: () => Promise<void>
@@ -133,10 +149,53 @@ import {
   export async function installDataverseGitExtension(
     workspaceHandle: FileSystemDirectoryHandle,
     rootUri: vscodeType.Uri,
+    options?: {
+      credentialStore?: GitCredentialStore
+    },
   ): Promise<DataverseGitScmController> {
     if (installedController != null) {
       return installedController
     }
+
+    /*
+     * Credentials are prompted lazily the first time a remote operation needs
+     * them and then cached in secret storage per remote host.
+     */
+    const promptForCredentials: GitCredentialPrompt = async () => {
+      const username = await vscode.window.showInputBox({
+        title: 'Git Remote Credentials',
+        prompt: 'Enter the credential username. Common values: "x-access-token" (GitHub PAT), "oauth2" (GitLab PAT).',
+        ignoreFocusOut: true,
+      })
+
+      if (username == null) {
+        return undefined
+      }
+
+      const password = await vscode.window.showInputBox({
+        title: 'Git Remote Credentials',
+        prompt: 'Enter the password or personal access token.',
+        password: true,
+        ignoreFocusOut: true,
+      })
+
+      if (password == null) {
+        return undefined
+      }
+
+      return {
+        username: username.trim().length > 0 ? username.trim() : undefined,
+        password,
+      }
+    }
+
+    const credentialProvider: GitCredentialsProvider | undefined =
+      options?.credentialStore != null
+        ? createCredentialProvider(
+            options.credentialStore,
+            promptForCredentials,
+          )
+        : undefined
   
     const { getApi } = registerExtension(
       {
@@ -194,6 +253,34 @@ import {
                 command: 'dataverseGit.showHistory',
                 title: 'Git: Show Commit History',
               },
+              {
+                command: 'dataverseGit.clone',
+                title: 'Git: Clone Repository',
+              },
+              {
+                command: 'dataverseGit.addRemote',
+                title: 'Git: Add Remote',
+              },
+              {
+                command: 'dataverseGit.removeRemote',
+                title: 'Git: Remove Remote',
+              },
+              {
+                command: 'dataverseGit.fetch',
+                title: 'Git: Fetch',
+              },
+              {
+                command: 'dataverseGit.pull',
+                title: 'Git: Pull',
+              },
+              {
+                command: 'dataverseGit.push',
+                title: 'Git: Push',
+              },
+              {
+                command: 'dataverseGit.forgetCredentials',
+                title: 'Git: Forget Stored Remote Credentials',
+              },
             ],
           
             menus: {
@@ -228,6 +315,16 @@ import {
                   when: 'scmProvider == dataverseGit && dataverseGit.isRepository',
                   group: 'navigation@5',
                 },
+                {
+                  command: 'dataverseGit.pull',
+                  when: 'scmProvider == dataverseGit && dataverseGit.isRepository',
+                  group: 'navigation@6',
+                },
+                {
+                  command: 'dataverseGit.push',
+                  when: 'scmProvider == dataverseGit && dataverseGit.isRepository',
+                  group: 'navigation@7',
+                },
               ],
           
               commandPalette: [
@@ -248,6 +345,26 @@ import {
                 },
                 {
                   command: 'dataverseGit.showHistory',
+                  when: 'dataverseGit.isRepository',
+                },
+                {
+                  command: 'dataverseGit.addRemote',
+                  when: 'dataverseGit.isRepository',
+                },
+                {
+                  command: 'dataverseGit.removeRemote',
+                  when: 'dataverseGit.isRepository',
+                },
+                {
+                  command: 'dataverseGit.fetch',
+                  when: 'dataverseGit.isRepository',
+                },
+                {
+                  command: 'dataverseGit.pull',
+                  when: 'dataverseGit.isRepository',
+                },
+                {
+                  command: 'dataverseGit.push',
                   when: 'dataverseGit.isRepository',
                 },
               ],
@@ -927,6 +1044,346 @@ import {
         },
       )
       
+      /*
+       * Remote selection helper: quick pick among configured remotes, or
+       * prompt to create one if none exist. Returns undefined if the user
+       * cancels or the remote was created (re-enter via quick pick).
+       */
+      async function selectRemoteForSync(
+        operationTitle: string,
+        operationKey: 'pull' | 'push',
+      ): Promise<string | undefined> {
+        const remotes = await listRemotes(workspaceHandle)
+
+        if (remotes.length === 0) {
+          await vscode.window.showWarningMessage(
+            `Add a remote before ${operationKey === 'pull' ? 'pulling' : 'pushing'}. Use "Git: Add Remote".`,
+          )
+
+          return undefined
+        }
+
+        if (remotes.length === 1) {
+          return remotes[0].name
+        }
+
+        const selected = await vscode.window.showQuickPick(
+          remotes.map((remote) => ({
+            label: remote.name,
+            description: remote.url,
+            name: remote.name,
+          })),
+          {
+            title: operationTitle,
+            placeHolder: 'Select a remote.',
+            ignoreFocusOut: true,
+          },
+        )
+
+        return selected?.name
+      }
+
+      const cloneCommand = vscode.commands.registerCommand(
+        'dataverseGit.clone',
+        async () => {
+          const remoteUrl = await vscode.window.showInputBox({
+            title: 'Clone Git Repository',
+            prompt: 'Enter the HTTPS remote URL to clone.',
+            placeHolder: 'https://gitlab.com/user/repo.git',
+            ignoreFocusOut: true,
+          })
+
+          if (remoteUrl == null || remoteUrl.trim().length === 0) {
+            return
+          }
+
+          const confirmation = await vscode.window.showWarningMessage(
+            `Clone "${remoteUrl.trim()}" into the current workspace folder? Opening a non-empty workspace will mix the clone with existing files.`,
+            {
+              modal: true,
+            },
+            'Clone Here',
+          )
+
+          if (confirmation !== 'Clone Here') {
+            return
+          }
+
+          await vscode.window.withProgress(
+            {
+              location: vscode.ProgressLocation.Notification,
+              title: 'Cloning repository…',
+              cancellable: false,
+            },
+            async () => {
+              await cloneRepository(workspaceHandle, remoteUrl.trim(), {
+                credentialsProvider: credentialProvider,
+                depth: 50,
+              })
+
+              await refresh()
+            },
+          )
+
+          await vscode.window.showInformationMessage(
+            `Cloned "${remoteUrl.trim()}" into the workspace.`,
+          )
+        },
+      )
+
+      const addRemoteCommand = vscode.commands.registerCommand(
+        'dataverseGit.addRemote',
+        async () => {
+          const remoteName =
+            (await vscode.window.showInputBox({
+              title: 'Add Git Remote',
+              prompt: 'Enter a name for the remote.',
+              value: 'origin',
+              ignoreFocusOut: true,
+            })) ?? undefined
+
+          if (remoteName == null || remoteName.trim().length === 0) {
+            return
+          }
+
+          const remoteUrl = await vscode.window.showInputBox({
+            title: 'Add Git Remote',
+            prompt: 'Enter the HTTPS URL of the remote repository.',
+            placeHolder: 'https://github.com/user/repo.git',
+            ignoreFocusOut: true,
+          })
+
+          if (remoteUrl == null || remoteUrl.trim().length === 0) {
+            return
+          }
+
+          try {
+            await addRemote(
+              workspaceHandle,
+              remoteName.trim(),
+              remoteUrl.trim(),
+            )
+
+            await refresh()
+
+            await vscode.window.showInformationMessage(
+              `Added remote "${remoteName.trim()}" -> ${remoteUrl.trim()}.`,
+            )
+          } catch (error) {
+            await vscode.window.showErrorMessage(
+              error instanceof Error
+                ? `Unable to add remote: ${error.message}`
+                : 'Unable to add remote.',
+            )
+          }
+        },
+      )
+
+      const removeRemoteCommand = vscode.commands.registerCommand(
+        'dataverseGit.removeRemote',
+        async () => {
+          try {
+            const remotes = await listRemotes(workspaceHandle)
+
+            if (remotes.length === 0) {
+              await vscode.window.showInformationMessage(
+                'This repository has no remotes configured.',
+              )
+
+              return
+            }
+
+            const selected = await vscode.window.showQuickPick(
+              remotes.map((remote: GitRemote) => ({
+                label: remote.name,
+                description: remote.url,
+                name: remote.name,
+              })),
+              {
+                title: 'Remove Git Remote',
+                placeHolder: 'Select a remote to remove.',
+                ignoreFocusOut: true,
+              },
+            )
+
+            if (selected == null) {
+              return
+            }
+
+            await deleteRemote(workspaceHandle, selected.name)
+
+            await refresh()
+
+            await vscode.window.showInformationMessage(
+              `Removed remote "${selected.name}".`,
+            )
+          } catch (error) {
+            await vscode.window.showErrorMessage(
+              error instanceof Error
+                ? `Unable to remove remote: ${error.message}`
+                : 'Unable to remove remote.',
+            )
+          }
+        },
+      )
+
+      const fetchCommand = vscode.commands.registerCommand(
+        'dataverseGit.fetch',
+        async () => {
+          if (credentialProvider == null) {
+            await vscode.window.showWarningMessage(
+              'Git remote credentials are not configured for this workspace type.',
+            )
+
+            return
+          }
+
+          const remoteName = await selectRemoteForSync('Git: Fetch', 'pull')
+
+          if (remoteName == null) {
+            return
+          }
+
+          await vscode.window.withProgress(
+            {
+              location: vscode.ProgressLocation.Notification,
+              title: `Fetching from ${remoteName}…`,
+              cancellable: false,
+            },
+            async () => {
+              await fetchRemote(workspaceHandle, remoteName, {
+                credentialsProvider: credentialProvider,
+              })
+            },
+          )
+
+          await vscode.window.showInformationMessage(
+            `Fetched from "${remoteName}".`,
+          )
+        },
+      )
+
+      const pullCommand = vscode.commands.registerCommand(
+        'dataverseGit.pull',
+        async () => {
+          if (credentialProvider == null) {
+            await vscode.window.showWarningMessage(
+              'Git remote credentials are not configured for this workspace type.',
+            )
+
+            return
+          }
+
+          const remoteName = await selectRemoteForSync('Git: Pull', 'pull')
+
+          if (remoteName == null) {
+            return
+          }
+
+          await vscode.window.withProgress(
+            {
+              location: vscode.ProgressLocation.Notification,
+              title: `Pulling from ${remoteName}…`,
+              cancellable: false,
+            },
+            async () => {
+              await pullRemote(workspaceHandle, remoteName, {
+                credentialsProvider: credentialProvider,
+                fastForwardOnly: true,
+              })
+
+              await refresh()
+            },
+          )
+
+          await vscode.window.showInformationMessage(
+            `Pulled from "${remoteName}".`,
+          )
+        },
+      )
+
+      const pushCommand = vscode.commands.registerCommand(
+        'dataverseGit.push',
+        async () => {
+          if (credentialProvider == null) {
+            await vscode.window.showWarningMessage(
+              'Git remote credentials are not configured for this workspace type.',
+            )
+
+            return
+          }
+
+          const remoteName = await selectRemoteForSync('Git: Push', 'push')
+
+          if (remoteName == null) {
+            return
+          }
+
+          await vscode.window.withProgress(
+            {
+              location: vscode.ProgressLocation.Notification,
+              title: `Pushing to ${remoteName}…`,
+              cancellable: false,
+            },
+            async () => {
+              await pushRemote(workspaceHandle, remoteName, {
+                credentialsProvider: credentialProvider,
+              })
+            },
+          )
+
+          await vscode.window.showInformationMessage(
+            `Pushed to "${remoteName}".`,
+          )
+        },
+      )
+
+      const forgetCredentialsCommand = vscode.commands.registerCommand(
+        'dataverseGit.forgetCredentials',
+        async () => {
+          if (options?.credentialStore == null) {
+            await vscode.window.showInformationMessage(
+              'No secret storage is available in this workspace mode.',
+            )
+
+            return
+          }
+
+          const remotes = await listRemotes(workspaceHandle)
+
+          if (remotes.length === 0) {
+            await vscode.window.showInformationMessage(
+              'Add a remote first to know which credentials to forget.',
+            )
+
+            return
+          }
+
+          const selected = await vscode.window.showQuickPick(
+            remotes.map((remote: GitRemote) => ({
+              label: remote.name,
+              description: remote.url,
+              url: remote.url,
+            })),
+            {
+              title: 'Forget Stored Remote Credentials',
+              placeHolder: 'Select the remote whose credentials should be forgotten.',
+              ignoreFocusOut: true,
+            },
+          )
+
+          if (selected == null) {
+            return
+          }
+
+          await forgetCredentials(options.credentialStore, selected.url)
+
+          await vscode.window.showInformationMessage(
+            `Forgotten stored credentials for "${selected.url}".`,
+          )
+        },
+      )
+
       sourceControl.acceptInputCommand = {
         command: 'dataverseGit.commit',
         title: 'Commit',
@@ -970,6 +1427,13 @@ import {
         switchBranchCommand.dispose()
         deleteBranchCommand.dispose()
         showHistoryCommand.dispose()
+        cloneCommand.dispose()
+        addRemoteCommand.dispose()
+        removeRemoteCommand.dispose()
+        fetchCommand.dispose()
+        pullCommand.dispose()
+        pushCommand.dispose()
+        forgetCredentialsCommand.dispose()
       
         sourceControl.dispose()
       
@@ -979,3 +1443,34 @@ import {
   
     return installedController
   }
+
+import type { ExtensionContext, IdeExtension } from '../api.js'
+import type { GitCredentialStore } from './credentials.js'
+
+/*
+ * Registry adapter: the original install function is preserved for direct
+ * callers, but the extension registry activates features through `default`.
+ */
+export default {
+  id: 'git',
+
+  async activate(context: ExtensionContext): Promise<void> {
+    const handle = context.workspaceDirectoryHandle
+
+    if (handle == null) {
+      throw new Error(
+        'The git extension requires a local workspace directory handle.',
+      )
+    }
+
+    const credentialStore: GitCredentialStore = {
+      get: (key) => context.secrets.get(key),
+      set: (key, value) => context.secrets.set(key, value),
+      remove: (key) => context.secrets.remove(key),
+    }
+
+    await installDataverseGitExtension(handle, context.workspaceRootUri, {
+      credentialStore,
+    })
+  },
+} satisfies IdeExtension

@@ -1026,3 +1026,262 @@ export async function installDataverseUploadExtension(
         },
     }
 }
+
+import type { ExtensionContext, IdeExtension } from '../api.js'
+
+import {
+  contributeExtensionManifest,
+} from '../api.js'
+
+import * as vscodeTypeBottom from 'vscode'
+
+/*
+ * Registry adapter: the original install function is preserved for direct
+ * callers, but the extension registry activates features through `default`.
+ */
+
+const CONFIG_SECTION_BOTTOM = 'dataverseWebResources'
+
+type SettingsTreeKey =
+  | 'prefix'
+  | 'solution'
+  | 'uploadRoot'
+  | 'publishAfterUpload'
+  | 'apiBaseUrl'
+  | 'files'
+  | 'exclude'
+
+type BottomSettings = {
+  prefix: string
+  solution?: string
+  uploadRoot: string
+  publishAfterUpload: boolean
+  apiBaseUrl?: string
+  files: string[]
+  exclude: string[]
+}
+
+class DataverseSettingsProvider
+  implements vscodeTypeBottom.TreeDataProvider<{ key: SettingsTreeKey; label: string }>{
+  private readonly onDidChangeEmitter = new vscodeTypeBottom.EventEmitter<{ key: SettingsTreeKey; label: string } | undefined>()
+
+  readonly onDidChangeTreeData: vscodeTypeBottom.Event<{ key: SettingsTreeKey; label: string } | undefined> = this.onDidChangeEmitter.event
+
+  constructor(
+    private readonly vscode: typeof vscodeTypeBottom,
+    private readonly rootUri: vscodeTypeBottom.Uri,
+  ) {}
+
+  refresh(): void {
+    this.onDidChangeEmitter.fire(undefined)
+  }
+
+  private readSettings(): BottomSettings {
+    const config = this.vscode.workspace.getConfiguration(
+      CONFIG_SECTION_BOTTOM,
+      this.rootUri,
+    )
+
+    return {
+      prefix: config.get<string>('prefix', ''),
+      solution: config.get<string>('solution', '') || undefined,
+      uploadRoot: config.get<string>('uploadRoot', ''),
+      publishAfterUpload: config.get<boolean>('publishAfterUpload', true),
+      apiBaseUrl: config.get<string>('apiBaseUrl', '') || undefined,
+      files: config.get<string[]>('files', []),
+      exclude: config.get<string[]>('exclude', []),
+    }
+  }
+
+  async getChildren(): Promise<{ key: SettingsTreeKey; label: string }[]> {
+    const settings = this.readSettings()
+
+    return [
+      {
+        key: 'prefix',
+        label: `Web Resource Prefix: ${settings.prefix === '' ? '(not set)' : settings.prefix}`,
+      },
+      {
+        key: 'solution',
+        label: `Solution: ${settings.solution ?? '(default solution)'}`,
+      },
+      {
+        key: 'uploadRoot',
+        label: `Upload Root: ${settings.uploadRoot === '' ? '(workspace root)' : settings.uploadRoot}`,
+      },
+      {
+        key: 'publishAfterUpload',
+        label: `Publish After Upload: ${settings.publishAfterUpload ? 'on' : 'off'}`,
+      },
+      {
+        key: 'apiBaseUrl',
+        label: `API Base URL Override: ${settings.apiBaseUrl ?? '(org default)'}`,
+      },
+      {
+        key: 'files',
+        label: `Include Patterns: ${settings.files.join(', ')}`,
+      },
+      {
+        key: 'exclude',
+        label: `Exclude Patterns: ${settings.exclude.length === 0 ? '(none)' : settings.exclude.join(', ')}`,
+      },
+    ]
+  }
+
+  getTreeItem(element: { key: SettingsTreeKey; label: string }): vscodeTypeBottom.TreeItem {
+    const item = new this.vscode.TreeItem(
+      element.label,
+      this.vscode.TreeItemCollapsibleState.None,
+    )
+
+    item.command = {
+      command: 'dataverseIde.dataverse.settingClick',
+      title: 'Edit Dataverse setting',
+      arguments: [element.key],
+    }
+
+    return item
+  }
+}
+
+export default {
+  id: 'dataverse',
+
+  async activate(context: ExtensionContext): Promise<void> {
+    const handle = context.workspaceDirectoryHandle
+
+    if (handle == null) {
+      throw new Error(
+        'The dataverse extension currently requires a local workspace directory handle.',
+      )
+    }
+
+    const vscodeBottom: typeof vscodeTypeBottom = context.vscode
+
+    await contributeExtensionManifest({
+      id: 'dataverse',
+      displayName: 'Dataverse IDE Dataverse',
+      description: 'Web resource upload and settings management.',
+      commands: [
+        {
+          command: 'dataverseIde.dataverse.settingClick',
+          title: 'Dataverse: Edit Web Resource Settings…',
+        },
+      ],
+      views: {
+        containerId: 'dataverseIde',
+        containerTitle: 'Dataverse IDE',
+        views: [
+          {
+            id: 'dataverseIde.dataverse.settings',
+            name: 'Dataverse Settings',
+          },
+        ],
+      },
+    })
+
+    const settingsClickCommand =
+        vscodeBottom.commands.registerCommand(
+          'dataverseIde.dataverse.settingClick',
+          async (key: SettingsTreeKey) => {
+            const config = vscodeBottom.workspace.getConfiguration(
+              CONFIG_SECTION_BOTTOM,
+              context.workspaceRootUri,
+            )
+
+            if (key === 'publishAfterUpload') {
+              const current = config.get<boolean>('publishAfterUpload', true)
+
+              await config.update(
+                'publishAfterUpload',
+                !current,
+                vscodeBottom.ConfigurationTarget.Workspace,
+              )
+
+              dataverseSettingsProvider.refresh()
+
+              return
+            }
+
+            if (key === 'files' || key === 'exclude') {
+              const current = config.get<string[]>(key, [])
+
+              const text = await vscodeBottom.window.showInputBox({
+                title: `Dataverse: ${key === 'files' ? 'Include' : 'Exclude'} Patterns`,
+                prompt: 'Comma-separated glob patterns.',
+                value: current.join(', '),
+                ignoreFocusOut: true,
+              })
+
+              if (text == null) {
+                return
+              }
+
+              await config.update(
+                key,
+                text
+                  .split(',')
+                  .map((pattern) => pattern.trim())
+                  .filter((pattern) => pattern.length > 0),
+                vscodeBottom.ConfigurationTarget.Workspace,
+              )
+
+              dataverseSettingsProvider.refresh()
+
+              return
+            }
+
+            const prompts: Record<Exclude<SettingsTreeKey, 'publishAfterUpload' | 'files' | 'exclude'>, string> = {
+              prefix: 'Publisher prefix ending in an underscore, e.g. dv_/ide',
+              solution: 'Unique name of the target solution (empty = default)',
+              uploadRoot: 'Directory (relative to workspace root) to upload',
+              apiBaseUrl: 'Override the Dataverse API base URL (usually leave empty)',
+            }
+
+            const value = await vscodeBottom.window.showInputBox({
+              title: 'Dataverse: Web Resource Settings',
+              prompt: prompts[key as 'prefix'],
+              value: config.get<string>(key as 'prefix', ''),
+              ignoreFocusOut: true,
+            })
+
+            if (value == null) {
+              return
+            }
+
+            await config.update(
+              key as 'prefix',
+              value.trim(),
+              vscodeBottom.ConfigurationTarget.Workspace,
+            )
+
+            dataverseSettingsProvider.refresh()
+          },
+        )
+
+    const dataverseSettingsProvider = new DataverseSettingsProvider(
+      vscodeBottom,
+      context.workspaceRootUri,
+    )
+
+    const settingsTreeRegistration =
+        vscodeBottom.window.registerTreeDataProvider(
+          'dataverseIde.dataverse.settings',
+          dataverseSettingsProvider,
+        )
+
+    const configChangeWatcher = vscodeBottom.workspace.onDidChangeConfiguration(
+      (event) => {
+        if (event.affectsConfiguration(CONFIG_SECTION_BOTTOM)) {
+          dataverseSettingsProvider.refresh()
+        }
+      },
+    )
+
+    void settingsClickCommand
+    void settingsTreeRegistration
+    void configChangeWatcher
+
+    await installDataverseUploadExtension(context.workspaceRootUri)
+  },
+} satisfies IdeExtension

@@ -29,7 +29,7 @@ import * as vscode from 'vscode'
 import { rootUri } from './fsProvider.js'
 import getBulkEditServiceOverride from '@codingame/monaco-vscode-bulk-edit-service-override'
 import getWorkspaceTrustServiceOverride from '@codingame/monaco-vscode-workspace-trust-service-override'
-// import getViewsServiceOverride from '@codingame/monaco-vscode-views-service-override'
+import getViewsServiceOverride from '@codingame/monaco-vscode-views-service-override'
 import getEmmetServiceOverride from '@codingame/monaco-vscode-emmet-service-override'
 import getSecretStorageServiceOverride from '@codingame/monaco-vscode-secret-storage-service-override'
 // import getTerminalServiceOverride from '@codingame/monaco-vscode-terminal-service-override'
@@ -49,16 +49,12 @@ import outputLinkComputerWorkerUrl from '@codingame/monaco-vscode-output-service
 import outputLinkDetectionWorkerUrl from '@codingame/monaco-vscode-output-service-override/worker?worker&url'
 
 import {
-  installDataverseGitExtension,
-} from './git/dataverseGitExtension.js'
+  activateExtensions,
+} from './extensions/registry.js'
 
 import {
   workspaceDirectoryHandle,
 } from './fsProvider.js'
-
-import {
-  installDataverseUploadExtension,
-} from './dataverse/dataverseUploadExtension.js'
 
 const workerUrls: Record<string, string> = {
   editorWorkerService: editorWorkerUrl,
@@ -429,6 +425,7 @@ export async function startWorkbench(
       // LLM endpoints) - present for completeness, mostly inert in-browser
       // ...getTerminalServiceOverride(),
       ...getSCMServiceOverride(),
+      ...getViewsServiceOverride(),
       // ...getDebugServiceOverride(),
 
       ...getLocalizationServiceOverride({
@@ -481,20 +478,17 @@ export async function startWorkbench(
 
   const autoSaveDisposable = installDocumentAutoSave(1000);
 
-  const gitScmController = await installDataverseGitExtension(
+  const extensionsDisposable = await activateExtensions({
+    vscode,
+    workspaceRootUri: rootUri,
     workspaceDirectoryHandle,
-    rootUri,
-  )
-
-  const dataverseUploadController =
-  await installDataverseUploadExtension(rootUri)
+  })
 
   window.addEventListener(
     'beforeunload',
     () => {
       autoSaveDisposable.dispose();
-      gitScmController.dispose(),
-      dataverseUploadController.dispose()
+      extensionsDisposable.dispose()
     },
     { once: true },
   );

@@ -1,8 +1,14 @@
-import * as git from 'isomorphic-git'
+﻿import * as git from 'isomorphic-git'
+
+/*
+ * Browser HTTP transport for the smart git protocol (used by clone/fetch/
+ * push/pull; typings require it explicitly).
+ */
+import webHttp from 'isomorphic-git/http/web'
 
 import {
   createFileSystemAccessGitFs,
-} from './fileSystemAccessGitFs.js'
+} from './gitFs.js'
 
 const GIT_DIR = '/'
 const GIT_METADATA_DIR = '/.git'
@@ -60,6 +66,27 @@ export type GitBranch = {
     authorEmail: string
     timestamp: number
   }
+
+export type GitCredentials = {
+  username?: string
+  password?: string
+}
+
+export type GitCredentialsProvider = (
+  url: string,
+) => Promise<GitCredentials>
+
+export type GitRemote = {
+  name: string
+  url: string
+}
+
+export type GitRemoteSyncResult = {
+  remote: string
+  url: string
+  fetchedRef?: string
+  pushedRef?: string
+}
 
 function getStatus(
   head: number,
@@ -552,5 +579,304 @@ export async function initializeRepository(
        * An initialized repository with no initial commit has no log yet.
        */
       return []
+    }
+  }
+
+  export async function listRemotes(
+    workspaceHandle: FileSystemDirectoryHandle,
+  ): Promise<GitRemote[]> {
+    await ensureRepository(workspaceHandle)
+
+    const fs = getFs(workspaceHandle)
+
+    const remotes = await git.listRemotes({
+      fs,
+      dir: GIT_DIR,
+      gitdir: GIT_METADATA_DIR,
+    })
+
+    return remotes.map((entry) => ({
+      name: entry.remote,
+      url: entry.url,
+    }))
+  }
+
+  export async function getRemoteUrl(
+    workspaceHandle: FileSystemDirectoryHandle,
+    remoteName: string,
+  ): Promise<string | undefined> {
+    await ensureRepository(workspaceHandle)
+
+    const fs = getFs(workspaceHandle)
+
+    try {
+      return await git.getConfig({
+        fs,
+        dir: GIT_DIR,
+        gitdir: GIT_METADATA_DIR,
+        path: `remote.${remoteName}.url`,
+      })
+    } catch {
+      return undefined
+    }
+  }
+
+  export async function addRemote(
+    workspaceHandle: FileSystemDirectoryHandle,
+    remoteName: string,
+    remoteUrl: string,
+  ): Promise<void> {
+    await ensureRepository(workspaceHandle)
+
+    const name = remoteName.trim()
+
+    if (name.length === 0) {
+      throw new Error('A remote name is required.')
+    }
+
+    if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+      throw new Error(
+        'The remote name may only contain letters, digits, ".", "_" and "-".',
+      )
+    }
+
+    const url = validateRemoteUrl(remoteUrl)
+
+    const fs = getFs(workspaceHandle)
+
+    await git.addRemote({
+      fs,
+      dir: GIT_DIR,
+      gitdir: GIT_METADATA_DIR,
+      remote: name,
+      url,
+    })
+  }
+
+  export async function deleteRemote(
+    workspaceHandle: FileSystemDirectoryHandle,
+    remoteName: string,
+  ): Promise<void> {
+    await ensureRepository(workspaceHandle)
+
+    const fs = getFs(workspaceHandle)
+
+    await git.deleteRemote({
+      fs,
+      dir: GIT_DIR,
+      gitdir: GIT_METADATA_DIR,
+      remote: remoteName,
+    })
+  }
+
+  function validateRemoteUrl(value: string): string {
+    const url = value.trim()
+
+    if (url.length === 0) {
+      throw new Error('A remote URL is required.')
+    }
+
+    let parsed: URL
+
+    try {
+      parsed = new URL(url)
+    } catch {
+      throw new Error(
+        'The remote URL must be an absolute HTTPS (or HTTP localhost) URL.',
+      )
+    }
+
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      throw new Error(
+        'Only HTTPS remote URLs are supported in the browser.',
+      )
+    }
+
+    return url
+  }
+
+  async function createOnAuth(
+    credentialsProvider: GitCredentialsProvider,
+  ): Promise<(url: string) => Promise<GitCredentials>> {
+    return async (url) => {
+      try {
+        return await credentialsProvider(url)
+      } catch {
+        /*
+         * Returning undefined lets isomorphic-git fall back to anonymous
+         * access for public repositories.
+         */
+        return {}
+      }
+    }
+  }
+
+  export async function cloneRepository(
+    workspaceHandle: FileSystemDirectoryHandle,
+    remoteUrl: string,
+    options?: {
+      credentialsProvider?: GitCredentialsProvider
+      depth?: number
+      ref?: string
+    },
+  ): Promise<string> {
+    const url = validateRemoteUrl(remoteUrl)
+
+    const fs = getFs(workspaceHandle)
+
+    const onAuth =
+      options?.credentialsProvider != null
+        ? await createOnAuth(options.credentialsProvider)
+        : undefined
+
+    await git.clone({
+      fs,
+      http: webHttp,
+      dir: GIT_DIR,
+      gitdir: GIT_METADATA_DIR,
+      url,
+      ref: options?.ref,
+      depth: options?.depth,
+      singleBranch: true,
+      noCheckout: false,
+      onAuth,
+      
+    })
+
+    return url
+  }
+
+  export async function fetchRemote(
+    workspaceHandle: FileSystemDirectoryHandle,
+    remoteName: string,
+    options?: {
+      credentialsProvider?: GitCredentialsProvider
+    },
+  ): Promise<GitRemoteSyncResult> {
+    await ensureRepository(workspaceHandle)
+
+    const url = await getRemoteUrl(workspaceHandle, remoteName)
+
+    if (url == null) {
+      throw new Error(`Remote "${remoteName}" is not configured.`)
+    }
+
+    const fs = getFs(workspaceHandle)
+
+    const onAuth =
+      options?.credentialsProvider != null
+        ? await createOnAuth(options.credentialsProvider)
+        : undefined
+
+    await git.fetch({
+      http: webHttp,
+      fs,
+      dir: GIT_DIR,
+      gitdir: GIT_METADATA_DIR,
+      remote: remoteName,
+      url,
+      onAuth,
+      
+    })
+
+    return {
+      remote: remoteName,
+      url,
+    }
+  }
+
+  export async function pullRemote(
+    workspaceHandle: FileSystemDirectoryHandle,
+    remoteName: string,
+    options?: {
+      credentialsProvider?: GitCredentialsProvider
+      fastForwardOnly?: boolean
+    },
+  ): Promise<GitRemoteSyncResult> {
+    await ensureRepository(workspaceHandle)
+    await ensureInitialCommit(workspaceHandle)
+
+    const fetched = await fetchRemote(workspaceHandle, remoteName, options)
+
+    const fs = getFs(workspaceHandle)
+    const branch = await git.currentBranch({
+      fs,
+      dir: GIT_DIR,
+      gitdir: GIT_METADATA_DIR,
+      fullname: false,
+    })
+
+    if (branch == null) {
+      throw new Error('The repository has no current branch to pull into.')
+    }
+
+    await git.fastForward({
+      http: webHttp,
+      fs,
+      dir: GIT_DIR,
+      gitdir: GIT_METADATA_DIR,
+      remote: remoteName,
+      ref: branch,
+      
+    })
+
+    return {
+      ...fetched,
+      fetchedRef: `refs/heads/${branch}`,
+    }
+  }
+
+  export async function pushRemote(
+    workspaceHandle: FileSystemDirectoryHandle,
+    remoteName: string,
+    options?: {
+      credentialsProvider?: GitCredentialsProvider
+      force?: boolean
+    },
+  ): Promise<GitRemoteSyncResult> {
+    await ensureRepository(workspaceHandle)
+    await ensureInitialCommit(workspaceHandle)
+
+    const url = await getRemoteUrl(workspaceHandle, remoteName)
+
+    if (url == null) {
+      throw new Error(`Remote "${remoteName}" is not configured.`)
+    }
+
+    const fs = getFs(workspaceHandle)
+    const branch = await git.currentBranch({
+      fs,
+      dir: GIT_DIR,
+      gitdir: GIT_METADATA_DIR,
+      fullname: false,
+    })
+
+    if (branch == null) {
+      throw new Error('The repository has no current branch to push.')
+    }
+
+    const onAuth =
+      options?.credentialsProvider != null
+        ? await createOnAuth(options.credentialsProvider)
+        : undefined
+
+    await git.push({
+      http: webHttp,
+      fs,
+      dir: GIT_DIR,
+      gitdir: GIT_METADATA_DIR,
+      remote: remoteName,
+      url,
+      ref: branch,
+      remoteRef: branch,
+      force: options?.force ?? false,
+      onAuth,
+      
+    })
+
+    return {
+      remote: remoteName,
+      url,
+      pushedRef: `refs/heads/${branch}`,
     }
   }

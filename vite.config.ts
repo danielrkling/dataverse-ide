@@ -47,12 +47,166 @@ const forcePreventTransformAssets: Plugin = {
   }
 }
 
+/*
+ * Webresource wasm embedding.
+ *
+ * Dataverse web resources cannot host .wasm files, so the esbuild and
+ * rolldown workers obtain their compiler binaries through virtual modules
+ * that embed the binaries at build time (kept out of the global
+ * assetsInlineLimit - raising that would also inline tsserver's large JS
+ * assets). All three virtual modules are created here:
+ *
+ *   virtual:esbuild-wasm-binary        esbuild.wasm as a base64 string
+ *   virtual:rolldown-wasm-data-url     rolldown wasm as a data URL (fetched)
+ *   virtual:rolldown-wasi-inline-worker  wasi thread worker as an inline
+ *                                        blob-worker factory string
+ *
+ * rolldown ships a browser glue (rolldown-binding.wasi-browser.js, napi-rs
+ * wasi) whose wasm/worker references are plain `new URL(..., import.meta.url)`
+ * patterns. The transform hook below rewrites those references onto the
+ * virtual modules; if the glue's source patterns change upstream, the hook
+ * errors instead of silently emitting separate asset files.
+ */
+const webResourceWasmInline: Plugin = {
+  name: 'dataverse-ide-wasm-inline',
+  resolveId(id: string) {
+    if (
+      id === 'virtual:esbuild-wasm-binary' ||
+      id === 'virtual:rolldown-wasm-data-url' ||
+      id === 'virtual:rolldown-wasi-inline-worker' ||
+      id === 'virtual:brotli-wasm-data-url' ||
+      id === 'virtual:rolldown-wasi-worker-factory'
+    ) {
+      if (id === 'virtual:rolldown-wasi-worker-factory') {
+        return path.resolve(
+          import.meta.dirname,
+          'src/extensions/rolldown/inlineWorkerFactory.ts',
+        )
+      }
+
+      return id
+    }
+
+    return null
+  },
+  load(id: string) {
+    if (id === 'virtual:esbuild-wasm-binary') {
+      const wasmPath = path.join(
+        import.meta.dirname,
+        'node_modules/esbuild-wasm/esbuild.wasm',
+      )
+
+      const base64 = fs.readFileSync(wasmPath).toString('base64')
+
+      return `export default ${JSON.stringify(base64)}`
+    }
+
+    if (id === 'virtual:rolldown-wasm-data-url') {
+      const wasmPath = path.join(
+        import.meta.dirname,
+        'node_modules/@rolldown/binding-wasm32-wasi/rolldown-binding.wasm32-wasi.wasm',
+      )
+
+      const base64 = fs.readFileSync(wasmPath).toString('base64')
+
+      return `export default ${JSON.stringify(`data:application/wasm;base64,${base64}`)}`
+    }
+
+    if (id === 'virtual:brotli-wasm-data-url') {
+      const wasmPath = path.join(
+        import.meta.dirname,
+        'node_modules/brotli-wasm/pkg.web/brotli_wasm_bg.wasm',
+      )
+
+      const base64 = fs.readFileSync(wasmPath).toString('base64')
+
+      return `export default ${JSON.stringify(`data:application/wasm;base64,${base64}`)}`
+    }
+
+    if (id === 'virtual:rolldown-wasi-inline-worker') {
+      const workerPath = path.resolve(
+        import.meta.dirname,
+        'node_modules/@rolldown/binding-wasm32-wasi/wasi-worker-browser.mjs',
+      )
+
+      const workerCode = fs.readFileSync(workerPath).toString('utf8')
+
+      return `export default ${JSON.stringify(workerCode)}`
+    }
+
+    return null
+  },
+  transform(code: string, id: string) {
+    const normalizedId = id.replaceAll('\\', '/')
+
+    if (normalizedId.endsWith('rolldown-binding.wasi-browser.js')) {
+      const patched = code
+        .replace(
+          /const __wasmUrl = new URL\(.+?\.href/,
+          'const __wasmUrl = __rolldownWasmDataUrl',
+        )
+        .replace(
+          /new Worker\(new URL\('.?@rolldown\/binding-wasm32-wasi\/wasi-worker-browser\.mjs', import\.meta\.url\)/,
+          'new Worker(__rolldownWasiBlobUrl ',
+        )
+
+      if (patched === code) {
+        this.error(
+          'rolldown-binding.wasi-browser.js reference patterns changed; update the vite-config wasm inliner.',
+        )
+      }
+
+      const preamble =
+        "import __rolldownWasmDataUrl from 'virtual:rolldown-wasm-data-url'\n" +
+        "import __rolldownWasiWorkerCode from 'virtual:rolldown-wasi-inline-worker'\n" +
+        "import { createNapiWasiWorkerBlobUrl as __createNapiWasiWorkerBlobUrl } from 'virtual:rolldown-wasi-worker-factory'\n" +
+        'const __rolldownWasiBlobUrl = __createNapiWasiWorkerBlobUrl(__rolldownWasiWorkerCode)\n'
+
+      return {
+        code: preamble + patched,
+        map: null,
+      }
+    }
+
+    if (normalizedId.endsWith('pkg.web/brotli_wasm.js')) {
+      const patched = code.replace(
+        /input = new URL\('brotli_wasm_bg\.wasm', import\.meta\.url\);/,
+        'input = __brotliWasmDataUrl;',
+      )
+
+      if (patched === code) {
+        this.error(
+          'brotli-wasm pkg.web reference patterns changed; update the vite-config wasm inliner.',
+        )
+      }
+
+      const preamble =
+        "import __brotliWasmDataUrl from 'virtual:brotli-wasm-data-url'\n"
+
+      return {
+        code: preamble + patched,
+        map: null,
+      }
+    }
+
+    return null
+  },
+}
+
 export default defineConfig({
   // In Dataverse, assets are published as web resources under a path prefix,
   // e.g. DV_BASE=/webresources/dv_/ide
   base: './',
   resolve: {
     alias: [
+      {
+        find: /^node:zlib$/,
+        replacement: path.resolve(import.meta.dirname, 'src/stubs/zlibShim.ts')
+      },
+      {
+        find: /^\/assets\/runtime-worker-[A-Za-z0-9_-]+\.js$/,
+        replacement: path.resolve(import.meta.dirname, 'src/stubs/almostnodeRuntimeWorker.ts')
+      },
       {
         // Optional xterm addon (dynamically imported by the terminal service
         // override) - its node builtin imports break the browser bundle, and
@@ -75,16 +229,24 @@ export default defineConfig({
     //    (relative module specifiers stop resolving)
     // The web resources don't support the `.wasm` type:
     // inline all binary assets (onig.wasm 466KB, diff_wasm_bg.wasm 118KB,
-    // codicon.ttf 153KB) as base64 data URLs into the JS chunks instead
+    // codicon.ttf 153KB) as base64 data URLs into the JS chunks instead.
+    // (esbuild.wasm + the rolldown wasm + its wasi worker are force-inlined
+    // separately through the virtual modules in webResourceWasmInline;
+    // raising this limit globally would also inline tsserver's large JS
+    // assets and produce a >100MB chunk.)
     assetsInlineLimit: 1000000
-    
   },
   worker: {
-    format: 'es'
+    format: 'es',
+    // Worker code is re-bundled with its own plugin list - share the wasm
+    // inliner so the workers can load the virtual wasm modules
+    plugins: () => [webResourceWasmInline],
   },
-  plugins: [configureResponseHeaders, forcePreventTransformAssets],
+  plugins: [configureResponseHeaders, forcePreventTransformAssets, webResourceWasmInline],
   optimizeDeps: {
-    exclude: ['@vscode/diff'],
+    // brotli-wasm's wasm URL reference breaks the dev pre-bundler's
+    // import.meta.resolve; excluded so vite serves/patches it directly
+    exclude: ['@vscode/diff', 'brotli-wasm'],
     esbuildOptions: {
       plugins: [importMetaUrlPlugin]
     }

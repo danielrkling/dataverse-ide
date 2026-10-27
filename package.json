@@ -70,10 +70,16 @@
     "@codingame/monaco-vscode-workspace-trust-service-override": "^38.0.4",
     "@codingame/monaco-vscode-xml-default-extension": "^38.0.4",
     "@codingame/monaco-vscode-yaml-default-extension": "^38.0.4",
+    "@rolldown/binding-wasm32-wasi": "^1.2.15",
+    "@tailwindcss/browser": "^4.3.3",
     "@types/wicg-file-system-access": "^2023.10.7",
+    "almostnode": "^0.2.14",
     "buffer": "^6.0.3",
+    "esbuild-wasm": "^0.25.12",
     "isomorphic-git": "^1.44.4",
     "monaco-editor": "npm:@codingame/monaco-vscode-editor-api@^38.0.4",
+    "rolldown": "^1.2.15",
+    "tailwindcss": "^4.3.3",
     "vscode": "npm:@codingame/monaco-vscode-extension-api@^38.0.4"
   },
   "devDependencies": {
