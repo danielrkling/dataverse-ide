@@ -6,6 +6,9 @@
  *     target?, bundle?, external?, define?, entryNames? }
  *   <- { id, ok, outputs }             (success)
  *   <- { id, ok: false, error }        (failure)
+ *
+ * Workspace source files and text-based npm package files are provided by
+ * the main thread as an in-memory virtual filesystem.
  */
 
 /*
@@ -27,13 +30,31 @@ type BuildRequest = {
   minify?: boolean
   sourcemap?: boolean
   target?: string
-  /** Bundle module graph (default true); false = per-module transpile only. */
+
+  /*
+   * Bundle module graph (default true); false means transpile-only.
+   */
   bundle?: boolean
-  /** Import paths to leave untouched in the output. */
+
+  /*
+   * Bare import paths intentionally left in output.
+   *
+   * Example:
+   *   ["react", "@dataverse/web-api"]
+   */
   external?: string[]
-  /** Build-time constants, e.g. { "process.env.NODE_ENV": "\"production\"" }. */
+
+  /*
+   * Build-time constants.
+   *
+   * Example:
+   *   { "process.env.NODE_ENV": "\"production\"" }
+   */
   define?: Record<string, string>
-  /** Entry-relative or workspace-relative value for entry_names like "[dir]/[name]". */
+
+  /*
+   * Entry-relative or workspace-relative pattern such as "[dir]/[name]".
+   */
   entryNames?: string
 }
 
@@ -44,7 +65,9 @@ type TransformRequest = {
   source: string
 }
 
-export type WorkerRequest = BuildRequest | TransformRequest
+export type WorkerRequest =
+  | BuildRequest
+  | TransformRequest
 
 export type BuildOutputFile = {
   path: string
@@ -64,15 +87,18 @@ type BuildFailureResponse = {
   error: string
 }
 
-type BuildResponse = BuildSuccessResponse | BuildFailureResponse
+type BuildResponse =
+  | BuildSuccessResponse
+  | BuildFailureResponse
 
 let initialization: Promise<void> | undefined
 
 async function ensureInitialized(): Promise<void> {
   if (initialization == null) {
     initialization = (async () => {
-      const bytes = Uint8Array.from(atob(wasmBase64), (character) =>
-        character.charCodeAt(0),
+      const bytes = Uint8Array.from(
+        atob(wasmBase64),
+        (character) => character.charCodeAt(0),
       )
 
       const wasmModule = new WebAssembly.Module(bytes)
@@ -87,6 +113,9 @@ async function ensureInitialized(): Promise<void> {
   await initialization
 }
 
+/*
+ * Source-file resolution order for relative workspace imports.
+ */
 const RESOLVABLE_EXTENSIONS = [
   '',
   '.ts',
@@ -98,37 +127,92 @@ const RESOLVABLE_EXTENSIONS = [
   '.mjs',
   '.cjs',
   '.css',
+  '.json',
 ]
 
 const INDEX_TRAILS = [
   '/index.ts',
   '/index.tsx',
+  '/index.mts',
+  '/index.cts',
   '/index.js',
   '/index.jsx',
   '/index.mjs',
   '/index.cjs',
+  '/index.css',
+  '/index.json',
 ]
 
 /*
- * Extension candidates for package export targets (ESM-first mainly, unlike
- * source files where ts variants come first).
+ * Package resolution order. ESM files come before CommonJS files because
+ * browser bundles should prefer package ESM builds when available.
  */
 const COMPANION_EXTENSIONS = [
   '',
   '.mjs',
   '.js',
+  '.jsx',
   '.cjs',
   '.ts',
   '.tsx',
-  '.jsx',
   '.css',
   '.json',
 ]
 
+/*
+ * Node builtins have no browser implementation in this extension. Leave
+ * them external so a user can provide a browser-compatible shim, or so the
+ * final output visibly identifies that it cannot run standalone in-browser.
+ */
+const NODE_BUILTINS = new Set([
+  'assert',
+  'async_hooks',
+  'buffer',
+  'child_process',
+  'cluster',
+  'console',
+  'constants',
+  'crypto',
+  'dgram',
+  'diagnostics_channel',
+  'dns',
+  'domain',
+  'events',
+  'fs',
+  'http',
+  'http2',
+  'https',
+  'inspector',
+  'module',
+  'net',
+  'os',
+  'path',
+  'perf_hooks',
+  'process',
+  'punycode',
+  'querystring',
+  'readline',
+  'repl',
+  'stream',
+  'string_decoder',
+  'sys',
+  'timers',
+  'tls',
+  'trace_events',
+  'tty',
+  'url',
+  'util',
+  'v8',
+  'vm',
+  'wasi',
+  'worker_threads',
+  'zlib',
+])
+
 function normalizePath(value: string): string {
   const segments: string[] = []
 
-  for (const segment of value.split('/')) {
+  for (const segment of value.replaceAll('\\', '/').split('/')) {
     if (segment.length === 0 || segment === '.') {
       continue
     }
@@ -144,7 +228,7 @@ function normalizePath(value: string): string {
   return segments.join('/')
 }
 
-function getLoaderForPath(path: string): string {
+function getLoaderForPath(path: string): esbuild.Loader {
   if (path.endsWith('.css')) {
     return 'css'
   }
@@ -172,34 +256,36 @@ function getLoaderForPath(path: string): string {
   return 'js'
 }
 
-/*
- * Node builtins cannot run in the browser and have no node_modules
- * counterpart: keep them externalized in the output.
- */
-const NODE_BUILTINS = new Set([
-  'assert', 'async_hooks', 'buffer', 'child_process', 'cluster',
-  'console', 'constants', 'crypto', 'dgram', 'diagnostics_channel',
-  'dns', 'domain', 'events', 'fs', 'http', 'http2', 'https',
-  'inspector', 'module', 'net', 'os', 'path', 'perf_hooks',
-  'process', 'punycode', 'querystring', 'readline', 'repl',
-  'stream', 'string_decoder', 'sys', 'timers', 'tls', 'trace_events',
-  'tty', 'url', 'util', 'v8', 'vm', 'wasi', 'worker_threads', 'zlib',
-])
-
-function parseJsonSafe(text: string): Record<string, unknown> | undefined {
+function parseJsonSafe(
+  text: string,
+): Record<string, unknown> | undefined {
   try {
-    return JSON.parse(text) as Record<string, unknown>
+    const parsed = JSON.parse(text) as unknown
+
+    if (
+      typeof parsed !== 'object' ||
+      parsed == null ||
+      Array.isArray(parsed)
+    ) {
+      return undefined
+    }
+
+    return parsed as Record<string, unknown>
   } catch {
     return undefined
   }
 }
 
 /*
- * Split a bare specifier into package name and subpath.
- *   'lodash'            -> ['node_modules/lodash', '']
- *   'lodash/fp'         -> ['node_modules/lodash', 'fp']
- *   '@scope/pkg'        -> ['node_modules/@scope/pkg', '']
- *   '@scope/pkg/lib'    -> ['node_modules/@scope/pkg', 'lib']
+ * Split a bare import into its node_modules package directory and any
+ * package subpath.
+ *
+ * Examples:
+ *
+ *   lodash                 -> node_modules/lodash, ""
+ *   lodash/fp              -> node_modules/lodash, "fp"
+ *   @scope/pkg             -> node_modules/@scope/pkg, ""
+ *   @scope/pkg/subpath     -> node_modules/@scope/pkg, "subpath"
  */
 function splitPackageSpec(specifier: string): {
   packageDir: string
@@ -212,7 +298,7 @@ function splitPackageSpec(specifier: string): {
     const firstSlash = specifier.indexOf('/')
     const secondSlash = specifier.indexOf('/', firstSlash + 1)
 
-    if (secondSlash === -1) {
+    if (firstSlash === -1 || secondSlash === -1) {
       packageName = specifier
       subpath = ''
     } else {
@@ -238,14 +324,30 @@ function splitPackageSpec(specifier: string): {
 }
 
 /*
- * Resolve an entries-like list against the file map, trimmed of query
- * markers: candidates are tried with common extensions and /index trails.
+ * Resolve a package target such as:
+ *
+ *   "./dist/index.js"
+ *
+ * against:
+ *
+ *   "node_modules/example-package"
+ *
+ * The normalizePath() call is essential. Without it, targets containing "./"
+ * become paths such as:
+ *
+ *   node_modules/example-package/./dist/index.js
+ *
+ * which do not match the normalized paths used as keys in the file map.
  */
 function resolveExportTarget(
   target: string,
   lookup: (path: string) => string | undefined,
 ): string | undefined {
-  const normalized = target.replaceAll('\\', '/').replace(/\/+$/, '')
+  const normalized = normalizePath(
+    target
+      .replaceAll('\\', '/')
+      .replace(/\/+$/, ''),
+  )
 
   if (normalized.length === 0) {
     return undefined
@@ -254,6 +356,33 @@ function resolveExportTarget(
   return lookup(normalized)
 }
 
+/*
+ * Resolve package.json "exports".
+ *
+ * Supports common modern package structures:
+ *
+ * Root string:
+ *   "exports": "./dist/index.js"
+ *
+ * Conditional root export:
+ *   "exports": {
+ *     ".": {
+ *       "browser": "./dist/browser.js",
+ *       "import": "./dist/index.mjs",
+ *       "default": "./dist/index.js"
+ *     }
+ *   }
+ *
+ * Subpath export:
+ *   "exports": {
+ *     "./plugin": "./dist/plugin.js"
+ *   }
+ *
+ * Wildcard subpath export:
+ *   "exports": {
+ *     "./features/*": "./dist/features/*.js"
+ *   }
+ */
 function resolveExportsField(
   exportsField: unknown,
   subpath: string,
@@ -265,9 +394,18 @@ function resolveExportsField(
   }
 
   if (typeof exportsField === 'string') {
-    return subpath.length === 0
-      ? resolveExportTarget(`${pkgDir}/${exportsField}`, lookup)
-      : undefined
+    /*
+     * A direct string exports only the package root. It does not expose
+     * arbitrary package subpaths.
+     */
+    if (subpath.length > 0) {
+      return undefined
+    }
+
+    return resolveExportTarget(
+      `${pkgDir}/${exportsField}`,
+      lookup,
+    )
   }
 
   if (Array.isArray(exportsField)) {
@@ -287,41 +425,151 @@ function resolveExportsField(
     return undefined
   }
 
+  if (
+    typeof exportsField !== 'object' ||
+    Array.isArray(exportsField)
+  ) {
+    return undefined
+  }
+
   const map = exportsField as Record<string, unknown>
-  const keys = Object.keys(map)
 
-  const preferredOrder = ['.', 'import', 'browser', 'module', 'default']
+  const requestedSubpath =
+    subpath.length === 0
+      ? '.'
+      : `./${subpath.replace(/^\.\//, '')}`
 
-  keys.sort(
-    (left, right) =>
-      preferredOrder.indexOf(left) - preferredOrder.indexOf(right) ||
-      left.length - right.length,
+  /*
+   * A map with "." or "./…" keys is a package subpath map. A map without
+   * those keys is normally a conditional export map.
+   */
+  const hasSubpathEntries = Object.keys(map).some(
+    (key) => key === '.' || key.startsWith('./'),
   )
 
-    const normalizedSubpath = subpath.replace(/^\.\//, '')
+  if (hasSubpathEntries) {
+    const directTarget = map[requestedSubpath]
 
-  for (const key of keys) {
-    const normalizedKey = key.replace(/^\.\//, '')
+    if (directTarget != null) {
+      return resolveExportsField(
+        directTarget,
+        '',
+        pkgDir,
+        lookup,
+      )
+    }
 
-    if (
-      normalizedKey === normalizedSubpath ||
-      (normalizedSubpath.length === 0 && normalizedKey === '.')
-    ) {
-      return resolveExportsField(map[key], '', pkgDir, lookup)
+    /*
+     * Basic wildcard support:
+     *
+     *   "./locale/*": "./dist/locale/*.js"
+     */
+    for (const [pattern, target] of Object.entries(map)) {
+      if (!pattern.includes('*')) {
+        continue
+      }
+
+      const wildcardIndex = pattern.indexOf('*')
+      const prefix = pattern.slice(0, wildcardIndex)
+      const suffix = pattern.slice(wildcardIndex + 1)
+
+      if (
+        !requestedSubpath.startsWith(prefix) ||
+        !requestedSubpath.endsWith(suffix)
+      ) {
+        continue
+      }
+
+      const wildcardValue = requestedSubpath.slice(
+        prefix.length,
+        requestedSubpath.length - suffix.length,
+      )
+
+      if (typeof target === 'string') {
+        return resolveExportTarget(
+          `${pkgDir}/${target.replaceAll('*', wildcardValue)}`,
+          lookup,
+        )
+      }
+
+      /*
+       * Conditional wildcard targets are uncommon but valid. This recursive
+       * call resolves a conditional target after replacing its wildcard in
+       * any direct-string branch handled above.
+       */
+      if (
+        typeof target === 'object' &&
+        target != null &&
+        !Array.isArray(target)
+      ) {
+        for (const conditionTarget of Object.values(target)) {
+          if (typeof conditionTarget !== 'string') {
+            continue
+          }
+
+          const resolved = resolveExportTarget(
+            `${pkgDir}/${conditionTarget.replaceAll('*', wildcardValue)}`,
+            lookup,
+          )
+
+          if (resolved != null) {
+            return resolved
+          }
+        }
+      }
+    }
+
+    return undefined
+  }
+
+  /*
+   * Conditional export map.
+   *
+   * Prefer browser-compatible ESM output. "require" remains a final fallback
+   * for packages that expose CommonJS only.
+   */
+  const conditions = [
+    'browser',
+    'import',
+    'module',
+    'default',
+    'require',
+  ]
+
+  for (const condition of conditions) {
+    const target = map[condition]
+
+    if (target == null) {
+      continue
+    }
+
+    const resolved = resolveExportsField(
+      target,
+      '',
+      pkgDir,
+      lookup,
+    )
+
+    if (resolved != null) {
+      return resolved
     }
   }
 
   return undefined
 }
 
-function createPackageResolver(files: Record<string, string>) {
+function createPackageResolver(
+  files: Record<string, string>,
+) {
   function lookup(path: string): string | undefined {
-    if (files[path] != null) {
-      return path
+    const normalized = normalizePath(path)
+
+    if (files[normalized] != null) {
+      return normalized
     }
 
     for (const extension of COMPANION_EXTENSIONS) {
-      const candidate = `${path}${extension}`
+      const candidate = `${normalized}${extension}`
 
       if (files[candidate] != null) {
         return candidate
@@ -329,7 +577,7 @@ function createPackageResolver(files: Record<string, string>) {
     }
 
     for (const trail of INDEX_TRAILS) {
-      const candidate = `${path}${trail}`
+      const candidate = `${normalized}${trail}`
 
       if (files[candidate] != null) {
         return candidate
@@ -339,69 +587,106 @@ function createPackageResolver(files: Record<string, string>) {
     return undefined
   }
 
-  function resolveBareImport(specifier: string): string | undefined {
-    const { packageDir, subpath } = splitPackageSpec(specifier)
+  function resolveBareImport(
+    specifier: string,
+  ): string | undefined {
+    const {
+      packageDir,
+      subpath,
+    } = splitPackageSpec(specifier)
 
     const packageJson = parseJsonSafe(
       files[`${packageDir}/package.json`] ?? '',
     )
 
     if (packageJson != null) {
-      const viaExports = resolveExportsField(
-        packageJson.exports,
-        subpath,
-        packageDir,
-        lookup,
-      )
+      /*
+       * "exports" is authoritative when present. Do not attempt arbitrary
+       * internal paths after an exports map rejects a requested subpath.
+       */
+      if (packageJson.exports != null) {
+        const viaExports = resolveExportsField(
+          packageJson.exports,
+          subpath,
+          packageDir,
+          lookup,
+        )
 
-      if (viaExports != null) {
-        return viaExports
+        if (viaExports != null) {
+          return viaExports
+        }
+
+        return undefined
       }
 
-      if (subpath.length === 0) {
-        for (const entryField of ['main', 'module', 'browser']) {
-          const entry = packageJson[entryField]
+      /*
+       * For a package subpath without exports, try the requested file path.
+       *
+       * Example:
+       *   import "lodash/fp"
+       *   -> node_modules/lodash/fp.js
+       *   -> node_modules/lodash/fp/index.js
+       */
+      if (subpath.length > 0) {
+        return lookup(
+          `${packageDir}/${subpath}`,
+        )
+      }
 
-          if (typeof entry === 'string' && entry.length > 0) {
-            const resolved = resolveExportTarget(
-              `${packageDir}/${entry}`,
-              lookup,
-            )
+      /*
+       * Browser bundling should favor browser/module entry points before
+       * CommonJS main when the package has no exports map.
+       */
+      for (const entryField of [
+        'browser',
+        'module',
+        'main',
+      ]) {
+        const entry = packageJson[entryField]
 
-            if (resolved != null) {
-              return resolved
-            }
-          }
+        if (typeof entry !== 'string' || entry.length === 0) {
+          continue
+        }
+
+        const resolved = resolveExportTarget(
+          `${packageDir}/${entry}`,
+          lookup,
+        )
+
+        if (resolved != null) {
+          return resolved
         }
       }
     }
 
     /*
-     * Without package.json (rare), try spec or spec/index directly.
+     * Fallback for packages with no readable package.json.
      */
-    const direct =
-      subpath.length > 0
-        ? lookup(`${packageDir}/${subpath}`)
-        : lookup(packageDir)
-
-    return direct
+    return subpath.length > 0
+      ? lookup(`${packageDir}/${subpath}`)
+      : lookup(packageDir)
   }
 
-  return { resolveBareImport }
+  return {
+    resolveBareImport,
+  }
 }
 
 function createVirtualFsPlugin(
   files: Record<string, string>,
+  unresolvedBareImports: Set<string>,
 ): esbuild.Plugin {
   const fileNames = Object.keys(files)
 
   function lookup(path: string): string | undefined {
-    if (files[path] != null) {
-      return path
+    const normalized = normalizePath(path)
+
+    if (files[normalized] != null) {
+      return normalized
     }
 
     for (const extension of RESOLVABLE_EXTENSIONS) {
-      const candidate = `${path}${extension}`
+      const candidate = `${normalized}${extension}`
 
       if (files[candidate] != null) {
         return candidate
@@ -409,7 +694,7 @@ function createVirtualFsPlugin(
     }
 
     for (const trail of INDEX_TRAILS) {
-      const candidate = `${path}${trail}`
+      const candidate = `${normalized}${trail}`
 
       if (files[candidate] != null) {
         return candidate
@@ -433,16 +718,30 @@ function createVirtualFsPlugin(
           }
         }
 
+        /*
+         * Package-import aliases need package.json "imports" support, which
+         * is not yet implemented in this browser resolver. Let esbuild decide
+         * whether another plugin/setting can resolve them.
+         */
         if (args.path.startsWith('#')) {
           return undefined
         }
 
-        if (!args.path.startsWith('.') && !args.path.startsWith('/')) {
+        /*
+         * Bare imports: npm packages and Node builtins.
+         */
+        if (
+          !args.path.startsWith('.') &&
+          !args.path.startsWith('/')
+        ) {
           if (
             NODE_BUILTINS.has(args.path) ||
             args.path.startsWith('node:')
           ) {
-            return { path: args.path, external: true }
+            return {
+              path: args.path,
+              external: true,
+            }
           }
 
           const resolved = packageResolver.resolveBareImport(
@@ -450,42 +749,68 @@ function createVirtualFsPlugin(
           )
 
           if (resolved != null) {
-            return { path: resolved, namespace: 'virtual' }
+            return {
+              path: resolved,
+              namespace: 'virtual',
+            }
           }
 
           /*
-           * Unresolvable bare specifier: externalize so the output keeps a
-           * standard import rather than failing the build.
+           * Preserve the import rather than failing the entire build, but
+           * report it in the build response so the user knows the output is
+           * not fully bundled.
            */
-          return { path: args.path, external: true }
+          unresolvedBareImports.add(
+            `${args.path} imported by ${args.importer || '<entry point>'}`,
+          )
+
+          return {
+            path: args.path,
+            external: true,
+          }
         }
 
-        const importerDir = args.importer.normalize('NFC').includes('/')
+        /*
+         * Relative and workspace-root-relative imports.
+         */
+        const importerDir = args.importer
+          .normalize('NFC')
+          .includes('/')
           ? args.importer.split('/').slice(0, -1)
           : []
 
-        const joined =
-          args.path.startsWith('/')
-            ? normalizePath(args.path)
-            : normalizePath([...importerDir, args.path].join('/'))
+        const joined = args.path.startsWith('/')
+          ? normalizePath(args.path)
+          : normalizePath(
+            [...importerDir, args.path].join('/'),
+          )
 
         const resolved = lookup(joined)
 
         if (resolved != null) {
-          return { path: resolved, namespace: 'virtual' }
+          return {
+            path: resolved,
+            namespace: 'virtual',
+          }
         }
 
         /*
-         * Fall back to trying a path outside the virtual fs namespace so
-         * css @import handling etc. can still resolve.
+         * Let esbuild continue resolution for paths the virtual filesystem
+         * cannot satisfy. This preserves CSS import behavior where possible.
          */
-        return { path: args.path }
+        return {
+          path: args.path,
+        }
       })
 
       build.onLoad(
-        { filter: /.*/, namespace: 'virtual' },
+        {
+          filter: /.*/,
+          namespace: 'virtual',
+        },
         (args) => {
-          const contents = files[normalizePath(args.path)]
+          const normalizedPath = normalizePath(args.path)
+          const contents = files[normalizedPath]
 
           if (contents == null) {
             const available = fileNames
@@ -495,7 +820,9 @@ function createVirtualFsPlugin(
             return {
               errors: [
                 {
-                  text: `File not found in workspace: "${args.path}" (available: ${available}…).`,
+                  text:
+                    `File not found in workspace: "${normalizedPath}" ` +
+                    `(available: ${available}…).`,
                 },
               ],
             }
@@ -503,7 +830,7 @@ function createVirtualFsPlugin(
 
           return {
             contents,
-            loader: getLoaderForPath(args.path) as esbuild.Loader,
+            loader: getLoaderForPath(normalizedPath),
           }
         },
       )
@@ -511,33 +838,38 @@ function createVirtualFsPlugin(
   }
 }
 
-let requestCounter = 0
-
 async function transform(
   request: TransformRequest,
 ): Promise<BuildResponse> {
   try {
     await ensureInitialized()
 
-    const extension = request.filename.split('.').pop() ?? 'js'
+    const extension =
+      request.filename
+        .split('.')
+        .at(-1)
+        ?.toLowerCase() ?? 'js'
 
-    const loaderById: Record<string, string> = {
+    const loaderByExtension: Record<string, esbuild.Loader> = {
       ts: 'ts',
       mts: 'ts',
       cts: 'ts',
       tsx: 'tsx',
       jsx: 'jsx',
+      css: 'css',
+      json: 'json',
     }
 
-    const result = await esbuild.transform(request.source, {
-      loader: (loaderById[extension] ?? (
-        extension === 'css' ? 'css' : 'js'
-      )) as esbuild.Loader,
-      format: 'cjs',
-      target: 'es2022',
-      sourcemap: false,
-      logLevel: 'silent',
-    })
+    const result = await esbuild.transform(
+      request.source,
+      {
+        loader: loaderByExtension[extension] ?? 'js',
+        format: 'cjs',
+        target: 'es2022',
+        sourcemap: false,
+        logLevel: 'silent',
+      },
+    )
 
     return {
       id: request.id,
@@ -545,26 +877,37 @@ async function transform(
       outputs: [
         {
           path: request.filename,
-          text: result.code as string,
+          text: result.code,
         },
       ],
-      warnings: result.warnings.map((warning) => warning.text),
+      warnings: result.warnings.map(
+        (warning) => warning.text,
+      ),
     }
   } catch (error) {
     return {
       id: request.id,
       ok: false,
-      error: error instanceof Error ? error.message : String(error),
+      error:
+        error instanceof Error
+          ? error.message
+          : String(error),
     }
   }
 }
 
-async function build(request: BuildRequest): Promise<BuildResponse> {
+async function build(
+  request: BuildRequest,
+): Promise<BuildResponse> {
   try {
     await ensureInitialized()
 
+    const unresolvedBareImports = new Set<string>()
+
     const result = await esbuild.build({
-      entryPoints: [normalizePath(request.entry)],
+      entryPoints: [
+        normalizePath(request.entry),
+      ],
       bundle: request.bundle ?? true,
       write: false,
       format: request.format ?? 'esm',
@@ -575,10 +918,33 @@ async function build(request: BuildRequest): Promise<BuildResponse> {
       define: request.define,
       entryNames: request.entryNames,
       logLevel: 'silent',
-      plugins: [createVirtualFsPlugin(request.files)],
+      plugins: [
+        createVirtualFsPlugin(
+          request.files,
+          unresolvedBareImports,
+        ),
+      ],
       outbase: '.',
       outdir: 'out',
     })
+
+    const warnings = [
+      ...result.warnings.map(
+        (warning) =>
+          `${warning.text}${warning.location != null
+            ? ` (${formatLocation(warning.location)})`
+            : ''
+          }`,
+      ),
+
+      ...[...unresolvedBareImports]
+        .sort()
+        .map(
+          (detail) =>
+            `Could not resolve npm package "${detail}". ` +
+            'It was left external in the output bundle.',
+        ),
+    ]
 
     return {
       id: request.id,
@@ -589,17 +955,12 @@ async function build(request: BuildRequest): Promise<BuildResponse> {
           path: file.path,
           text: file.text,
         })),
-      warnings: result.warnings.map(
-        (warning) => `${warning.text}${warning.location != null ? ` (${plural(warning.location)})` : ''}`,
-      ),
+      warnings,
     }
   } catch (error) {
     let message = 'Build failed.'
 
     if (typeof error === 'string') {
-      /*
-       * esbuild rejects with an array-joined string of build errors.
-       */
       message = error
     } else if (error instanceof Error) {
       message = error.message
@@ -613,19 +974,33 @@ async function build(request: BuildRequest): Promise<BuildResponse> {
   }
 }
 
-function plural(location: { file?: string; line?: number; column?: number }): string {
+function formatLocation(
+  location: {
+    file?: string
+    line?: number
+    column?: number
+  },
+): string {
   return `${location.file ?? ''}:${location.line ?? 0}:${location.column ?? 0}`
 }
 
-self.onmessage = async (event: MessageEvent<WorkerRequest>): Promise<void> => {
+self.onmessage = async (
+  event: MessageEvent<WorkerRequest>,
+): Promise<void> => {
   const request = event.data
 
-  if (request?.type == null || request.id == null) {
+  if (
+    request == null ||
+    request.type == null ||
+    request.id == null
+  ) {
     return
   }
 
   const response =
-    request.type === 'build' ? await build(request) : await transform(request)
+    request.type === 'build'
+      ? await build(request)
+      : await transform(request)
 
   self.postMessage(response)
 }

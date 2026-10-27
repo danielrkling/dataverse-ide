@@ -27,6 +27,7 @@ import {
   listInstalledPackages,
   viewPackage,
   checkOutdatedPackages,
+  moveInstalledPackagesToSection,
   type NpmDependency,
   type NpmDependencySection,
 } from './packageBridge.js'
@@ -50,25 +51,36 @@ import { getSharedVfs } from '../sharedVfs.js'
 const COMMAND_INSTALL = 'dataverseIde.npm.install'
 const COMMAND_INSTALL_ALL = 'dataverseIde.npm.installAll'
 const COMMAND_ADD_DEPENDENCY = 'dataverseIde.npm.addDependency'
-const COMMAND_DEPENDENCY_ACTION = 'dataverseIde.npm.dependencyAction'
+const COMMAND_ADD_DEV_DEPENDENCY = 'dataverseIde.npm.addDevDependency'
+const COMMAND_INSTALL_DEPENDENCY_VERSION =
+  'dataverseIde.npm.installDependencyVersion'
+
+const COMMAND_UNINSTALL_DEPENDENCY =
+  'dataverseIde.npm.uninstallDependency'
+
+const COMMAND_OPEN_DEPENDENCY_REGISTRY =
+  'dataverseIde.npm.openDependencyRegistry'
 const COMMAND_REFRESH_PACKAGES = 'dataverseIde.npm.refreshPackages'
 const COMMAND_LS = 'dataverseIde.npm.ls'
 const COMMAND_VIEW = 'dataverseIde.npm.view'
 const COMMAND_OUTDATED = 'dataverseIde.npm.outdated'
 
+const DEPENDENCY_ACTIONS_SUBMENU =
+  'dataverseIde.npm.dependencyActions'
+
 type PackageTreeElementData =
   | {
-      kind: 'section'
-      label: string
-      section: NpmDependencySection
-    }
+    kind: 'section'
+    label: string
+    section: NpmDependencySection
+  }
   | {
-      kind: 'dependency'
-      dependency: NpmDependency
-    }
+    kind: 'dependency'
+    dependency: NpmDependency
+  }
 
 class PackageTreeElement {
-  constructor(public readonly data: PackageTreeElementData) {}
+  constructor(public readonly data: PackageTreeElementData) { }
 }
 
 type TreeDeps = {
@@ -78,8 +90,7 @@ type TreeDeps = {
 }
 
 class DependenciesTreeProvider
-  implements vscodeType.TreeDataProvider<PackageTreeElement>
-{
+  implements vscodeType.TreeDataProvider<PackageTreeElement> {
   private readonly onDidChangeEmitter: vscodeType.EventEmitter<
     PackageTreeElement | undefined
   >
@@ -150,6 +161,11 @@ class DependenciesTreeProvider
         this.vscode.TreeItemCollapsibleState.Collapsed,
       )
 
+      item.contextValue =
+        element.data.section === 'dependencies'
+          ? 'dataverseIde.npm.dependenciesSection'
+          : 'dataverseIde.npm.devDependenciesSection'
+
       return item
     }
 
@@ -161,12 +177,8 @@ class DependenciesTreeProvider
     )
 
     item.description = dependency.range
+    item.contextValue = 'dataverseIde.npm.dependency'
 
-    item.command = {
-      command: COMMAND_DEPENDENCY_ACTION,
-      title: 'Open dependency actions',
-      arguments: [dependency],
-    }
 
     return item
   }
@@ -212,14 +224,42 @@ export default {
         {
           command: COMMAND_INSTALL,
           title: 'npm: Install Package',
+          icon: '$(add)',
         },
         {
           command: COMMAND_INSTALL_ALL,
           title: 'npm: Install All Dependencies (package.json)',
+          icon: '$(cloud-download)',
         },
         {
           command: COMMAND_ADD_DEPENDENCY,
           title: 'npm: Add Dependency…',
+          icon: '$(add)',
+        },
+        {
+          command: COMMAND_ADD_DEV_DEPENDENCY,
+          title: 'npm: Add Dev Dependency…',
+          icon: '$(add)',
+        },
+        {
+          command: COMMAND_INSTALL_DEPENDENCY_VERSION,
+          title: 'npm: Install Specific Dependency Version…',
+          icon: '$(versions)',
+        },
+        {
+          command: COMMAND_UNINSTALL_DEPENDENCY,
+          title: 'npm: Uninstall Dependency',
+          icon: '$(trash)',
+        },
+        {
+          command: COMMAND_OPEN_DEPENDENCY_REGISTRY,
+          title: 'npm: Open Dependency Registry Page',
+          icon: '$(link-external)',
+        },
+        {
+          command: COMMAND_REFRESH_PACKAGES,
+          title: 'npm: Refresh Package Tree',
+          icon: '$(refresh)',
         },
         {
           command: COMMAND_LS,
@@ -245,9 +285,160 @@ export default {
           },
         ],
       },
+      menus: [
+        {
+          menu: 'view/title',
+          command: COMMAND_INSTALL,
+          when: 'view == dataverseIde.npm.packages',
+          group: 'navigation@10',
+        },
+        {
+          /*
+           * Appears as an action icon in the npm Packages tree header.
+           */
+          menu: 'view/title',
+          command: COMMAND_INSTALL_ALL,
+          when: 'view == dataverseIde.npm.packages',
+          group: 'navigation@20',
+        },
+        {
+          menu: 'view/title',
+          command: COMMAND_REFRESH_PACKAGES,
+          when: 'view == dataverseIde.npm.packages',
+          group: 'navigation@30',
+        },
+        /*
+         * Inline plus actions on the section rows.
+         */
+        {
+          menu: 'view/item/context',
+          command: COMMAND_ADD_DEPENDENCY,
+          when:
+            'view == dataverseIde.npm.packages && viewItem == dataverseIde.npm.dependenciesSection',
+          group: 'inline@1',
+        },
+        {
+          menu: 'view/item/context',
+          command: COMMAND_ADD_DEV_DEPENDENCY,
+          when:
+            'view == dataverseIde.npm.packages && viewItem == dataverseIde.npm.devDependenciesSection',
+          group: 'inline@1',
+        },
+      
+        /*
+         * Explicit inline ellipsis button on each dependency row.
+         *
+         * Clicking it opens the nested menu entries below rather than a Quick Pick.
+         */
+        {
+          menu: 'view/item/context',
+          submenu: DEPENDENCY_ACTIONS_SUBMENU,
+          when:
+            'view == dataverseIde.npm.packages && viewItem == dataverseIde.npm.dependency',
+          group: 'inline@20',
+        },
+      
+        /*
+         * Entries rendered inside the dependency submenu.
+         */
+        {
+          menu: DEPENDENCY_ACTIONS_SUBMENU,
+          command: COMMAND_INSTALL_DEPENDENCY_VERSION,
+          when: 'viewItem == dataverseIde.npm.dependency',
+          group: 'navigation@10',
+        },
+        {
+          menu: DEPENDENCY_ACTIONS_SUBMENU,
+          command: COMMAND_UNINSTALL_DEPENDENCY,
+          when: 'viewItem == dataverseIde.npm.dependency',
+          group: 'navigation@20',
+        },
+        {
+          menu: DEPENDENCY_ACTIONS_SUBMENU,
+          command: COMMAND_OPEN_DEPENDENCY_REGISTRY,
+          when: 'viewItem == dataverseIde.npm.dependency',
+          group: 'navigation@30',
+        },
+      
+        /*
+         * Keep the same actions available directly from right-click.
+         */
+        {
+          menu: 'view/item/context',
+          command: COMMAND_INSTALL_DEPENDENCY_VERSION,
+          when:
+            'view == dataverseIde.npm.packages && viewItem == dataverseIde.npm.dependency',
+          group: 'navigation@10',
+        },
+        {
+          menu: 'view/item/context',
+          command: COMMAND_UNINSTALL_DEPENDENCY,
+          when:
+            'view == dataverseIde.npm.packages && viewItem == dataverseIde.npm.dependency',
+          group: 'navigation@20',
+        },
+        {
+          menu: 'view/item/context',
+          command: COMMAND_OPEN_DEPENDENCY_REGISTRY,
+          when:
+            'view == dataverseIde.npm.packages && viewItem == dataverseIde.npm.dependency',
+          group: 'navigation@30',
+        },
+      ],
+      submenus: [
+        {
+          id: DEPENDENCY_ACTIONS_SUBMENU,
+          label: 'Dependency Actions',
+          icon: '$(ellipsis)',
+        },
+      ],
     })
 
-    async function installFromSpecs(specs: string[]): Promise<void> {
+    function toDependency(
+      value: unknown,
+    ): NpmDependency | undefined {
+      if (
+        typeof value === 'object' &&
+        value != null &&
+        'name' in value &&
+        'range' in value &&
+        'section' in value
+      ) {
+        const dependency = value as Partial<NpmDependency>
+    
+        if (
+          typeof dependency.name === 'string' &&
+          typeof dependency.range === 'string' &&
+          (
+            dependency.section === 'dependencies' ||
+            dependency.section === 'devDependencies'
+          )
+        ) {
+          return dependency as NpmDependency
+        }
+      }
+    
+      if (
+        typeof value === 'object' &&
+        value != null &&
+        'data' in value
+      ) {
+        const treeElement = value as {
+          data?: PackageTreeElementData
+        }
+    
+        if (treeElement.data?.kind === 'dependency') {
+          return treeElement.data.dependency
+        }
+      }
+    
+      return undefined
+    }
+
+    async function installFromSpecs(
+      specs: string[],
+      section: NpmDependencySection = 'dependencies',
+    ): Promise<void> {
       const setup = await createPackageManager(
         vscode,
         context.workspaceRootUri,
@@ -262,6 +453,11 @@ export default {
       }
 
       try {
+        const sectionLabel =
+          section === 'devDependencies'
+            ? 'dev dependency'
+            : 'dependency'
+
         const added = await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
@@ -275,6 +471,16 @@ export default {
               (message) => {
                 outputChannel.appendLine(`[npm] ${message}`)
               },
+            )
+
+            /*
+             * almostnode saves installs as normal dependencies. Reclassify the
+             * packages before copying package.json back to the workspace.
+             */
+            moveInstalledPackagesToSection(
+              setup.vfs,
+              installed,
+              section,
             )
 
             await writeNodeModulesBackToWorkspace(
@@ -297,11 +503,11 @@ export default {
         dependencyTreeProvider.refresh()
 
         outputChannel.appendLine(
-          `[npm] Installed: ${added.join(', ')}.`,
+          `[npm] Installed ${sectionLabel}: ${added.join(', ')}.`,
         )
 
         await vscode.window.showInformationMessage(
-          `npm: installed ${added.join(', ')}.`,
+          `npm: installed ${added.join(', ')} as ${sectionLabel}${added.length === 1 ? '' : ' packages'}.`,
         )
       } catch (error) {
         console.error('[npm] install failed:', error)
@@ -418,47 +624,90 @@ export default {
       },
     })
 
-    const dependencyActionCommand = vscode.commands.registerCommand(
-      COMMAND_DEPENDENCY_ACTION,
-      async (dependency: NpmDependency) => {
-        const action = await vscode.window.showQuickPick(
-          [
+
+    const installDependencyVersionCommand = vscode.commands.registerCommand(
+      COMMAND_INSTALL_DEPENDENCY_VERSION,
+      async (argument: unknown) => {
+        const dependency = toDependency(argument)
+    
+        if (dependency == null) {
+          await vscode.window.showWarningMessage(
+            'npm: select a dependency first.',
+          )
+    
+          return
+        }
+    
+        let versions: string[]
+    
+        try {
+          versions = await vscode.window.withProgress(
             {
-              label: 'Install specific version…',
-              detail: `choose a version of ${dependency.name}; updates ${dependency.section} and node_modules`,
-              pick: 'version',
+              location: vscode.ProgressLocation.Notification,
+              title: `npm: fetching versions of ${dependency.name}…`,
+              cancellable: false,
             },
-            {
-              label: 'Uninstall',
-              detail: `remove ${dependency.name} from package.json and node_modules`,
-              pick: 'uninstall',
-            },
-            {
-              label: 'Open registry page',
-              detail: 'open the package page on npmjs.com',
-              pick: 'registry',
-            },
-          ],
+            async () => fetchPackageVersions(dependency.name),
+          )
+        } catch (error) {
+          await vscode.window.showErrorMessage(
+            `npm: ${error instanceof Error ? error.message : String(error)}`,
+          )
+    
+          return
+        }
+    
+        const selectedVersion = await vscode.window.showQuickPick(
+          versions.map((version) => ({
+            label: version,
+          })),
           {
-            title: `npm: ${dependency.name}@${dependency.range}`,
+            title: `npm: ${dependency.name} — select version`,
+            placeHolder: 'Select the version to install.',
+            ignoreFocusOut: true,
           },
         )
-
-        if (action == null) {
+    
+        if (selectedVersion == null) {
           return
         }
-
-        if (action.pick === 'registry') {
-          void vscode.env.openExternal(
-            vscode.Uri.parse(
-              `https://www.npmjs.com/package/${dependency.name}`,
-            ),
+    
+        /*
+         * Preserve the package's existing dependency category.
+         */
+        await installFromSpecs(
+          [`${dependency.name}@${selectedVersion.label}`],
+          dependency.section,
+        )
+      },
+    )
+    
+    const uninstallDependencyCommand = vscode.commands.registerCommand(
+      COMMAND_UNINSTALL_DEPENDENCY,
+      async (argument: unknown) => {
+        const dependency = toDependency(argument)
+    
+        if (dependency == null) {
+          await vscode.window.showWarningMessage(
+            'npm: select a dependency first.',
           )
-
+    
           return
         }
-
-        if (action.pick === 'uninstall') {
+    
+        const confirmation = await vscode.window.showWarningMessage(
+          `Uninstall ${dependency.name} from ${dependency.section}?`,
+          {
+            modal: true,
+          },
+          'Uninstall',
+        )
+    
+        if (confirmation !== 'Uninstall') {
+          return
+        }
+    
+        try {
           await vscode.window.withProgress(
             {
               location: vscode.ProgressLocation.Notification,
@@ -473,68 +722,88 @@ export default {
               )
             },
           )
-
+    
           dependencyTreeProvider.refresh()
-
+    
           await vscode.window.showInformationMessage(
             `npm: uninstalled ${dependency.name}.`,
           )
-
-          return
-        }
-
-        let versions: string[]
-
-        try {
-          versions = await vscode.window.withProgress(
-            {
-              location: vscode.ProgressLocation.Notification,
-              title: `npm: fetching versions of ${dependency.name}…`,
-              cancellable: false,
-            },
-            async () => fetchPackageVersions(dependency.name),
-          )
         } catch (error) {
-          await vscode.window.showErrorMessage(
-            `npm: ${error instanceof Error ? error.message : String(error)}`,
+          const message =
+            error instanceof Error
+              ? error.message
+              : String(error)
+    
+          outputChannel.appendLine(
+            `[npm] uninstall failed: ${message}`,
           )
-          return
+          outputChannel.show(true)
+    
+          await vscode.window.showErrorMessage(
+            `npm uninstall failed: ${message}`,
+          )
         }
-
-        const selectedVersion = await vscode.window.showQuickPick(
-          versions.map((version) => ({ label: version })),
-          {
-            title: `npm: ${dependency.name} — select version`,
-            placeHolder: 'Select the version to install.',
-            ignoreFocusOut: true,
-          },
-        )
-
-        if (selectedVersion == null) {
-          return
-        }
-
-        await installFromSpecs([
-          `${dependency.name}@${selectedVersion.label}`,
-        ])
       },
     )
+    
+    const openDependencyRegistryCommand = vscode.commands.registerCommand(
+      COMMAND_OPEN_DEPENDENCY_REGISTRY,
+      async (argument: unknown) => {
+        const dependency = toDependency(argument)
+    
+        if (dependency == null) {
+          await vscode.window.showWarningMessage(
+            'npm: select a dependency first.',
+          )
+    
+          return
+        }
+    
+        void vscode.env.openExternal(
+          vscode.Uri.parse(
+            `https://www.npmjs.com/package/${dependency.name}`,
+          ),
+        )
+      },
+    )
+
+    async function promptForDependencySpec(
+      section: NpmDependencySection,
+    ): Promise<void> {
+      const sectionLabel =
+        section === 'devDependencies'
+          ? 'dev dependency'
+          : 'dependency'
+
+      const specInput = await vscode.window.showInputBox({
+        title: `npm: Add ${sectionLabel}`,
+        prompt:
+          'Enter one or more packages, optionally with versions, separated by spaces.',
+        placeHolder: 'lodash dayjs@1.11.0',
+        ignoreFocusOut: true,
+      })
+
+      if (specInput == null || specInput.trim().length === 0) {
+        return
+      }
+
+      await installFromSpecs(
+        parseSpecs(specInput),
+        section,
+      )
+    }
 
     const addDependencyCommand = vscode.commands.registerCommand(
       COMMAND_ADD_DEPENDENCY,
       async () => {
-        const specInput = await vscode.window.showInputBox({
-          title: 'npm: Add Dependency',
-          prompt: 'Enter the package name (optionally with @scope).',
-          placeHolder: 'lodash',
-          ignoreFocusOut: true,
-        })
+        await promptForDependencySpec('dependencies')
+      },
+    )
 
-        if (specInput == null || specInput.trim().length === 0) {
-          return
-        }
-
-        await installFromSpecs(parseSpecs(specInput))
+    const addDevDependencyCommand = vscode.commands.registerCommand(
+      COMMAND_ADD_DEV_DEPENDENCY,
+      async () => {
+        await promptForDependencySpec('devDependencies')
       },
     )
 
@@ -709,7 +978,10 @@ export default {
         installCommand.dispose()
         installAllCommand.dispose()
         addDependencyCommand.dispose()
-        dependencyActionCommand.dispose()
+        addDevDependencyCommand.dispose()
+        installDependencyVersionCommand.dispose()
+        uninstallDependencyCommand.dispose()
+        openDependencyRegistryCommand.dispose()
         refreshCommand.dispose()
         lsCommand.dispose()
         viewCommand.dispose()

@@ -578,3 +578,51 @@ export async function checkOutdatedPackages(
 
   return results
 }
+
+export function moveInstalledPackagesToSection(
+  vfs: VirtualFS,
+  packageNames: string[],
+  targetSection: NpmDependencySection,
+): void {
+  if (!vfs.existsSync('/package.json')) {
+    return
+  }
+
+  const text = vfs.readFileSync('/package.json', 'utf8') as string
+
+  const packageJson = JSON.parse(text) as {
+    dependencies?: Record<string, string>
+    devDependencies?: Record<string, string>
+  }
+
+  packageJson.dependencies ??= {}
+  packageJson.devDependencies ??= {}
+
+  const sourceSection =
+    targetSection === 'dependencies'
+      ? packageJson.devDependencies
+      : packageJson.dependencies
+
+  const destinationSection =
+    targetSection === 'dependencies'
+      ? packageJson.dependencies
+      : packageJson.devDependencies
+
+  for (const packageName of packageNames) {
+    const version =
+      packageJson.dependencies[packageName] ??
+      packageJson.devDependencies[packageName]
+
+    if (version == null) {
+      continue
+    }
+
+    destinationSection[packageName] = version
+    delete sourceSection[packageName]
+  }
+
+  vfs.writeFileSync(
+    '/package.json',
+    `${JSON.stringify(packageJson, null, 2)}\n`,
+  )
+}

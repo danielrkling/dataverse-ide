@@ -198,6 +198,23 @@ export default {
   ): Promise<vscodeType.Disposable | void> {
     const { vscode, outputChannel } = context
 
+    async function reloadConfigFromDisk(): Promise<void> {
+      const loaded = await readEsbuildConfig(
+        vscode,
+        context.workspaceRootUri,
+      )
+    
+      currentConfig = loaded.config
+    
+      /*
+       * A direct edit to "watch" in esbuild.config.json takes effect as soon as
+       * the file is saved.
+       */
+      setWatchRuntimeEnabled(currentConfig.watch)
+    
+      notifyStatus()
+    }
+
     await contributeExtensionManifest({
       id: 'esbuild',
       displayName: 'Dataverse IDE esbuild',
@@ -242,9 +259,17 @@ export default {
     let watcher: EsbuildWatcher | undefined
     let watchEnabled = false
 
-    let lastStatus: 'idle' | 'ok' | 'error' = 'idle'
+    let lastStatus: 'idle' | 'building' | 'ok' | 'error' = 'idle'
     let lastMessage = 'No build run yet.'
     let lastFinishedAt: number | undefined
+    
+    const watchStatusItem = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Left,
+      100,
+    )
+    
+    watchStatusItem.name = 'esbuild Watch'
+    watchStatusItem.command = 'dataverseIde.esbuild.toggleWatch'
 
     const statusListeners = new Set<() => void>()
 
@@ -253,24 +278,41 @@ export default {
     }
 
     function notifyStatus(): void {
+      updateWatchStatusItem()
+    
       for (const listener of statusListeners) {
         listener()
       }
+    }
+
+    function updateWatchStatusItem(): void {
+      if (!watchEnabled) {
+        watchStatusItem.hide()
+        return
+      }
+    
+      if (lastStatus === 'building') {
+        watchStatusItem.text = '$(sync~spin) esbuild: Building'
+        watchStatusItem.tooltip =
+          `${lastMessage}\n\nClick to stop esbuild watch.`
+      } else if (lastStatus === 'error') {
+        watchStatusItem.text = '$(warning) esbuild: Watch error'
+        watchStatusItem.tooltip =
+          `${lastMessage}\n\nWatch remains active. Click to stop watching.`
+      } else {
+        watchStatusItem.text = '$(eye) esbuild: Watching'
+        watchStatusItem.tooltip =
+          `${lastMessage}\n\nClick to stop esbuild watch.`
+      }
+    
+      watchStatusItem.show()
     }
 
     /*
      * Load the config file (or defaults when absent) once at activation so
      * the panel and watcher start from the real project settings.
      */
-    currentConfig = (await readEsbuildConfig(
-      vscode,
-      context.workspaceRootUri,
-    )).config
-
-    if (currentConfig.watch) {
-      ensureWatcher()
-      watchEnabled = true
-    }
+    await reloadConfigFromDisk()
 
     async function runBuild(
       entryPath: string,
@@ -279,11 +321,19 @@ export default {
       const started = Date.now()
 
       try {
+        await reloadConfigFromDisk()
+
+        lastStatus = 'building'
+        lastMessage = `Building ${entryPath}…`
+        notifyStatus()
+
+        
         if (options?.silent !== true) {
           outputChannel.show(true)
         }
 
         outputChannel.appendLine(`[esbuild] Building ${entryPath}…`)
+        
 
         const files = await collectWorkspaceSources(
           vscode,
@@ -444,32 +494,40 @@ export default {
       return watcher
     }
 
-    async function setWatchEnabled(enabled: boolean): Promise<void> {
+    function setWatchRuntimeEnabled(enabled: boolean): void {
       if (enabled === watchEnabled) {
         return
       }
-
+    
       watchEnabled = enabled
-
+    
       if (enabled) {
         ensureWatcher()
       } else {
         watcher?.dispose()
         watcher = undefined
       }
-
-      /*
-       * Persist the preference into esbuild.config.json so a project
-       * re-opens with the same watch behavior.
-       */
-      currentConfig = { ...currentConfig, watch: enabled }
-
-      await updateEsbuildConfig(vscode, context.workspaceRootUri, {
-        watch: enabled,
-      })
-
+    
       notifyStatus()
     }
+
+async function setWatchEnabled(
+  enabled: boolean,
+): Promise<void> {
+  /*
+   * Persist first. If the file cannot be written, do not change the live
+   * watcher state and create panel/file disagreement.
+   */
+  currentConfig = await updateEsbuildConfig(
+    vscode,
+    context.workspaceRootUri,
+    {
+      watch: enabled,
+    },
+  )
+
+  setWatchRuntimeEnabled(currentConfig.watch)
+}
 
     const startWatchCommand = vscode.commands.registerCommand(
       'dataverseIde.esbuild.startWatch',
@@ -526,95 +584,13 @@ export default {
       },
     )
 
-    /*
-     * Sidebar panel: "esbuild" — convenience editor over esbuild.config.json
-     * (the source of truth) plus watch controls. The panel uses a
-     * file-backed store: reads come from the file, writes go to the file,
-     * and edits made in the text editor re-sync the panel controls.
-     */
     const buildPanel = registerExtensionPanel(vscode, {
       extensionId: 'esbuild',
       title: 'esbuild',
       icon: createPanelIcon(PANEL_GLYPHS.zap),
       description:
-        'Settings are stored in esbuild.config.json at the workspace root (committed with the project).',
+        'Build settings are defined in esbuild.config.json. Open the file to edit entry points, output, format, minification, external packages, defines, and watch preference.',
       workspaceRootUri: context.workspaceRootUri,
-      store: {
-        get: (_key, defaultValue) => currentConfig[
-          _key as keyof EsbuildConfig
-        ] as typeof defaultValue,
-
-        set: async (key, value) => {
-          currentConfig = await updateEsbuildConfig(
-            vscode,
-            context.workspaceRootUri,
-            { [key]: value } as Partial<EsbuildConfig>,
-          )
-        },
-
-        onChange: (listener) =>
-          context.vscode.workspace.onDidSaveTextDocument(async (document) => {
-            if (!document.uri.path.endsWith('/esbuild.config.json')) {
-              return
-            }
-
-            /*
-             * Reload the live config before the panel re-syncs its
-             * controls so they display the file's new values.
-             */
-            currentConfig = (await readEsbuildConfig(
-              vscode,
-              context.workspaceRootUri,
-            )).config
-
-            listener()
-          }),
-      },
-      settings: [
-        {
-          type: 'string',
-          key: 'entry',
-          label: 'Entry',
-          default: ESBUILD_DEFAULT_CONFIG.entry,
-          description: 'Workspace-relative entry file to bundle',
-        },
-        {
-          type: 'string',
-          key: 'outDir',
-          label: 'Output directory',
-          default: ESBUILD_DEFAULT_CONFIG.outDir,
-        },
-        {
-          type: 'enum',
-          key: 'format',
-          label: 'Output format',
-          default: 'esm',
-          options: [
-            { value: 'esm', label: 'ESM (default)' },
-            { value: 'iife', label: 'IIFE (browser script)' },
-            { value: 'cjs', label: 'CommonJS' },
-          ],
-        },
-        {
-          type: 'boolean',
-          key: 'minify',
-          label: 'Minify output',
-          default: false,
-        },
-        {
-          type: 'boolean',
-          key: 'sourcemap',
-          label: 'Source maps',
-          default: false,
-        },
-        {
-          type: 'string',
-          key: 'target',
-          label: 'Target',
-          default: 'es2022',
-          description: 'esbuild syntax target, e.g. es2020, esnext',
-        },
-      ],
       actions: [
         {
           label: 'Build Now',
@@ -634,17 +610,33 @@ export default {
           command: 'dataverseIde.esbuild.openConfig',
         },
         {
+          label: 'Reload Config',
+          command: 'dataverseIde.esbuild.reloadConfig',
+        },
+        {
           label: 'Show Output',
           command: 'dataverseIde.esbuild.showOutput',
         },
       ],
     })
 
+    const reloadConfigCommand = vscode.commands.registerCommand(
+      'dataverseIde.esbuild.reloadConfig',
+      async () => {
+        await reloadConfigFromDisk()
+    
+        await vscode.window.showInformationMessage(
+          'esbuild configuration reloaded.',
+        )
+      },
+    )
+
     outputChannel.appendLine('[esbuild] commands and panel registered.')
 
     return {
       dispose() {
         watcher?.dispose()
+        watchStatusItem.dispose()
         buildPanel.dispose()
 
         startWatchCommand.dispose()
@@ -653,6 +645,7 @@ export default {
         buildConfiguredEntryCommand.dispose()
         openConfigCommand.dispose()
         outputChannelCommand.dispose()
+        reloadConfigCommand.dispose()
 
         buildActiveFileCommand.dispose()
         runner.dispose()

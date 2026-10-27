@@ -36,12 +36,12 @@ export type EsbuildConfig = {
 }
 
 export const ESBUILD_DEFAULT_CONFIG: EsbuildConfig = {
-  entry: 'src/index.ts',
-  outDir: '.ide-build',
+  entry: 'src/app.ts',
+  outDir: 'dist',
   format: 'esm',
   minify: false,
   sourcemap: false,
-  target: 'es2022',
+  target: 'esnext',
   bundle: true,
   external: [],
   define: {},

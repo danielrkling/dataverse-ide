@@ -126,32 +126,43 @@ export type ConfigurationContribution = {
   properties: Record<string, unknown>
 }
 
-export type MenuContribution = {
-  /** Menu id, e.g. "explorer/context". */
-  menu: string
-  command: string
-  /** e.g. "navigation@60". */
-  group?: string
-  /** Optional clause, e.g. "resourceExtname == .html". */
-  when?: string
+export type MenuContribution =
+  | {
+      /** Menu id, e.g. "explorer/context". */
+      menu: string
+      command: string
+      /** e.g. "navigation@60". */
+      group?: string
+      /** Optional clause, e.g. "resourceExtname == .html". */
+      when?: string
+    }
+  | {
+      /** Menu id, e.g. "view/item/context". */
+      menu: string
+      submenu: string
+      group?: string
+      when?: string
+    }
+
+export type SubmenuContribution = {
+  id: string
+  label: string
+  icon?: string
 }
 
 export async function contributeExtensionManifest(input: {
   id: string
   displayName: string
   description: string
-  commands: { command: string; title: string }[]
+  commands: {
+    command: string
+    title: string
+    icon?: string
+  }[]
   views?: ViewContribution
-  /*
-   * Settings written from the side panels must be declared here, otherwise
-   * the workbench rejects them with "not a registered configuration".
-   */
   configuration?: ConfigurationContribution
-  /*
-   * Menu placements for contributed commands (e.g. explorer/context for
-   * right-click entries in the file explorer).
-   */
   menus?: MenuContribution[]
+  submenus?: SubmenuContribution[]
 }): Promise<void> {
   const contributes: Record<string, unknown> = {
     commands: input.commands,
@@ -163,24 +174,33 @@ export async function contributeExtensionManifest(input: {
 
   if (input.menus != null && input.menus.length > 0) {
     const menus: Record<string, unknown[]> = {}
-
+  
     for (const entry of input.menus) {
-      const placement: Record<string, unknown> = {
-        command: entry.command,
-      }
-
+      const placement: Record<string, unknown> =
+        'command' in entry
+          ? {
+              command: entry.command,
+            }
+          : {
+              submenu: entry.submenu,
+            }
+  
       if (entry.group != null) {
         placement.group = entry.group
       }
-
+  
       if (entry.when != null) {
         placement.when = entry.when
       }
-
+  
       ;(menus[entry.menu] ??= []).push(placement)
     }
-
+  
     contributes.menus = menus
+  }
+  
+  if (input.submenus != null && input.submenus.length > 0) {
+    contributes.submenus = input.submenus
   }
 
   if (input.views != null) {
@@ -213,7 +233,11 @@ export async function contributeExtensionManifest(input: {
       displayName: input.displayName,
       description: input.description,
       contributes: contributes as {
-        commands: { command: string; title: string }[]
+        commands: {
+          command: string
+          title: string
+          icon?: string
+        }[]
       },
     },
     ExtensionHostKind.LocalProcess,
