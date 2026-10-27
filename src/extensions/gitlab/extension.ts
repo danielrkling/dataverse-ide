@@ -4,6 +4,12 @@ import {
   contributeCommandManifest,
 } from '../api.js'
 
+import {
+  createPanelIcon,
+  PANEL_GLYPHS,
+  registerExtensionPanel,
+} from '../panels.js'
+
 import type {
   ExtensionContext,
   IdeExtension,
@@ -139,6 +145,77 @@ export default {
         {
           command: 'dataverseIde.gitlab.createMergeRequest',
           title: 'GitLab: New Merge Request',
+        },
+      ],
+      configuration: {
+        title: 'GitLab',
+        properties: {
+          'dataverseIde.gitlab.baseUrl': {
+            type: 'string',
+            default: 'https://gitlab.com',
+            description: 'Base URL of the GitLab instance.',
+          },
+          'dataverseIde.gitlab.project': {
+            type: 'string',
+            default: '',
+            description:
+              'Project path as group/project. Leave empty to derive it from the origin remote.',
+          },
+        },
+      },
+    })
+
+    /*
+     * Sidebar panel: "GitLab" — connection settings (the token itself stays
+     * in secret storage via the Connect action) plus quick actions.
+     */
+    const gitlabPanel = registerExtensionPanel(vscode, {
+      extensionId: 'gitlab',
+      title: 'GitLab',
+      icon: createPanelIcon(PANEL_GLYPHS.merge),
+      description:
+        'GitLab integration. Connect with a personal access token, then browse merge requests, issues, and pipelines.',
+      workspaceRootUri: context.workspaceRootUri,
+      settings: [
+        {
+          type: 'string',
+          key: 'baseUrl',
+          label: 'Instance URL',
+          default: 'https://gitlab.com',
+          description: 'Base URL of the GitLab instance',
+          placeholder: 'https://gitlab.com',
+        },
+        {
+          type: 'string',
+          key: 'project',
+          label: 'Project path',
+          default: '',
+          description: 'group/project — leave empty to derive it from the origin remote',
+          placeholder: 'my-group/my-project',
+        },
+      ],
+      actions: [
+        {
+          label: 'Connect (Personal Access Token)',
+          command: COMMAND_CONNECT,
+          primary: true,
+          tooltip: 'Store the GitLab PAT in secret storage',
+        },
+        {
+          label: 'Merge Requests',
+          command: COMMAND_SHOW_MRS,
+        },
+        {
+          label: 'Issues',
+          command: COMMAND_SHOW_ISSUES,
+        },
+        {
+          label: 'Pipelines',
+          command: COMMAND_SHOW_PIPELINES,
+        },
+        {
+          label: 'New Merge Request',
+          command: COMMAND_CREATE_MR,
         },
       ],
     })
@@ -507,6 +584,7 @@ export default {
 
     return {
       dispose() {
+        gitlabPanel.dispose()
         connectCommand.dispose()
         showMergeRequestsCommand.dispose()
         showIssuesCommand.dispose()

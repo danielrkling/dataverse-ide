@@ -88,7 +88,7 @@ function getSettings(
     workspaceRootUri: vscodeType.Uri,
 ): UploadSettings {
     const config = vscode.workspace.getConfiguration(
-        'dataverseWebResources',
+        'dataverseIde.dataverse',
         workspaceRootUri,
     )
 
@@ -102,16 +102,17 @@ function getSettings(
 
     if (prefix.length === 0) {
         throw new Error(
-            'Set dataverseWebResources.prefix before uploading.',
+            'Set dataverseIde.dataverse.prefix before uploading.',
         )
     }
 
     if (
-        !/^[A-Za-z][^/]*_(?:\/.*)?$/.test(prefix) ||
+        prefix.length < 3 ||
+        prefix.indexOf('_') < 2 ||
         prefix.endsWith('/')
     ) {
         throw new Error(
-            'dataverseWebResources.prefix must begin with a publisher prefix ending in an underscore. Example: dv_/ide.',
+            'dataverseIde.dataverse.prefix must contain an underscore somewhere after its first two characters. Example: dv_/ide.',
         )
     }
 
@@ -121,7 +122,7 @@ function getSettings(
         uploadRoot.includes('/../')
     ) {
         throw new Error(
-            'dataverseWebResources.uploadRoot cannot contain path traversal values.',
+            'dataverseIde.dataverse.uploadRoot cannot contain path traversal values.',
         )
     }
 
@@ -278,7 +279,7 @@ export async function installDataverseUploadExtension(
                     title: 'Dataverse Web Resources',
 
                     properties: {
-                        'dataverseWebResources.prefix': {
+                        'dataverseIde.dataverse.prefix': {
                             type: 'string',
                             default: '',
                             scope: 'window',
@@ -286,7 +287,7 @@ export async function installDataverseUploadExtension(
                                 'Dataverse web-resource root, including publisher prefix. Example: dv_/ide.',
                         },
 
-                        'dataverseWebResources.solution': {
+                        'dataverseIde.dataverse.solution': {
                             type: 'string',
                             default: '',
                             scope: 'window',
@@ -294,7 +295,7 @@ export async function installDataverseUploadExtension(
                                 'Optional Dataverse solution unique name used for web-resource create and update operations.',
                         },
 
-                        'dataverseWebResources.uploadRoot': {
+                        'dataverseIde.dataverse.uploadRoot': {
                             type: 'string',
                             default: '',
                             scope: 'window',
@@ -302,7 +303,7 @@ export async function installDataverseUploadExtension(
                                 'Workspace-relative directory whose contents upload beneath the configured Dataverse web-resource prefix.',
                         },
 
-                        'dataverseWebResources.files': {
+                        'dataverseIde.dataverse.files': {
                             type: 'array',
                             default: ['**/*'],
                             scope: 'window',
@@ -313,7 +314,7 @@ export async function installDataverseUploadExtension(
                                 'Glob patterns relative to uploadRoot used by Dataverse: Upload Configured Files.',
                         },
 
-                        'dataverseWebResources.exclude': {
+                        'dataverseIde.dataverse.exclude': {
                             type: 'array',
                             default: [],
                             scope: 'window',
@@ -324,7 +325,7 @@ export async function installDataverseUploadExtension(
                                 'Glob patterns relative to uploadRoot excluded from configured uploads and watch uploads.',
                         },
 
-                        'dataverseWebResources.publishAfterUpload': {
+                        'dataverseIde.dataverse.publishAfterUpload': {
                             type: 'boolean',
                             default: true,
                             scope: 'window',
@@ -332,7 +333,7 @@ export async function installDataverseUploadExtension(
                                 'Publish successfully uploaded Dataverse web resources after a complete upload batch.',
                         },
 
-                        'dataverseWebResources.apiBaseUrl': {
+                        'dataverseIde.dataverse.apiBaseUrl': {
                             type: 'string',
                             default: '',
                             scope: 'window',
@@ -340,7 +341,7 @@ export async function installDataverseUploadExtension(
                                 'Optional Dataverse organization URL. Leave blank when the IDE runs inside Dataverse.',
                         },
 
-                        'dataverseWebResources.watchDebounceMs': {
+                        'dataverseIde.dataverse.watchDebounceMs': {
                             type: 'number',
                             default: 300,
                             minimum: 100,
@@ -348,39 +349,61 @@ export async function installDataverseUploadExtension(
                             description:
                                 'Milliseconds to wait before batching file changes for Dataverse watch upload.',
                         },
+
+                        'dataverseIde.user.name': {
+                            type: 'string',
+                            default: '',
+                            description:
+                                'IDE user identity full name (populated by Dataverse: Load User Identity).',
+                        },
+
+                        'dataverseIde.user.email': {
+                            type: 'string',
+                            default: '',
+                            description:
+                                'IDE user identity email address (populated by Dataverse: Load User Identity).',
+                        },
                     },
                 },
 
                 commands: [
                     {
                         command:
-                            'dataverseWebResources.uploadConfiguredFolder',
+                            'dataverseIde.dataverse.uploadConfiguredFolder',
                         title:
                             'Dataverse: Upload Configured Web Resource Folder',
                     },
                     {
                         command:
-                            'dataverseWebResources.uploadSelection',
+                            'dataverseIde.dataverse.uploadSelection',
                         title:
                             'Dataverse: Upload Selected Files or Folders',
                     },
                     {
                         command:
-                            'dataverseWebResources.uploadActiveFile',
+                            'dataverseIde.dataverse.uploadActiveFile',
                         title:
                             'Dataverse: Upload Active File',
                     },
                     {
-                        command: 'dataverseWebResources.previewSelection',
+                        command: 'dataverseIde.dataverse.previewSelection',
                         title: 'Dataverse: Preview Selected HTML Web Resource',
                     },
                     {
-                        command: 'dataverseWebResources.startWatch',
+                        command: 'dataverseIde.dataverse.startWatch',
                         title: 'Dataverse: Start Watch Upload',
                     },
                     {
-                        command: 'dataverseWebResources.stopWatch',
+                        command: 'dataverseIde.dataverse.stopWatch',
                         title: 'Dataverse: Stop Watch Upload',
+                    },
+                    {
+                        command: 'dataverseIde.dataverse.loadUserIdentity',
+                        title: 'Dataverse: Load User Identity',
+                    },
+                    {
+                        command: 'dataverseIde.dataverse.refreshSolutions',
+                        title: 'Dataverse: Refresh Solutions',
                     },
                 ],
 
@@ -388,39 +411,39 @@ export async function installDataverseUploadExtension(
                     commandPalette: [
                         {
                             command:
-                                'dataverseWebResources.uploadConfiguredFiles',
+                                'dataverseIde.dataverse.uploadConfiguredFiles',
                         },
                         {
                             command:
-                                'dataverseWebResources.uploadSelection',
+                                'dataverseIde.dataverse.uploadSelection',
                         },
                         {
                             command:
-                                'dataverseWebResources.uploadActiveFile',
+                                'dataverseIde.dataverse.uploadActiveFile',
                         },
                         {
                             command:
-                                'dataverseWebResources.previewSelection',
+                                'dataverseIde.dataverse.previewSelection',
                         },
                         {
                             command:
-                                'dataverseWebResources.startWatch',
+                                'dataverseIde.dataverse.startWatch',
                         },
                         {
                             command:
-                                'dataverseWebResources.stopWatch',
+                                'dataverseIde.dataverse.stopWatch',
                         },
                     ],
 
                     'explorer/context': [
                         {
                             command:
-                                'dataverseWebResources.uploadSelection',
+                                'dataverseIde.dataverse.uploadSelection',
                             group: 'navigation@50',
                         },
                         {
                             command:
-                                'dataverseWebResources.previewSelection',
+                                'dataverseIde.dataverse.previewSelection',
                             when: 'resourceExtname == .html || resourceExtname == .htm',
                             group: 'navigation@51',
                         },
@@ -429,7 +452,7 @@ export async function installDataverseUploadExtension(
                     'editor/title': [
                         {
                             command:
-                                'dataverseWebResources.previewSelection',
+                                'dataverseIde.dataverse.previewSelection',
                             when: 'resourceExtname == .html || resourceExtname == .htm',
                             group: 'navigation@50',
                         },
@@ -664,8 +687,8 @@ export async function installDataverseUploadExtension(
             /*
              * Use the built-in VS Code glob query to apply:
              *
-             * dataverseWebResources.files
-             * dataverseWebResources.exclude
+             * dataverseIde.dataverse.files
+             * dataverseIde.dataverse.exclude
              *
              * Deleted files will not be returned by findFiles(), which intentionally
              * matches the current "do not delete remote resources" requirement.
@@ -805,7 +828,7 @@ export async function installDataverseUploadExtension(
     }
 
     const startWatchCommand = vscode.commands.registerCommand(
-        'dataverseWebResources.startWatch',
+        'dataverseIde.dataverse.startWatch',
         async () => {
             try {
                 startWatchUpload()
@@ -820,7 +843,7 @@ export async function installDataverseUploadExtension(
     )
 
     const stopWatchCommand = vscode.commands.registerCommand(
-        'dataverseWebResources.stopWatch',
+        'dataverseIde.dataverse.stopWatch',
         async () => {
             if (fileWatcher == null) {
                 await vscode.window.showInformationMessage(
@@ -842,7 +865,7 @@ export async function installDataverseUploadExtension(
 
     const uploadConfiguredFilesCommand =
         vscode.commands.registerCommand(
-            'dataverseWebResources.uploadConfiguredFiles',
+            'dataverseIde.dataverse.uploadConfiguredFiles',
             async () => {
                 try {
                     const settings = getSettings(
@@ -869,7 +892,7 @@ export async function installDataverseUploadExtension(
 
     const uploadSelectionCommand =
         vscode.commands.registerCommand(
-            'dataverseWebResources.uploadSelection',
+            'dataverseIde.dataverse.uploadSelection',
             async (selection: unknown) => {
                 const uris = toUris(selection)
 
@@ -895,7 +918,7 @@ export async function installDataverseUploadExtension(
 
     const uploadActiveFileCommand =
         vscode.commands.registerCommand(
-            'dataverseWebResources.uploadActiveFile',
+            'dataverseIde.dataverse.uploadActiveFile',
             async () => {
                 const document = vscode.window.activeTextEditor?.document
 
@@ -925,7 +948,7 @@ export async function installDataverseUploadExtension(
 
     const previewSelectionCommand =
         vscode.commands.registerCommand(
-            'dataverseWebResources.previewSelection',
+            'dataverseIde.dataverse.previewSelection',
             async (selection: unknown) => {
                 const selectedUris = toUris(selection)
 
@@ -1033,116 +1056,18 @@ import {
   contributeExtensionManifest,
 } from '../api.js'
 
+import {
+  createPanelIcon,
+  PANEL_GLYPHS,
+  registerExtensionPanel,
+} from '../panels.js'
+
 import * as vscodeTypeBottom from 'vscode'
 
 /*
  * Registry adapter: the original install function is preserved for direct
  * callers, but the extension registry activates features through `default`.
  */
-
-const CONFIG_SECTION_BOTTOM = 'dataverseWebResources'
-
-type SettingsTreeKey =
-  | 'prefix'
-  | 'solution'
-  | 'uploadRoot'
-  | 'publishAfterUpload'
-  | 'apiBaseUrl'
-  | 'files'
-  | 'exclude'
-
-type BottomSettings = {
-  prefix: string
-  solution?: string
-  uploadRoot: string
-  publishAfterUpload: boolean
-  apiBaseUrl?: string
-  files: string[]
-  exclude: string[]
-}
-
-class DataverseSettingsProvider
-  implements vscodeTypeBottom.TreeDataProvider<{ key: SettingsTreeKey; label: string }>{
-  private readonly onDidChangeEmitter = new vscodeTypeBottom.EventEmitter<{ key: SettingsTreeKey; label: string } | undefined>()
-
-  readonly onDidChangeTreeData: vscodeTypeBottom.Event<{ key: SettingsTreeKey; label: string } | undefined> = this.onDidChangeEmitter.event
-
-  constructor(
-    private readonly vscode: typeof vscodeTypeBottom,
-    private readonly rootUri: vscodeTypeBottom.Uri,
-  ) {}
-
-  refresh(): void {
-    this.onDidChangeEmitter.fire(undefined)
-  }
-
-  private readSettings(): BottomSettings {
-    const config = this.vscode.workspace.getConfiguration(
-      CONFIG_SECTION_BOTTOM,
-      this.rootUri,
-    )
-
-    return {
-      prefix: config.get<string>('prefix', ''),
-      solution: config.get<string>('solution', '') || undefined,
-      uploadRoot: config.get<string>('uploadRoot', ''),
-      publishAfterUpload: config.get<boolean>('publishAfterUpload', true),
-      apiBaseUrl: config.get<string>('apiBaseUrl', '') || undefined,
-      files: config.get<string[]>('files', []),
-      exclude: config.get<string[]>('exclude', []),
-    }
-  }
-
-  async getChildren(): Promise<{ key: SettingsTreeKey; label: string }[]> {
-    const settings = this.readSettings()
-
-    return [
-      {
-        key: 'prefix',
-        label: `Web Resource Prefix: ${settings.prefix === '' ? '(not set)' : settings.prefix}`,
-      },
-      {
-        key: 'solution',
-        label: `Solution: ${settings.solution ?? '(default solution)'}`,
-      },
-      {
-        key: 'uploadRoot',
-        label: `Upload Root: ${settings.uploadRoot === '' ? '(workspace root)' : settings.uploadRoot}`,
-      },
-      {
-        key: 'publishAfterUpload',
-        label: `Publish After Upload: ${settings.publishAfterUpload ? 'on' : 'off'}`,
-      },
-      {
-        key: 'apiBaseUrl',
-        label: `API Base URL Override: ${settings.apiBaseUrl ?? '(org default)'}`,
-      },
-      {
-        key: 'files',
-        label: `Include Patterns: ${settings.files.join(', ')}`,
-      },
-      {
-        key: 'exclude',
-        label: `Exclude Patterns: ${settings.exclude.length === 0 ? '(none)' : settings.exclude.join(', ')}`,
-      },
-    ]
-  }
-
-  getTreeItem(element: { key: SettingsTreeKey; label: string }): vscodeTypeBottom.TreeItem {
-    const item = new this.vscode.TreeItem(
-      element.label,
-      this.vscode.TreeItemCollapsibleState.None,
-    )
-
-    item.command = {
-      command: 'dataverseIde.dataverse.settingClick',
-      title: 'Edit Dataverse setting',
-      arguments: [element.key],
-    }
-
-    return item
-  }
-}
 
 export default {
   id: 'dataverse',
@@ -1162,125 +1087,207 @@ export default {
       id: 'dataverse',
       displayName: 'Dataverse IDE Dataverse',
       description: 'Web resource upload and settings management.',
-      commands: [
-        {
-          command: 'dataverseIde.dataverse.settingClick',
-          title: 'Dataverse: Edit Web Resource Settings…',
-        },
-      ],
-      views: {
-        containerId: 'dataverseIde',
-        containerTitle: 'Dataverse IDE',
-        views: [
-          {
-            id: 'dataverseIde.dataverse.settings',
-            name: 'Dataverse Settings',
-          },
-        ],
-      },
+      commands: [],
     })
 
-    const settingsClickCommand =
-        vscodeBottom.commands.registerCommand(
-          'dataverseIde.dataverse.settingClick',
-          async (key: SettingsTreeKey) => {
+    /*
+     * Sidebar panel: "Dataverse" — web resource settings as real controls
+     * (input boxes, checkbox, glob lists) backed by the same
+     * dataverseIde.dataverse configuration section the uploader reads.
+     */
+    const dataversePanel = registerExtensionPanel(vscodeBottom, {
+      extensionId: 'dataverse',
+      title: 'Dataverse',
+      icon: createPanelIcon(PANEL_GLYPHS.cloud),
+      description:
+        'Upload workspace files to Dataverse as web resources. Configure the prefix and upload root below.',
+      workspaceRootUri: context.workspaceRootUri,
+      settings: [
+        {
+          type: 'string',
+          key: 'prefix',
+          label: 'Web resource prefix',
+          default: '',
+          description: 'Underscore somewhere after the first two characters, e.g. dv_/ide',
+          placeholder: 'dv_/ide',
+        },
+        {
+          type: 'enum',
+          key: 'solution',
+          label: 'Solution',
+          default: '',
+          description: 'Target solution (first entry = default solution)',
+          options: [{ value: '', label: '(default solution)' }],
+          optionsProvider: async () => {
             const config = vscodeBottom.workspace.getConfiguration(
-              CONFIG_SECTION_BOTTOM,
+              'dataverseIde.dataverse',
               context.workspaceRootUri,
             )
 
-            if (key === 'publishAfterUpload') {
-              const current = config.get<boolean>('publishAfterUpload', true)
-
-              await config.update(
-                'publishAfterUpload',
-                !current,
-                vscodeBottom.ConfigurationTarget.Workspace,
-              )
-
-              dataverseSettingsProvider.refresh()
-
-              return
-            }
-
-            if (key === 'files' || key === 'exclude') {
-              const current = config.get<string[]>(key, [])
-
-              const text = await vscodeBottom.window.showInputBox({
-                title: `Dataverse: ${key === 'files' ? 'Include' : 'Exclude'} Patterns`,
-                prompt: 'Comma-separated glob patterns.',
-                value: current.join(', '),
-                ignoreFocusOut: true,
-              })
-
-              if (text == null) {
-                return
-              }
-
-              await config.update(
-                key,
-                text
-                  .split(',')
-                  .map((pattern) => pattern.trim())
-                  .filter((pattern) => pattern.length > 0),
-                vscodeBottom.ConfigurationTarget.Workspace,
-              )
-
-              dataverseSettingsProvider.refresh()
-
-              return
-            }
-
-            const prompts: Record<Exclude<SettingsTreeKey, 'publishAfterUpload' | 'files' | 'exclude'>, string> = {
-              prefix: 'Publisher prefix ending in an underscore, e.g. dv_/ide',
-              solution: 'Unique name of the target solution (empty = default)',
-              uploadRoot: 'Directory (relative to workspace root) to upload',
-              apiBaseUrl: 'Override the Dataverse API base URL (usually leave empty)',
-            }
-
-            const value = await vscodeBottom.window.showInputBox({
-              title: 'Dataverse: Web Resource Settings',
-              prompt: prompts[key as 'prefix'],
-              value: config.get<string>(key as 'prefix', ''),
-              ignoreFocusOut: true,
+            const client = new DataverseWebResourceClient({
+              apiBaseUrl: config.get<string>('apiBaseUrl', '') || undefined,
             })
 
-            if (value == null) {
-              return
-            }
+            const solutions = await client.listSolutions()
 
-            await config.update(
-              key as 'prefix',
-              value.trim(),
-              vscodeBottom.ConfigurationTarget.Workspace,
-            )
-
-            dataverseSettingsProvider.refresh()
+            return [
+              { value: '', label: '(default solution)' },
+              ...solutions.map((solution) => ({
+                value: solution.uniquename,
+                label: solution.friendlyname
+                  ? `${solution.friendlyname} (${solution.uniquename})`
+                  : solution.uniquename,
+              })),
+            ]
           },
-        )
+        },
+        {
+          type: 'string',
+          key: 'uploadRoot',
+          label: 'Upload root',
+          default: '',
+          description: 'Directory (relative to workspace root) to upload (empty = workspace root)',
+        },
+        {
+          type: 'boolean',
+          key: 'publishAfterUpload',
+          label: 'Publish after upload',
+          default: true,
+        },
+        {
+          type: 'string',
+          key: 'apiBaseUrl',
+          label: 'API base URL override',
+          default: '',
+          description: 'Usually leave empty to use the org default',
+        },
+        {
+          type: 'stringList',
+          key: 'files',
+          label: 'Include patterns',
+          default: ['**/*'],
+          description: 'Glob patterns included in the upload',
+          placeholder: '**/*',
+        },
+        {
+          type: 'stringList',
+          key: 'exclude',
+          label: 'Exclude patterns',
+          default: [],
+          description: 'Glob patterns excluded from the upload',
+          placeholder: 'node_modules/**',
+        },
+      ],
+      actions: [
+        {
+          label: 'Load User Identity',
+          command: 'dataverseIde.dataverse.loadUserIdentity',
+          primary: true,
+          tooltip:
+            'Fetch the current Dataverse user (WhoAmI + systemusers) and apply it as the git commit author and IDE user',
+        },
+        {
+          label: 'Refresh Solutions',
+          command: 'dataverseIde.dataverse.refreshSolutions',
+          tooltip: 'Re-fetch the solution list from the org',
+        },
+      ],
+    })
 
-    const dataverseSettingsProvider = new DataverseSettingsProvider(
-      vscodeBottom,
-      context.workspaceRootUri,
-    )
-
-    const settingsTreeRegistration =
-        vscodeBottom.window.registerTreeDataProvider(
-          'dataverseIde.dataverse.settings',
-          dataverseSettingsProvider,
-        )
-
-    const configChangeWatcher = vscodeBottom.workspace.onDidChangeConfiguration(
-      (event) => {
-        if (event.affectsConfiguration(CONFIG_SECTION_BOTTOM)) {
-          dataverseSettingsProvider.refresh()
-        }
+    const refreshSolutionsCommand = vscodeBottom.commands.registerCommand(
+      'dataverseIde.dataverse.refreshSolutions',
+      () => {
+        dataversePanel.refresh()
       },
     )
 
-    void settingsClickCommand
-    void settingsTreeRegistration
-    void configChangeWatcher
+    /*
+     * Identity: WhoAmI + systemusers -> git commit author + IDE user.
+     * Written to dataverseIde.git.authorName/authorEmail (git extension
+     * reads those to skip the prompts) and dataverseIde.user.*.
+     */
+    const loadUserIdentityCommand = vscodeBottom.commands.registerCommand(
+      'dataverseIde.dataverse.loadUserIdentity',
+      async () => {
+        try {
+          const config = vscodeBottom.workspace.getConfiguration(
+            'dataverseIde.dataverse',
+            context.workspaceRootUri,
+          )
+
+          const client = new DataverseWebResourceClient({
+            apiBaseUrl: config.get<string>('apiBaseUrl', '') || undefined,
+          })
+
+          const user = await vscodeBottom.window.withProgress(
+            {
+              location: vscodeBottom.ProgressLocation.Notification,
+              title: 'Dataverse: loading user identity…',
+              cancellable: false,
+            },
+            () => client.getCurrentUser(),
+          )
+
+          if (user.fullName.length === 0 || user.email.length === 0) {
+            await vscodeBottom.window.showWarningMessage(
+              'Dataverse: the user record has no full name or email; identity not applied.',
+            )
+
+            return
+          }
+
+          /*
+           * Identity is user-scoped (global): it describes the signed-in
+           * person, not the project, so it follows the user across
+           * workspaces.
+           */
+          const gitConfig = vscodeBottom.workspace.getConfiguration(
+            'dataverseIde.git',
+            context.workspaceRootUri,
+          )
+
+          await gitConfig.update(
+            'authorName',
+            user.fullName,
+            vscodeBottom.ConfigurationTarget.Global,
+          )
+
+          await gitConfig.update(
+            'authorEmail',
+            user.email,
+            vscodeBottom.ConfigurationTarget.Global,
+          )
+
+          const userConfig = vscodeBottom.workspace.getConfiguration(
+            'dataverseIde.user',
+            context.workspaceRootUri,
+          )
+
+          await userConfig.update(
+            'name',
+            user.fullName,
+            vscodeBottom.ConfigurationTarget.Global,
+          )
+
+          await userConfig.update(
+            'email',
+            user.email,
+            vscodeBottom.ConfigurationTarget.Global,
+          )
+
+          await vscodeBottom.window.showInformationMessage(
+            `Dataverse: identity applied — ${user.fullName} <${user.email}>. Git commits now use this author automatically.`,
+          )
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error)
+
+          await vscodeBottom.window.showErrorMessage(
+            `Dataverse: loading user identity failed: ${message}`,
+          )
+        }
+      },
+    )
 
     await installDataverseUploadExtension(context.workspaceRootUri)
   },

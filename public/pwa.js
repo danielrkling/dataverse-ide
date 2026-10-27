@@ -55,7 +55,36 @@ if (document.querySelector('link[rel="manifest"]') == null) {
   document.head.appendChild(manifestLink)
 }
 
-if ('serviceWorker' in navigator) {
+/*
+ * The service worker's stale-while-revalidate cache is for production
+ * (Dataverse) only. On localhost it would cache vite's dev module URLs
+ * (/src/*.ts) and serve stale source files after edits.
+ *
+ * In dev: skip registration and unregister any worker from an earlier
+ * session so the tab reloads fresh sources.
+ */
+const isDevEnvironment =
+  window.location.protocol === 'http:' &&
+  (window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1')
+
+if ('serviceWorker' in navigator && isDevEnvironment) {
+  void navigator.serviceWorker
+    .getRegistrations()
+    .then((registrations) => {
+      for (const registration of registrations) {
+        void registration.unregister()
+      }
+
+      if (registrations.length > 0) {
+        console.info(
+          '[Dataverse IDE] Dev environment: unregistered service worker(s) so modules reload fresh.',
+        )
+      }
+    })
+}
+
+if ('serviceWorker' in navigator && !isDevEnvironment) {
   const wasControlled = navigator.serviceWorker.controller != null
   let reloadedForInitialControl = false
 

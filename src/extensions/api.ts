@@ -54,6 +54,7 @@ export async function contributeCommandManifest(input: {
   displayName: string
   description: string
   commands: { command: string; title: string }[]
+  configuration?: ConfigurationContribution
 }): Promise<void> {
   const { getApi } = registerExtension(
     {
@@ -67,6 +68,9 @@ export async function contributeCommandManifest(input: {
       description: input.description,
       contributes: {
         commands: input.commands,
+        ...(input.configuration != null
+          ? { configuration: input.configuration }
+          : {}),
       },
     },
     ExtensionHostKind.LocalProcess,
@@ -76,8 +80,20 @@ export async function contributeCommandManifest(input: {
   await getApi()
 }
 
+/*
+ * Activity bar icons are rendered as CSS masks (alpha channel only, tinted
+ * with the theme foreground color), so the default icon must be a
+ * glyph-only SVG with a transparent background - an opaque tile renders as
+ * a solid block with no visible glyph.
+ */
 const DEFAULT_ACTIVITYBAR_ICON =
-  'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB4PSIzIiB5PSIzIiB3PSIxOCIgaGVpZ2h0PSIxOCIgcng9IjMiIGZpbGw9IiM0ZjZlZGEiLz48L3N2Zz4='
+  'data:image/svg+xml;base64,' +
+  btoa(
+    '<svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
+    '<path d="M4 7h16v13H4V7Z" fill="none" stroke="#fff" stroke-width="1.8"/>' +
+    '<path d="M4 7l3-3h10l3 3" fill="none" stroke="#fff" stroke-width="1.8"/>' +
+    '</svg>',
+  )
 
 export type ViewContribution = {
   containerId: string
@@ -90,15 +106,81 @@ export type ViewContribution = {
  * Same as contributeCommandManifest, plus sidebar (activity bar) views.
  * The workbench needs the views service override enabled (workbench.ts).
  */
+/*
+ * Manifest icon strings are resolved as paths relative to the extension
+ * location (extension-file://…/extension/<icon>). A data: URI appended to
+ * that scheme is blocked by the browser (CORS: unknown scheme), so the
+ * manifest references a relative path and the actual URL — here the data
+ * URI itself, which fetch() supports — is registered via registerFileUrl.
+ *
+ * The registered path must be relative (no leading slash): joinPath() with
+ * an absolute fragment would replace the extension location's path and
+ * diverge from the path the views extension point computes.
+ */
+export function activitybarIconPath(id: string): string {
+  return `${id}-icon.svg`
+}
+
+export type ConfigurationContribution = {
+  title: string
+  properties: Record<string, unknown>
+}
+
+export type MenuContribution = {
+  /** Menu id, e.g. "explorer/context". */
+  menu: string
+  command: string
+  /** e.g. "navigation@60". */
+  group?: string
+  /** Optional clause, e.g. "resourceExtname == .html". */
+  when?: string
+}
+
 export async function contributeExtensionManifest(input: {
   id: string
   displayName: string
   description: string
   commands: { command: string; title: string }[]
   views?: ViewContribution
+  /*
+   * Settings written from the side panels must be declared here, otherwise
+   * the workbench rejects them with "not a registered configuration".
+   */
+  configuration?: ConfigurationContribution
+  /*
+   * Menu placements for contributed commands (e.g. explorer/context for
+   * right-click entries in the file explorer).
+   */
+  menus?: MenuContribution[]
 }): Promise<void> {
   const contributes: Record<string, unknown> = {
     commands: input.commands,
+  }
+
+  if (input.configuration != null) {
+    contributes.configuration = input.configuration
+  }
+
+  if (input.menus != null && input.menus.length > 0) {
+    const menus: Record<string, unknown[]> = {}
+
+    for (const entry of input.menus) {
+      const placement: Record<string, unknown> = {
+        command: entry.command,
+      }
+
+      if (entry.group != null) {
+        placement.group = entry.group
+      }
+
+      if (entry.when != null) {
+        placement.when = entry.when
+      }
+
+      ;(menus[entry.menu] ??= []).push(placement)
+    }
+
+    contributes.menus = menus
   }
 
   if (input.views != null) {
@@ -107,7 +189,7 @@ export async function contributeExtensionManifest(input: {
         {
           id: input.views.containerId,
           title: input.views.containerTitle,
-          icon: input.views.icon ?? DEFAULT_ACTIVITYBAR_ICON,
+          icon: activitybarIconPath(input.id),
         },
       ],
     }
@@ -120,7 +202,7 @@ export async function contributeExtensionManifest(input: {
     }
   }
 
-  const { getApi } = registerExtension(
+  const { getApi, registerFileUrl } = registerExtension(
     {
       name: `dataverse-ide-${input.id}`,
       publisher: 'dataverse-ide',
@@ -136,6 +218,13 @@ export async function contributeExtensionManifest(input: {
     },
     ExtensionHostKind.LocalProcess,
   )
+
+  if (input.views != null) {
+    registerFileUrl(
+      activitybarIconPath(input.id),
+      input.views.icon ?? DEFAULT_ACTIVITYBAR_ICON,
+    )
+  }
 
   // Force the extension api to initialize so contributions are picked up.
   await getApi()

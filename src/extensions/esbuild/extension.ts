@@ -8,6 +8,24 @@ import {
   contributeExtensionManifest,
 } from '../api.js'
 
+import {
+  createPanelIcon,
+  PANEL_GLYPHS,
+  registerExtensionPanel,
+} from '../panels.js'
+
+import {
+  ESBUILD_DEFAULT_CONFIG,
+  configFilePath,
+  readEsbuildConfig,
+  updateEsbuildConfig,
+  type EsbuildConfig,
+} from './config.js'
+
+import {
+  EsbuildWatcher,
+} from './watcher.js'
+
 import type {
   ExtensionContext,
   IdeExtension,
@@ -30,7 +48,17 @@ const SOURCE_EXTENSIONS =
 
 const MAX_COLLECTED_FILES = 8000
 
+/*
+ * node_modules is collected in its own pass with its own cap: in a single
+ * root-wide glob query its file count would crowd out actual sources (or
+ * be truncated itself), breaking bare-import resolution.
+ */
+const MAX_COLLECTED_NODE_MODULES_FILES = 12000
+
 const EXCLUDE_PATTERN =
+  '{**/.git/**,**/.ide-build/**,**/dist/**,**/out/**,**/node_modules/**}'
+
+const NODE_MODULES_EXCLUDE_PATTERN =
   '{**/.git/**,**/.ide-build/**,**/dist/**,**/out/**}'
 
 type BuildRequest = {
@@ -67,15 +95,26 @@ async function collectWorkspaceSources(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
 ): Promise<Record<string, string>> {
-  const uris = await vscode.workspace.findFiles(
-    '**/*',
-    EXCLUDE_PATTERN,
-    MAX_COLLECTED_FILES,
+  const rootPath = rootUri.path.replace(/\/+$/, '')
+
+  const collect = async (
+    pattern: vscodeType.GlobPattern,
+    exclude: string,
+    cap: number,
+  ): Promise<vscodeType.Uri[]> =>
+    vscode.workspace.findFiles(pattern, exclude, cap)
+
+  const sourceUris = await collect('**/*', EXCLUDE_PATTERN, MAX_COLLECTED_FILES)
+
+  const nodeModulesUris = await collect(
+    'node_modules/**',
+    NODE_MODULES_EXCLUDE_PATTERN,
+    MAX_COLLECTED_NODE_MODULES_FILES,
   )
 
-  const files: Record<string, string> = {}
+  const uris = [...sourceUris, ...nodeModulesUris]
 
-  const rootPath = rootUri.path
+  const files: Record<string, string> = {}
 
   for (const uri of uris) {
     if (!SOURCE_EXTENSIONS.test(uri.path)) {
@@ -114,6 +153,7 @@ async function collectWorkspaceSources(
 async function writeOutputs(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
+  outDir: string,
   entryPath: string,
   outputs: BuildOutputFile[],
 ): Promise<vscodeType.Uri[]> {
@@ -131,11 +171,11 @@ async function writeOutputs(
 
     const outFile = vscode.Uri.joinPath(
       rootUri,
-      OUTPUT_DIRECTORY,
+      outDir,
       `${baseName}${suffix}`,
     )
 
-    const parent = vscode.Uri.joinPath(rootUri, OUTPUT_DIRECTORY)
+    const parent = vscode.Uri.joinPath(rootUri, outDir)
 
     await vscode.workspace.fs.createDirectory(parent)
 
@@ -175,33 +215,181 @@ export default {
           command: 'dataverseIde.esbuild.buildWorkspace',
           title: 'esbuild: Build Workspace…',
         },
+        {
+          command: 'dataverseIde.esbuild.startWatch',
+          title: 'esbuild: Start Watch',
+        },
+        {
+          command: 'dataverseIde.esbuild.stopWatch',
+          title: 'esbuild: Stop Watch',
+        },
+        {
+          command: 'dataverseIde.esbuild.toggleWatch',
+          title: 'esbuild: Toggle Watch',
+        },
       ],
-      views: {
-        containerId: 'dataverseIde',
-        containerTitle: 'Dataverse IDE',
-        views: [
-          {
-            id: 'dataverseIde.esbuild.buildSettings',
-            name: 'esbuild Build Settings',
-          },
-        ],
-      },
     })
 
     const runner = new EsbuildBuildRunner(outputChannel)
 
     outputChannel.appendLine('[esbuild] extension activated.')
 
+    /*
+     * Config-file driven build. All settings come from esbuild.config.json
+     * (esbuild/config.ts); there is no vscode-settings fallback.
+     */
+    let currentConfig: EsbuildConfig = ESBUILD_DEFAULT_CONFIG
+    let watcher: EsbuildWatcher | undefined
+    let watchEnabled = false
+
+    let lastStatus: 'idle' | 'ok' | 'error' = 'idle'
+    let lastMessage = 'No build run yet.'
+    let lastFinishedAt: number | undefined
+
+    const statusListeners = new Set<() => void>()
+
+    function firstLine(text: string): string {
+      return text.split('\n', 1)[0] ?? text
+    }
+
+    function notifyStatus(): void {
+      for (const listener of statusListeners) {
+        listener()
+      }
+    }
+
+    /*
+     * Load the config file (or defaults when absent) once at activation so
+     * the panel and watcher start from the real project settings.
+     */
+    currentConfig = (await readEsbuildConfig(
+      vscode,
+      context.workspaceRootUri,
+    )).config
+
+    if (currentConfig.watch) {
+      ensureWatcher()
+      watchEnabled = true
+    }
+
+    async function runBuild(
+      entryPath: string,
+      options?: { silent?: boolean },
+    ): Promise<boolean> {
+      const started = Date.now()
+
+      try {
+        if (options?.silent !== true) {
+          outputChannel.show(true)
+        }
+
+        outputChannel.appendLine(`[esbuild] Building ${entryPath}…`)
+
+        const files = await collectWorkspaceSources(
+          vscode,
+          context.workspaceRootUri,
+        )
+
+        if (files[entryPath] == null) {
+          throw new Error(
+            `Entry ${entryPath} was not collected from the workspace. Check the entry setting in esbuild.config.json.`,
+          )
+        }
+
+        const response = await runner.build({
+          entry: entryPath,
+          files,
+          format: currentConfig.format,
+          minify: currentConfig.minify,
+          sourcemap: currentConfig.sourcemap,
+          target: currentConfig.target,
+          bundle: currentConfig.bundle,
+          external: currentConfig.external,
+          define: currentConfig.define,
+        })
+
+        if (!response.ok) {
+          outputChannel.appendLine(response.error)
+          outputChannel.show(true)
+
+          lastStatus = 'error'
+          lastMessage = firstLine(response.error)
+          lastFinishedAt = Date.now()
+          notifyStatus()
+
+          return false
+        }
+
+        for (const warning of response.warnings) {
+          outputChannel.appendLine(`[esbuild] warning: ${warning}`)
+        }
+
+        if (response.outputs.length === 0) {
+          outputChannel.appendLine('[esbuild] produced no output.')
+
+          lastStatus = 'error'
+          lastMessage = 'Build produced no output.'
+          lastFinishedAt = Date.now()
+          notifyStatus()
+
+          return false
+        }
+
+        const writtenUris = await writeOutputs(
+          vscode,
+          context.workspaceRootUri,
+          currentConfig.outDir,
+          entryPath,
+          response.outputs,
+        )
+
+        const elapsed = Date.now() - started
+
+        const summary = `Built ${entryPath} in ${elapsed}ms → ${writtenUris.map((uri) => vscode.workspace.asRelativePath(uri, false)).join(', ')}`
+
+        outputChannel.appendLine(`[esbuild] ${summary}`)
+
+        if (options?.silent !== true) {
+          outputChannel.show(true)
+        }
+
+        lastStatus = 'ok'
+        lastMessage = summary
+        lastFinishedAt = Date.now()
+        notifyStatus()
+
+        return true
+      } catch (error) {
+        console.error('[esbuild] build error:', error)
+
+        const message =
+          error instanceof Error ? error.message : String(error)
+
+        outputChannel.appendLine(`[esbuild] ${message}`)
+        outputChannel.show(true)
+
+        lastStatus = 'error'
+        lastMessage = message
+        lastFinishedAt = Date.now()
+        notifyStatus()
+
+        if (options?.silent !== true) {
+          await vscode.window.showErrorMessage(
+            `[esbuild] Build failed: ${message}`,
+          )
+        }
+
+        return false
+      }
+    }
+
     const buildActiveFileCommand = vscode.commands.registerCommand(
       'dataverseIde.esbuild.build',
       async (arg?: string | unknown) => {
-        const settings = getBuildSettings('')
-
         let entryPath: string
 
         if (typeof arg === 'string' && arg.trim().length > 0) {
-          lastBuiltEntry = arg.replaceAll('\\', '/')
-          entryPath = lastBuiltEntry
+          entryPath = arg.replaceAll('\\', '/')
         } else {
           const activeEditor = vscode.window.activeTextEditor
 
@@ -228,312 +416,243 @@ export default {
             .replaceAll('\\', '/')
         }
 
-        try {
-          const started = Date.now()
-
-          await vscode.window.withProgress(
-            {
-              location: vscode.ProgressLocation.Notification,
-              title: `[esbuild] Bundling ${entryPath}…`,
-              cancellable: false,
-            },
-            async () => {
-              outputChannel.show(true)
-              outputChannel.appendLine(`[esbuild] Building ${entryPath}…`)
-
-              const files = await collectWorkspaceSources(
-                vscode,
-                context.workspaceRootUri,
-              )
-
-              if (files[entryPath] == null) {
-                throw new Error(
-                  `Entry ${entryPath} was not collected from the workspace.`,
-                )
-              }
-
-              const response = await runner.build({
-                entry: entryPath,
-                files,
-              })
-
-              if (!response.ok) {
-                outputChannel.appendLine(response.error)
-                outputChannel.show(true)
-
-                await vscode.window.showErrorMessage(
-                  `[esbuild] Build failed (see output).`,
-                )
-
-                return
-              }
-
-              for (const warning of response.warnings) {
-                outputChannel.appendLine(`[esbuild] warning: ${warning}`)
-              }
-
-              if (response.outputs.length === 0) {
-                outputChannel.appendLine('[esbuild] produced no output.')
-                outputChannel.show(true)
-
-                return
-              }
-
-              const writtenUris = await writeOutputs(
-                vscode,
-                context.workspaceRootUri,
-                entryPath,
-                response.outputs,
-              )
-
-              const elapsed = Date.now() - started
-
-              outputChannel.appendLine(
-                `[esbuild] Build finished in ${elapsed}ms: ${writtenUris.map((uri) => vscode.workspace.asRelativePath(uri, false)).join(', ')}`,
-              )
-
-              await vscode.window.showInformationMessage(
-                `[esbuild] Built ${entryPath} in ${elapsed}ms.`,
-              )
-            },
-          )
-        } catch (error) {
-          console.error('[esbuild] build error:', error)
-
-          const message =
-            error instanceof Error ? error.message : String(error)
-
-          outputChannel.appendLine(`[esbuild] ${message}`)
-          outputChannel.show(true)
-
-          await vscode.window.showErrorMessage(
-            `[esbuild] Build failed: ${message}`,
-          )
-        }
+        await runBuild(entryPath)
       },
     )
 
     /*
-     * Sidebar: "esbuild Build Settings" — output directory, minify, format,
-     * and a watch toggle. Watch re-bundles the last built entry on save.
+     * Watch lifecycle. The watcher reads the live config (entry/outDir)
+     * through callbacks so config edits apply without restarting.
      */
-    type BuildSettingsTreeKey =
-      | 'outDir'
-      | 'minify'
-      | 'format'
-      | 'watch'
-
-    const CONFIG_SECTION = 'dataverseIde.esbuild'
-
-    function getBuildSettings(
-      section: string,
-    ): {
-      outDir: string
-      minify: boolean
-      format: 'esm' | 'iife' | 'cjs'
-      watch: boolean
-    } {
-      const config = vscode.workspace.getConfiguration(CONFIG_SECTION, null)
-
-      return {
-        outDir: config.get<string>('outDir', '.ide-build').trim() || '.ide-build',
-        minify: config.get<boolean>('minify', false),
-        format: (config.get<'esm' | 'iife' | 'cjs'>('format', 'esm') ?? 'esm'),
-        watch: config.get<boolean>('watch', false),
+    function ensureWatcher(): EsbuildWatcher {
+      if (watcher != null) {
+        return watcher
       }
+
+      watcher = new EsbuildWatcher(
+        vscode,
+        context.workspaceRootUri,
+        {
+          outDir: () => currentConfig.outDir,
+          entry: () => currentConfig.entry,
+          build: async (entry) => {
+            await runBuild(entry, { silent: true })
+          },
+        },
+      )
+
+      return watcher
     }
 
-    let lastBuiltEntry: string | undefined
+    async function setWatchEnabled(enabled: boolean): Promise<void> {
+      if (enabled === watchEnabled) {
+        return
+      }
 
-    const saveWatcherForWatchMode = vscode.workspace.onDidSaveTextDocument(
-      (document) => {
-        const settings = getBuildSettings('')
+      watchEnabled = enabled
 
-        if (!settings.watch) {
-          return
-        }
+      if (enabled) {
+        ensureWatcher()
+      } else {
+        watcher?.dispose()
+        watcher = undefined
+      }
 
-        if (document.uri.scheme !== 'file') {
-          return
-        }
+      /*
+       * Persist the preference into esbuild.config.json so a project
+       * re-opens with the same watch behavior.
+       */
+      currentConfig = { ...currentConfig, watch: enabled }
 
-        const entryPath = vscode.workspace
-          .asRelativePath(document.uri, false)
-          .replaceAll('\\', '/')
+      await updateEsbuildConfig(vscode, context.workspaceRootUri, {
+        watch: enabled,
+      })
 
-        // Re-bundle while the last-built entry or its imports change
-        if (
-          entryPath === lastBuiltEntry ||
-          document.uri.fsPath
-            .replaceAll('\\', '/')
-            .includes(settings.outDir) === false
-        ) {
-          if (lastBuiltEntry == null) {
-            lastBuiltEntry = entryPath
-          }
+      notifyStatus()
+    }
 
-          void vscode.commands.executeCommand(
-            'dataverseIde.esbuild.build',
-            lastBuiltEntry,
-          )
-        }
+    const startWatchCommand = vscode.commands.registerCommand(
+      'dataverseIde.esbuild.startWatch',
+      () => setWatchEnabled(true),
+    )
+
+    const stopWatchCommand = vscode.commands.registerCommand(
+      'dataverseIde.esbuild.stopWatch',
+      () => setWatchEnabled(false),
+    )
+
+    const toggleWatchCommand = vscode.commands.registerCommand(
+      'dataverseIde.esbuild.toggleWatch',
+      () => setWatchEnabled(!watchEnabled),
+    )
+
+    const buildConfiguredEntryCommand = vscode.commands.registerCommand(
+      'dataverseIde.esbuild.buildConfigured',
+      async () => {
+        const { config } = await readEsbuildConfig(
+          vscode,
+          context.workspaceRootUri,
+        )
+
+        currentConfig = config
+
+        await runBuild(config.entry)
       },
     )
 
-    const settingsClickCommand = vscode.commands.registerCommand(
-      'dataverseIde.esbuild.settingClick',
-      async (key: BuildSettingsTreeKey) => {
-        const settings = getBuildSettings('')
+    const openConfigCommand = vscode.commands.registerCommand(
+      'dataverseIde.esbuild.openConfig',
+      async () => {
+        const uri = configFilePath(vscode, context.workspaceRootUri)
 
-        if (key === 'outDir') {
-          const outDir = await vscode.window.showInputBox({
-            title: 'esbuild: Output Directory',
-            prompt: 'Relative directory inside the workspace for build output.',
-            value: settings.outDir,
-            ignoreFocusOut: true,
-          })
-
-          if (outDir == null || outDir.trim().length === 0) {
-            return
-          }
-
-          await vscode.workspace
-            .getConfiguration(CONFIG_SECTION, null)
-            .update('outDir', outDir.trim(), vscode.ConfigurationTarget.Global)
-
-          return
+        try {
+          await vscode.workspace.fs.stat(uri)
+        } catch {
+          /*
+           * Scaffold the file with the merged defaults on first open so the
+           * editor shows something meaningful to edit.
+           */
+          await updateEsbuildConfig(vscode, context.workspaceRootUri, {})
         }
 
-        if (key === 'minify') {
-          await vscode.workspace
-            .getConfiguration(CONFIG_SECTION, null)
-            .update('minify', !settings.minify, vscode.ConfigurationTarget.Global)
+        await vscode.window.showTextDocument(uri)
+      },
+    )
 
-          return
-        }
+    const outputChannelCommand = vscode.commands.registerCommand(
+      'dataverseIde.esbuild.showOutput',
+      () => {
+        outputChannel.show(true)
+      },
+    )
 
-        if (key === 'watch') {
-          await vscode.workspace
-            .getConfiguration(CONFIG_SECTION, null)
-            .update('watch', !settings.watch, vscode.ConfigurationTarget.Global)
+    /*
+     * Sidebar panel: "esbuild" — convenience editor over esbuild.config.json
+     * (the source of truth) plus watch controls. The panel uses a
+     * file-backed store: reads come from the file, writes go to the file,
+     * and edits made in the text editor re-sync the panel controls.
+     */
+    const buildPanel = registerExtensionPanel(vscode, {
+      extensionId: 'esbuild',
+      title: 'esbuild',
+      icon: createPanelIcon(PANEL_GLYPHS.zap),
+      description:
+        'Settings are stored in esbuild.config.json at the workspace root (committed with the project).',
+      workspaceRootUri: context.workspaceRootUri,
+      store: {
+        get: (_key, defaultValue) => currentConfig[
+          _key as keyof EsbuildConfig
+        ] as typeof defaultValue,
 
-          const changedAction = await vscode.window.showInformationMessage(
-            `[esbuild] watch ${!settings.watch ? 'enabled' : 'disabled'}.`,
+        set: async (key, value) => {
+          currentConfig = await updateEsbuildConfig(
+            vscode,
+            context.workspaceRootUri,
+            { [key]: value } as Partial<EsbuildConfig>,
           )
+        },
 
-          void changedAction
+        onChange: (listener) =>
+          context.vscode.workspace.onDidSaveTextDocument(async (document) => {
+            if (!document.uri.path.endsWith('/esbuild.config.json')) {
+              return
+            }
 
-          return
-        }
+            /*
+             * Reload the live config before the panel re-syncs its
+             * controls so they display the file's new values.
+             */
+            currentConfig = (await readEsbuildConfig(
+              vscode,
+              context.workspaceRootUri,
+            )).config
 
-        const selectedFormat = await vscode.window.showQuickPick(
-          [
-            { label: 'esm', detail: 'ESM output (default)' },
-            { label: 'iife', detail: 'Browser script (self-executing)' },
-            { label: 'cjs', detail: 'CommonJS output' },
+            listener()
+          }),
+      },
+      settings: [
+        {
+          type: 'string',
+          key: 'entry',
+          label: 'Entry',
+          default: ESBUILD_DEFAULT_CONFIG.entry,
+          description: 'Workspace-relative entry file to bundle',
+        },
+        {
+          type: 'string',
+          key: 'outDir',
+          label: 'Output directory',
+          default: ESBUILD_DEFAULT_CONFIG.outDir,
+        },
+        {
+          type: 'enum',
+          key: 'format',
+          label: 'Output format',
+          default: 'esm',
+          options: [
+            { value: 'esm', label: 'ESM (default)' },
+            { value: 'iife', label: 'IIFE (browser script)' },
+            { value: 'cjs', label: 'CommonJS' },
           ],
-          {
-            title: 'esbuild: Output Format',
-            placeHolder: `Current: ${settings.format}`,
-            ignoreFocusOut: true,
-          },
-        )
+        },
+        {
+          type: 'boolean',
+          key: 'minify',
+          label: 'Minify output',
+          default: false,
+        },
+        {
+          type: 'boolean',
+          key: 'sourcemap',
+          label: 'Source maps',
+          default: false,
+        },
+        {
+          type: 'string',
+          key: 'target',
+          label: 'Target',
+          default: 'es2022',
+          description: 'esbuild syntax target, e.g. es2020, esnext',
+        },
+      ],
+      actions: [
+        {
+          label: 'Build Now',
+          command: 'dataverseIde.esbuild.buildConfigured',
+          primary: true,
+        },
+        {
+          label: 'Start Watch',
+          command: 'dataverseIde.esbuild.startWatch',
+        },
+        {
+          label: 'Stop Watch',
+          command: 'dataverseIde.esbuild.stopWatch',
+        },
+        {
+          label: 'Open esbuild.config.json',
+          command: 'dataverseIde.esbuild.openConfig',
+        },
+        {
+          label: 'Show Output',
+          command: 'dataverseIde.esbuild.showOutput',
+        },
+      ],
+    })
 
-        if (selectedFormat == null) {
-          return
-        }
-
-        await vscode.workspace
-          .getConfiguration(CONFIG_SECTION, null)
-          .update('format', selectedFormat.label as 'esm', vscode.ConfigurationTarget.Global)
-      },
-    )
-
-    type SettingsTreeElement = {
-      key: BuildSettingsTreeKey
-      label: string
-    }
-
-    class BuildSettingsProvider
-      implements vscodeType.TreeDataProvider<SettingsTreeElement>
-    {
-      private readonly onDidChangeEmitter =
-        new vscode.EventEmitter<SettingsTreeElement | undefined>()
-
-      readonly onDidChangeTreeData: vscodeType.Event<
-        SettingsTreeElement | undefined
-      > = this.onDidChangeEmitter.event
-
-      refresh(): void {
-        this.onDidChangeEmitter.fire(undefined)
-      }
-
-      async getChildren(): Promise<SettingsTreeElement[]> {
-        const settings = getBuildSettings('')
-
-        const items: {
-          key: BuildSettingsTreeKey
-          label: string
-        }[] = [
-          {
-            key: 'outDir',
-            label: `Output Directory: ${settings.outDir}`,
-          },
-          {
-            key: 'minify',
-            label: `Minify: ${settings.minify ? 'on' : 'off'}`,
-          },
-          {
-            key: 'format',
-            label: `Format: ${settings.format}`,
-          },
-          {
-            key: 'watch',
-            label: `Watch: ${settings.watch ? 'on (re-builds last entry on save)' : 'off'}`,
-          },
-        ]
-
-        return items
-      }
-
-      getTreeItem(element: SettingsTreeElement): vscodeType.TreeItem {
-        const item = new vscode.TreeItem(
-          element.label,
-          vscode.TreeItemCollapsibleState.None,
-        )
-
-        item.command = {
-          command: 'dataverseIde.esbuild.settingClick',
-          title: 'Edit esbuild setting',
-          arguments: [element.key],
-        }
-
-        return item
-      }
-    }
-
-    const buildSettingsProvider = new BuildSettingsProvider()
-
-    const configChangeWatcher = vscode.workspace.onDidChangeConfiguration(
-      (event) => {
-        if (event.affectsConfiguration(CONFIG_SECTION)) {
-          buildSettingsProvider.refresh()
-        }
-      },
-    )
-
-    const settingsTreeRegistration = vscode.window.registerTreeDataProvider(
-      'dataverseIde.esbuild.buildSettings',
-      buildSettingsProvider,
-    )
-
-    outputChannel.appendLine('[esbuild] commands and sidebar view registered.')
+    outputChannel.appendLine('[esbuild] commands and panel registered.')
 
     return {
       dispose() {
-        configChangeWatcher.dispose()
-        settingsTreeRegistration.dispose?.()
-        saveWatcherForWatchMode.dispose()
+        watcher?.dispose()
+        buildPanel.dispose()
+
+        startWatchCommand.dispose()
+        stopWatchCommand.dispose()
+        toggleWatchCommand.dispose()
+        buildConfiguredEntryCommand.dispose()
+        openConfigCommand.dispose()
+        outputChannelCommand.dispose()
 
         buildActiveFileCommand.dispose()
         runner.dispose()
@@ -541,3 +660,4 @@ export default {
     }
   },
 } satisfies IdeExtension
+

@@ -2,7 +2,8 @@
  * esbuild worker: runs the esbuild-wasm compiler off the main thread.
  *
  * Protocol (plain postMessage request/response):
- *   { id, type: 'build', entry, files, format? }
+ *   { id, type: 'build', entry, files, format?, minify?, sourcemap?,
+ *     target?, bundle?, external?, define?, entryNames? }
  *   <- { id, ok, outputs }             (success)
  *   <- { id, ok: false, error }        (failure)
  */
@@ -22,7 +23,18 @@ type BuildRequest = {
   type: 'build'
   entry: string
   files: Record<string, string>
-  format?: 'esm' | 'iife'
+  format?: 'esm' | 'iife' | 'cjs'
+  minify?: boolean
+  sourcemap?: boolean
+  target?: string
+  /** Bundle module graph (default true); false = per-module transpile only. */
+  bundle?: boolean
+  /** Import paths to leave untouched in the output. */
+  external?: string[]
+  /** Build-time constants, e.g. { "process.env.NODE_ENV": "\"production\"" }. */
+  define?: Record<string, string>
+  /** Entry-relative or workspace-relative value for entry_names like "[dir]/[name]". */
+  entryNames?: string
 }
 
 type TransformRequest = {
@@ -553,11 +565,15 @@ async function build(request: BuildRequest): Promise<BuildResponse> {
 
     const result = await esbuild.build({
       entryPoints: [normalizePath(request.entry)],
-      bundle: true,
+      bundle: request.bundle ?? true,
       write: false,
       format: request.format ?? 'esm',
-      target: 'es2022',
-      sourcemap: false,
+      minify: request.minify ?? false,
+      sourcemap: request.sourcemap ?? false,
+      target: request.target ?? 'es2022',
+      external: request.external,
+      define: request.define,
+      entryNames: request.entryNames,
       logLevel: 'silent',
       plugins: [createVirtualFsPlugin(request.files)],
       outbase: '.',

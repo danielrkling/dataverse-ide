@@ -29,7 +29,8 @@ import * as vscode from 'vscode'
 import { rootUri } from './fsProvider.js'
 import getBulkEditServiceOverride from '@codingame/monaco-vscode-bulk-edit-service-override'
 import getWorkspaceTrustServiceOverride from '@codingame/monaco-vscode-workspace-trust-service-override'
-import getViewsServiceOverride from '@codingame/monaco-vscode-views-service-override'
+// NOTE: do not enable getViewsServiceOverride() here - see the service list
+// below; it conflicts with the workbench override's own part rendering.
 import getEmmetServiceOverride from '@codingame/monaco-vscode-emmet-service-override'
 import getSecretStorageServiceOverride from '@codingame/monaco-vscode-secret-storage-service-override'
 // import getTerminalServiceOverride from '@codingame/monaco-vscode-terminal-service-override'
@@ -417,7 +418,11 @@ export async function startWorkbench(
       ...getEnvironmentServiceOverride(),
       ...getBulkEditServiceOverride(),
       ...getWorkspaceTrustServiceOverride(),
-      // ...getViewsServiceOverride(),
+      // getViewsServiceOverride() must NOT be added on top of the workbench
+      // override: it would render all parts a second time into a hidden div
+      // and replace IEditorGroupsService/IEditorService, breaking views
+      // (explorer/search). View infrastructure (IViewsService, view
+      // containers) already comes with the workbench override.
       ...getEmmetServiceOverride(),
       ...getSecretStorageServiceOverride(),
 
@@ -425,7 +430,6 @@ export async function startWorkbench(
       // LLM endpoints) - present for completeness, mostly inert in-browser
       // ...getTerminalServiceOverride(),
       ...getSCMServiceOverride(),
-      ...getViewsServiceOverride(),
       // ...getDebugServiceOverride(),
 
       ...getLocalizationServiceOverride({

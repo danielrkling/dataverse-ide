@@ -10,6 +10,18 @@ export type DataverseWebResource = {
     apiBaseUrl?: string
     solutionUniqueName?: string
   }
+
+  export type DataverseSolution = {
+    uniquename: string
+    friendlyname?: string
+    isvisible?: boolean
+  }
+
+  export type DataverseUser = {
+    id: string
+    fullName: string
+    email: string
+  }
   
   const VALID_PREFIX = /^[A-Za-z].*_/
   
@@ -62,6 +74,105 @@ export type DataverseWebResource = {
   
   function escapeODataString(value: string): string {
     return value.replaceAll("'", "''")
+  }
+
+  /*
+   * Request resilience (ported from dataverse-dev-tools' dataverse service):
+   *
+   * - Every request runs under an abort timeout (30s default).
+   * - 429 responses honor the Retry-After header (seconds or HTTP date) and
+   *   are retried up to 3 times.
+   * - Transient 5xx responses and network errors are retried with
+   *   exponential backoff (300ms base, max 3 attempts).
+   */
+  const REQUEST_TIMEOUT_MS = 60000
+  const MAX_RETRIES = 3
+  const RETRY_BASE_DELAY_MS = 300
+
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  function parseRetryAfterMs(response: Response): number | undefined {
+    const header = response.headers.get('Retry-After')
+
+    if (header == null) {
+      return undefined
+    }
+
+    const seconds = Number(header)
+
+    if (!Number.isNaN(seconds)) {
+      return Math.max(0, seconds * 1000)
+    }
+
+    const date = new Date(header).getTime()
+
+    if (!Number.isNaN(date)) {
+      return Math.max(0, date - Date.now())
+    }
+
+    return undefined
+  }
+
+  async function fetchWithRetry(
+    url: string,
+    init: RequestInit = {},
+  ): Promise<Response> {
+    let lastError: unknown
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        await sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1))
+      }
+
+      const controller = new AbortController()
+      const timeout = setTimeout(
+        () => controller.abort(),
+        REQUEST_TIMEOUT_MS,
+      )
+
+      try {
+        const response = await fetch(url, {
+          ...init,
+          signal: controller.signal,
+        })
+
+        if (response.status === 429) {
+          if (attempt < MAX_RETRIES) {
+            const retryAfterMs = parseRetryAfterMs(response) ?? 2000
+
+            await sleep(retryAfterMs)
+
+            continue
+          }
+        } else if (
+          response.status >= 500 &&
+          response.status < 600 &&
+          attempt < MAX_RETRIES
+        ) {
+          continue
+        }
+
+        return response
+      } catch (error) {
+        /*
+         * AbortError from our own timeout is treated like a network error:
+         * retry, but the timeout is re-armed for the next attempt.
+         */
+        lastError = error
+
+        if (attempt >= MAX_RETRIES) {
+          break
+        }
+      } finally {
+        clearTimeout(timeout)
+      }
+    }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error('Request failed after retries.')
   }
   
   function getExtension(name: string): string | undefined {
@@ -167,7 +278,97 @@ export type DataverseWebResource = {
     private get requestHeaders(): Headers {
       return getHeaders(this.solutionUniqueName)
     }
-  
+
+    /*
+     * Visible solutions in the org, used by the Dataverse side panel's
+     * solution dropdown.
+     */
+    async listSolutions(): Promise<DataverseSolution[]> {
+      const search = new URLSearchParams({
+        $select: 'uniquename,friendlyname,isvisible',
+        $filter: 'isvisible eq true',
+        $top: '200',
+      })
+
+      const response = await fetchWithRetry(
+        `${this.apiUrl}/solutions?${search.toString()}`,
+        {
+          headers: this.requestHeaders,
+        },
+      )
+
+      if (!response.ok) {
+        throw new Error(
+          `Unable to list solutions: ${await getErrorMessage(response)}`,
+        )
+      }
+
+      const body = await response.json() as {
+        value?: {
+          uniquename?: string
+          friendlyname?: string
+          isvisible?: boolean
+        }[]
+      }
+
+      return (body.value ?? [])
+        .filter((solution) => typeof solution.uniquename === 'string')
+        .map((solution) => ({
+          uniquename: solution.uniquename as string,
+          friendlyname: solution.friendlyname,
+          isvisible: solution.isvisible,
+        }))
+    }
+
+    /*
+     * Current Dataverse user (WhoAmI + systemusers), used to seed the git
+     * commit author and the IDE user identity.
+     */
+    async getCurrentUser(): Promise<DataverseUser> {
+      const whoResponse = await fetchWithRetry(
+        `${this.apiUrl}/WhoAmI`,
+        {
+          headers: this.requestHeaders,
+        },
+      )
+
+      if (!whoResponse.ok) {
+        throw new Error(
+          `WhoAmI failed: ${await getErrorMessage(whoResponse)}`,
+        )
+      }
+
+      const who = await whoResponse.json() as { UserId?: string }
+
+      if (who.UserId == null) {
+        throw new Error('WhoAmI did not return a user ID.')
+      }
+
+      const userResponse = await fetchWithRetry(
+        `${this.apiUrl}/systemusers(${who.UserId})?$select=fullname,internalemailaddress,windowsoverallstatus`,
+        {
+          headers: this.requestHeaders,
+        },
+      )
+
+      if (!userResponse.ok) {
+        throw new Error(
+          `Reading the system user failed: ${await getErrorMessage(userResponse)}`,
+        )
+      }
+
+      const user = await userResponse.json() as {
+        fullname?: string
+        internalemailaddress?: string
+      }
+
+      return {
+        id: who.UserId,
+        fullName: user.fullname?.trim() || '',
+        email: user.internalemailaddress?.trim() || '',
+      }
+    }
+
     async getWebResource(
       name: string,
     ): Promise<DataverseWebResource | undefined> {
@@ -186,7 +387,7 @@ export type DataverseWebResource = {
         $top: '1',
       })
   
-      const response = await fetch(
+      const response = await fetchWithRetry(
         `${this.apiUrl}/webresourceset?${search.toString()}`,
         {
           headers: this.requestHeaders,
@@ -237,7 +438,7 @@ export type DataverseWebResource = {
        * Existing resource: update only the content payload.
        */
       if (existing != null) {
-        const response = await fetch(
+        const response = await fetchWithRetry(
           `${this.apiUrl}/webresourceset(${existing.webresourceid})/content`,
           {
             method: 'PUT',
@@ -260,7 +461,7 @@ export type DataverseWebResource = {
       /*
        * New resource: create name, type, and Base64 content together.
        */
-      const response = await fetch(
+      const response = await fetchWithRetry(
         `${this.apiUrl}/webresourceset?$select=name,webresourceid,webresourcetype`,
         {
           method: 'POST',
@@ -316,7 +517,7 @@ export type DataverseWebResource = {
           .join('') +
         '</webresources></importexportxml>'
   
-      const response = await fetch(
+      const response = await fetchWithRetry(
         `${this.apiUrl}/PublishXml`,
         {
           method: 'POST',

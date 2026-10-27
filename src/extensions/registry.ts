@@ -27,6 +27,8 @@ export const extensionModules: Record<
   gitlab: () => import('./gitlab/extension.js'),
   tailwind: () => import('./tailwind/extension.js'),
   rolldown: () => import('./rolldown/extension.js'),
+  flatten: () => import('./flatten/extension.js'),
+  template: () => import('./template/extension.js'),
 }
 
 /*
@@ -42,6 +44,8 @@ export const extensionEnabled: Record<string, boolean> = {
   gitlab: true,
   tailwind: true,
   rolldown: true,
+  flatten: true,
+  template: true,
 }
 
 export type ActivateExtensionsOptions = {

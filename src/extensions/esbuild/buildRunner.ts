@@ -11,7 +11,14 @@ import type { BuildOutputFile } from './worker.js'
 export type BuildRequestInput = {
   entry: string
   files: Record<string, string>
-  format?: 'esm' | 'iife'
+  format?: 'esm' | 'iife' | 'cjs'
+  minify?: boolean
+  sourcemap?: boolean
+  target?: string
+  bundle?: boolean
+  external?: string[]
+  define?: Record<string, string>
+  entryNames?: string
 }
 
 export type TransformRequestInput = {

@@ -6,6 +6,11 @@ import {
   contributeExtensionManifest,
 } from '../api.js'
 
+import {
+  createPanelIcon,
+  PANEL_GLYPHS,
+} from '../panels.js'
+
 import type {
   ExtensionContext,
   IdeExtension,
@@ -19,6 +24,9 @@ import {
   fetchPackageVersions,
   writeNodeModulesBackToWorkspace,
   writePackageJsonBackToWorkspace,
+  listInstalledPackages,
+  viewPackage,
+  checkOutdatedPackages,
   type NpmDependency,
   type NpmDependencySection,
 } from './packageBridge.js'
@@ -44,6 +52,9 @@ const COMMAND_INSTALL_ALL = 'dataverseIde.npm.installAll'
 const COMMAND_ADD_DEPENDENCY = 'dataverseIde.npm.addDependency'
 const COMMAND_DEPENDENCY_ACTION = 'dataverseIde.npm.dependencyAction'
 const COMMAND_REFRESH_PACKAGES = 'dataverseIde.npm.refreshPackages'
+const COMMAND_LS = 'dataverseIde.npm.ls'
+const COMMAND_VIEW = 'dataverseIde.npm.view'
+const COMMAND_OUTDATED = 'dataverseIde.npm.outdated'
 
 type PackageTreeElementData =
   | {
@@ -71,13 +82,21 @@ class DependenciesTreeProvider
 {
   private readonly onDidChangeEmitter: vscodeType.EventEmitter<
     PackageTreeElement | undefined
-  > = new this.vscode.EventEmitter()
+  >
 
   readonly onDidChangeTreeData: vscodeType.Event<
     PackageTreeElement | undefined
-  > = this.onDidChangeEmitter.event
+  >
 
-  constructor(private readonly deps: TreeDeps) {}
+  /*
+   * Field initializers run before constructor parameter properties are
+   * assigned, so this.vscode (this.deps.vscode) is not yet available there;
+   * the emitter must therefore be created in the constructor body.
+   */
+  constructor(private readonly deps: TreeDeps) {
+    this.onDidChangeEmitter = new deps.vscode.EventEmitter()
+    this.onDidChangeTreeData = this.onDidChangeEmitter.event
+  }
 
   private get vscode(): typeof vscodeType {
     return this.deps.vscode
@@ -202,10 +221,23 @@ export default {
           command: COMMAND_ADD_DEPENDENCY,
           title: 'npm: Add Dependency…',
         },
+        {
+          command: COMMAND_LS,
+          title: 'npm: List Installed Packages',
+        },
+        {
+          command: COMMAND_VIEW,
+          title: 'npm: View Package Info…',
+        },
+        {
+          command: COMMAND_OUTDATED,
+          title: 'npm: Check Outdated Dependencies',
+        },
       ],
       views: {
-        containerId: 'dataverseIde',
-        containerTitle: 'Dataverse IDE',
+        containerId: 'dataverseIde.npm',
+        containerTitle: 'npm',
+        icon: createPanelIcon(PANEL_GLYPHS.package),
         views: [
           {
             id: 'dataverseIde.npm.packages',
@@ -513,6 +545,147 @@ export default {
       },
     )
 
+    const lsCommand = vscode.commands.registerCommand(
+      COMMAND_LS,
+      async () => {
+        const installed = await listInstalledPackages(
+          vscode,
+          context.workspaceRootUri,
+        )
+
+        if (installed.length === 0) {
+          await vscode.window.showInformationMessage(
+            'npm: nothing is installed in node_modules yet.',
+          )
+
+          return
+        }
+
+        outputChannel.show(true)
+        outputChannel.appendLine(`[npm ls] ${installed.length} top-level package(s):`)
+
+        for (const entry of installed) {
+          const section = entry.section != null ? ` (${entry.section})` : ''
+          const range = entry.range != null ? ` wanted ${entry.range}` : ''
+
+          outputChannel.appendLine(
+            `[npm ls] ${entry.name}@${entry.version}${range}${section}`,
+          )
+        }
+      },
+    )
+
+    const viewCommand = vscode.commands.registerCommand(
+      COMMAND_VIEW,
+      async () => {
+        const packageName = await vscode.window.showInputBox({
+          title: 'npm: View Package Info',
+          prompt: 'Enter the package name to look up on the registry.',
+          placeHolder: 'lodash',
+          ignoreFocusOut: true,
+        })
+
+        if (packageName == null || packageName.trim().length === 0) {
+          return
+        }
+
+        try {
+          const info = await viewPackage(packageName.trim())
+
+          outputChannel.show(true)
+          outputChannel.appendLine(`[npm view] ${info.name}`)
+          outputChannel.appendLine(`[npm view] latest: ${info.latest}`)
+
+          if (info.description != null) {
+            outputChannel.appendLine(`[npm view] description: ${info.description}`)
+          }
+
+          if (info.license != null) {
+            outputChannel.appendLine(`[npm view] license: ${info.license}`)
+          }
+
+          if (info.homepage != null) {
+            outputChannel.appendLine(`[npm view] homepage: ${info.homepage}`)
+          }
+
+          outputChannel.appendLine(
+            `[npm view] versions: ${info.versionCount}, dist-tags: ${Object.entries(info.distTags).map(([tag, version]) => `${tag}=${version}`).join(', ')}`,
+          )
+        } catch (error) {
+          await vscode.window.showErrorMessage(
+            `npm view failed: ${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
+      },
+    )
+
+    const outdatedCommand = vscode.commands.registerCommand(
+      COMMAND_OUTDATED,
+      async () => {
+        const outdated = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: 'npm: checking outdated dependencies…',
+            cancellable: false,
+          },
+          () => checkOutdatedPackages(vscode, context.workspaceRootUri),
+        )
+
+        if (outdated.length === 0) {
+          await vscode.window.showInformationMessage(
+            'npm: no dependencies declared in package.json.',
+          )
+
+          return
+        }
+
+        const stale = outdated.filter(
+          (entry) => entry.installed != null && entry.installed !== entry.latest,
+        )
+
+        outputChannel.show(true)
+        outputChannel.appendLine(
+          `[npm outdated] ${outdated.length} dependency/dependencies, ${stale.length} behind latest:`,
+        )
+
+        for (const entry of outdated) {
+          const status =
+            entry.installed == null
+              ? 'not installed'
+              : entry.installed === entry.latest
+                ? 'up to date'
+                : 'OUTDATED'
+
+          outputChannel.appendLine(
+            `[npm outdated] ${entry.name} — wanted ${entry.range}, installed ${entry.installed ?? '—'}, latest ${entry.latest} [${status}] (${entry.section})`,
+          )
+        }
+
+        if (stale.length > 0) {
+          const selection = await vscode.window.showInformationMessage(
+            `npm: ${stale.length} package(s) are behind the latest version.`,
+            'Update All',
+          )
+
+          if (selection === 'Update All') {
+            await installFromSpecs(
+              stale
+                /*
+                 * Install the concrete latest version fetched above;
+                 * "@latest" is a dist-tag that the package manager does
+                 * not resolve.
+                 */
+                .map((entry) =>
+                  entry.latest.startsWith('(')
+                    ? entry.name
+                    : `${entry.name}@${entry.latest}`,
+                ),
+            )
+          }
+        }
+      },
+    )
+
     const treeRegistration = vscode.window.registerTreeDataProvider(
       'dataverseIde.npm.packages',
       dependencyTreeProvider,
@@ -538,6 +711,9 @@ export default {
         addDependencyCommand.dispose()
         dependencyActionCommand.dispose()
         refreshCommand.dispose()
+        lsCommand.dispose()
+        viewCommand.dispose()
+        outdatedCommand.dispose()
       },
     }
   },

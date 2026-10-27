@@ -208,6 +208,23 @@ import {
         displayName: 'Dataverse IDE Git',
         description: 'Browser-based Git status integration for Dataverse IDE.',
         contributes: {
+            configuration: {
+                title: 'Git',
+                properties: {
+                    'dataverseIde.git.authorName': {
+                        type: 'string',
+                        default: '',
+                        description:
+                            'Git commit author name. Set together with authorEmail to skip the author prompts.',
+                    },
+                    'dataverseIde.git.authorEmail': {
+                        type: 'string',
+                        default: '',
+                        description:
+                            'Git commit author email address. Set together with authorName to skip the author prompts.',
+                    },
+                },
+            },
             commands: [
               {
                 command: 'dataverseGit.initialize',
@@ -572,10 +589,32 @@ import {
           }
         | undefined
       > {
+        /*
+         * Settings panel values (dataverseIde.git.authorName/authorEmail)
+         * skip the prompts when both are set.
+         */
+        const config = vscode.workspace.getConfiguration(
+          'dataverseIde.git',
+          rootUri,
+        )
+
+        const configuredName =
+          config.get<string>('authorName', '').trim()
+        const configuredEmail =
+          config.get<string>('authorEmail', '').trim()
+
+        if (configuredName.length > 0 && configuredEmail.length > 0) {
+          return {
+            name: configuredName,
+            email: configuredEmail,
+          }
+        }
+
         const name = await vscode.window.showInputBox({
           title: 'Git Commit Author',
           prompt: 'Enter the commit author name.',
           placeHolder: 'Example: Ada Lovelace',
+          value: configuredName.length > 0 ? configuredName : undefined,
           ignoreFocusOut: true,
         })
       
@@ -587,6 +626,7 @@ import {
           title: 'Git Commit Author',
           prompt: 'Enter the commit author email address.',
           placeHolder: 'Example: ada@example.mil',
+          value: configuredEmail.length > 0 ? configuredEmail : undefined,
           ignoreFocusOut: true,
         })
       
@@ -1454,7 +1494,9 @@ import type { GitCredentialStore } from './credentials.js'
 export default {
   id: 'git',
 
-  async activate(context: ExtensionContext): Promise<void> {
+  async activate(
+    context: ExtensionContext,
+  ): Promise<vscodeType.Disposable | void> {
     const handle = context.workspaceDirectoryHandle
 
     if (handle == null) {
@@ -1469,8 +1511,14 @@ export default {
       remove: (key) => context.secrets.remove(key),
     }
 
-    await installDataverseGitExtension(handle, context.workspaceRootUri, {
+    const controller = await installDataverseGitExtension(handle, context.workspaceRootUri, {
       credentialStore,
     })
+
+    return {
+      dispose() {
+        controller.dispose()
+      },
+    }
   },
 } satisfies IdeExtension
