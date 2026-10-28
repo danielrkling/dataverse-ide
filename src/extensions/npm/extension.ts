@@ -580,6 +580,7 @@ export default {
                 onProgress: (message) => {
                   outputChannel.appendLine(`[npm] ${message}`)
                 },
+                transform: false
               })
 
               const fileCount = await writeNodeModulesBackToWorkspace(
