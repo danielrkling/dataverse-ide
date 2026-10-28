@@ -2,6 +2,8 @@ import type * as vscodeType from 'vscode'
 
 import { EsbuildBuildRunner } from './buildRunner.js'
 
+import type { BuildRunnerResponse } from './buildRunner.js'
+
 import type { BuildOutputFile } from './worker.js'
 
 import {
@@ -49,17 +51,23 @@ const SOURCE_EXTENSIONS =
 const MAX_COLLECTED_FILES = 8000
 
 /*
- * node_modules is collected in its own pass with its own cap: in a single
- * root-wide glob query its file count would crowd out actual sources (or
- * be truncated itself), breaking bare-import resolution.
+ * Lazy two-pass resolution: initial collection loads only package.json
+ * manifests from node_modules (cheap, and exactly what bare-import
+ * resolution starts from). When the resolver needs a package file it does
+ * not have, the worker returns needFiles and runBuild reads just those
+ * paths from the workspace and retries. This avoids slurping up to
+ * MAX_COLLECTED_NODE_MODULES_FILES files per build.
  */
-const MAX_COLLECTED_NODE_MODULES_FILES = 12000
+const MAX_COLLECTED_PACKAGE_MANIFESTS = 5000
+
+/*
+ * Safety bound for lazy rounds (each round tops the map up with the files
+ * the resolver missed the previous round).
+ */
+const MAX_LAZY_ROUNDS = 12
 
 const EXCLUDE_PATTERN =
   '{**/.git/**,**/.ide-build/**,**/dist/**,**/out/**,**/node_modules/**}'
-
-const NODE_MODULES_EXCLUDE_PATTERN =
-  '{**/.git/**,**/.ide-build/**,**/dist/**,**/out/**}'
 
 type BuildRequest = {
   id: number
@@ -81,6 +89,14 @@ type BuildResponse =
       error: string
     }
 
+const CONFIG_SECTION = 'dataverseIde.esbuild'
+
+function getAutoStartWatchSetting(vscode: typeof vscodeType): boolean {
+  return vscode.workspace
+    .getConfiguration(CONFIG_SECTION, null)
+    .get<boolean>('autoStartWatch', false)
+}
+
 function isBuildResponse(value: unknown): value is BuildResponse {
   return (
     typeof value === 'object' &&
@@ -94,7 +110,7 @@ function isBuildResponse(value: unknown): value is BuildResponse {
 async function collectWorkspaceSources(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
-): Promise<Record<string, string>> {
+): Promise<{ files: Record<string, string>; debugLines: string[] }> {
   const rootPath = rootUri.path.replace(/\/+$/, '')
 
   const collect = async (
@@ -106,13 +122,20 @@ async function collectWorkspaceSources(
 
   const sourceUris = await collect('**/*', EXCLUDE_PATTERN, MAX_COLLECTED_FILES)
 
-  const nodeModulesUris = await collect(
-    'node_modules/**',
-    NODE_MODULES_EXCLUDE_PATTERN,
-    MAX_COLLECTED_NODE_MODULES_FILES,
+  const nodeModulesManifestUris = await collect(
+    'node_modules/**/package.json',
+    '{**/.git/**}',
+    MAX_COLLECTED_PACKAGE_MANIFESTS,
   )
 
-  const uris = [...sourceUris, ...nodeModulesUris]
+  /*
+   * Collection diagnostics: report how much was found up front.
+   */
+  const nodeModulesDebugInfo = [
+    `[esbuild] findFiles("node_modules/**/package.json") returned ${nodeModulesManifestUris.length} manifest(s).`,
+  ]
+
+  const uris = [...sourceUris, ...nodeModulesManifestUris]
 
   const files: Record<string, string> = {}
 
@@ -147,7 +170,16 @@ async function collectWorkspaceSources(
     }
   }
 
-  return files
+  const collectedNodeModules = Object.keys(files).filter((key) =>
+    key.startsWith('node_modules/'),
+  ).length
+
+  const debugLines = [
+    ...nodeModulesDebugInfo,
+    `[esbuild] file map: ${Object.keys(files).length} entries (node_modules: ${collectedNodeModules}).`,
+  ]
+
+  return { files, debugLines }
 }
 
 async function writeOutputs(
@@ -206,12 +238,6 @@ export default {
     
       currentConfig = loaded.config
     
-      /*
-       * A direct edit to "watch" in esbuild.config.json takes effect as soon as
-       * the file is saved.
-       */
-      setWatchRuntimeEnabled(currentConfig.watch)
-    
       notifyStatus()
     }
 
@@ -245,6 +271,26 @@ export default {
           title: 'esbuild: Toggle Watch',
         },
       ],
+      configuration: {
+        title: 'esbuild',
+        properties: {
+          'dataverseIde.esbuild.autoStartWatch': {
+            type: 'boolean',
+            default: false,
+            scope: 'window',
+            description:
+              'Automatically start esbuild watch mode on activation. Watch state is runtime-only; changing this setting does not persist to esbuild.config.json.',
+          },
+
+          'dataverseIde.esbuild.logCollection': {
+            type: 'boolean',
+            default: true,
+            scope: 'window',
+            description:
+              'Log node_modules collection details (findFiles counts, extensions, dropped files) to the esbuild output channel for every build.',
+          },
+        },
+      },
     })
 
     const runner = new EsbuildBuildRunner(outputChannel)
@@ -314,11 +360,39 @@ export default {
      */
     await reloadConfigFromDisk()
 
+    /*
+     * Watch is runtime-only. Autostart comes from the workspace/user setting
+     * dataverseIde.esbuild.autoStartWatch.
+     */
+    setWatchRuntimeEnabled(getAutoStartWatchSetting(vscode))
+
+    const watchSettingListener = vscode.workspace.onDidChangeConfiguration(
+      async (event) => {
+        if (
+          event.affectsConfiguration(
+            'dataverseIde.esbuild.autoStartWatch',
+            context.workspaceRootUri,
+          )
+        ) {
+          setWatchEnabled(getAutoStartWatchSetting(vscode))
+        }
+      },
+    )
+
     async function runBuild(
       entryPath: string,
       options?: { silent?: boolean },
     ): Promise<boolean> {
       const started = Date.now()
+
+      /*
+       * Canonicalize the entry the same way the config reader does: the
+       * collected files map keys carry no './' prefix and store only forward
+       * slashes.
+       */
+      entryPath = entryPath
+        .replaceAll('\\', '/')
+        .replace(/^(?:\.{1,2}\/)+/, '')
 
       try {
         await reloadConfigFromDisk()
@@ -335,28 +409,117 @@ export default {
         outputChannel.appendLine(`[esbuild] Building ${entryPath}…`)
         
 
-        const files = await collectWorkspaceSources(
+        const { files, debugLines } = await collectWorkspaceSources(
           vscode,
           context.workspaceRootUri,
         )
 
+        for (const line of debugLines) {
+          outputChannel.appendLine(line)
+        }
+
+        /*
+         * Collection diagnostics: when bundling npm packages goes wrong we
+         * need to know whether the package actually landed in the map (npm
+         * install writes it, but the collector caps node_modules files).
+         */
+        const collectedNodeModules = Object.keys(files).filter((key) =>
+          key.startsWith('node_modules/'),
+        ).length
+
+        outputChannel.appendLine(
+          `[esbuild] collected ${Object.keys(files).length} files from the workspace ` +
+            `(node_modules: ${collectedNodeModules}).`,
+        )
+
         if (files[entryPath] == null) {
+          const nearby = Object.keys(files)
+            .filter(
+              (key) =>
+                key.startsWith(entryPath.replace(/\.[^./]+$/, '')) ||
+                key.startsWith(`${entryPath}.`),
+            )
+            .slice(0, 5)
+
           throw new Error(
-            `Entry ${entryPath} was not collected from the workspace. Check the entry setting in esbuild.config.json.`,
+            `Entry ${entryPath} was not collected from the workspace ` +
+              `(collected source files: ${Object.keys(files).length - collectedNodeModules}).` +
+              (nearby.length > 0
+                ? ` Nearby: ${nearby.join(', ')}.`
+                : ' Check the entry setting in esbuild.config.json.'),
           )
         }
 
-        const response = await runner.build({
-          entry: entryPath,
-          files,
-          format: currentConfig.format,
-          minify: currentConfig.minify,
-          sourcemap: currentConfig.sourcemap,
-          target: currentConfig.target,
-          bundle: currentConfig.bundle,
-          external: currentConfig.external,
-          define: currentConfig.define,
-        })
+        const absentPaths = new Set<string>()
+
+        /*
+         * Lazy two-pass resolution: the first response may be a probe round
+         * listing concrete paths (package files) the resolver needed; read
+         * those from the workspace and retry. Repeat until the resolver
+         * stops requesting files, marking truly-absent paths so later
+         * rounds finalize (unresolved → warning + external) instead of
+         * re-probing them forever.
+         */
+        let round = 0
+        let response: BuildRunnerResponse | undefined
+
+        for (;;) {
+          round++
+
+          response = await runner.build({
+            entry: entryPath,
+            files,
+            format: currentConfig.format,
+            minify: currentConfig.minify,
+            sourcemap: currentConfig.sourcemap,
+            target: currentConfig.target,
+            bundle: currentConfig.bundle,
+            external: currentConfig.external,
+            define: currentConfig.define,
+            absentPaths: [...absentPaths],
+          })
+
+          if (!response.ok) {
+            break
+          }
+
+          const requested = response.needFiles ?? []
+
+          if (requested.length === 0 || round >= MAX_LAZY_ROUNDS) {
+            break
+          }
+
+          let added = 0
+
+          for (const relativePath of requested) {
+            try {
+              const fileUri = vscode.Uri.joinPath(
+                context.workspaceRootUri,
+                ...relativePath.split('/'),
+              )
+
+              const bytes = await vscode.workspace.fs.readFile(fileUri)
+
+              files[relativePath] = new TextDecoder().decode(bytes)
+              added++
+            } catch {
+              /*
+               * The path does not exist in the workspace. Remember that so
+               * the next round finalizes (warning + external) rather than
+               * re-requesting the same paths forever.
+               */
+              absentPaths.add(relativePath)
+            }
+          }
+
+          outputChannel.appendLine(
+            `[esbuild] lazy resolution round ${round}: read ${added} of ${requested.length} requested file(s).`,
+          )
+        }
+
+        if (response == null) {
+          return false
+        }
 
         if (!response.ok) {
           outputChannel.appendLine(response.error)
@@ -370,8 +533,64 @@ export default {
           return false
         }
 
+        if ((response.needFiles ?? []).length > 0) {
+          /*
+           * The lazy round cap ran out while the resolver still missed
+           * files (import cycles probing distinct paths, or a pathological
+           * package layout).
+           */
+          const stillMissing =
+            (response.needFiles ?? []).slice(0, 5).join(', ')
+
+          outputChannel.appendLine(
+            `[esbuild] lazy file resolution exceeded ${MAX_LAZY_ROUNDS} rounds; still missing: ${stillMissing}${(response.needFiles ?? []).length > 5 ? '…' : ''}`,
+          )
+
+          lastStatus = 'error'
+          lastMessage = `${MAX_LAZY_ROUNDS} lazy resolution rounds exceeded; still missing ${stillMissing}`
+          lastFinishedAt = Date.now()
+          notifyStatus()
+
+          return false
+        }
+
         for (const warning of response.warnings) {
           outputChannel.appendLine(`[esbuild] warning: ${warning}`)
+        }
+
+        /*
+         * Npm-package diagnostics: inspect the collected map whenever a bare
+         * import failed to resolve, so the output channel says WHY (not
+         * installed vs not collected vs package shape).
+         */
+        for (const warning of response.warnings) {
+          const match =
+            /^Could not resolve npm package "([^"\s]+) imported by .*"/.exec(warning)
+
+          if (match == null) {
+            continue
+          }
+
+          const packageName = match[1]
+          const packageKey = `node_modules/${packageName}`
+
+          if (files[`${packageKey}/package.json`] == null) {
+            outputChannel.appendLine(
+              `[esbuild] diagnostic: ${packageKey}/package.json was not collected. ` +
+                'The package is either not installed (npm: Install) or fell outside the node_modules collection cap.',
+            )
+            continue
+          }
+
+          const collectedForPackage = Object.keys(files).filter((key) =>
+            key.startsWith(`${packageKey}/`),
+          )
+
+          outputChannel.appendLine(
+            `[esbuild] diagnostic: ${packageKey} has ${collectedForPackage.length} collected file(s), ` +
+              `e.g. ${collectedForPackage.slice(0, 6).join(', ')}. The resolver rejected the exports map — ` +
+              'check the package version/exports field.',
+          )
         }
 
         if (response.outputs.length === 0) {
@@ -515,18 +734,11 @@ async function setWatchEnabled(
   enabled: boolean,
 ): Promise<void> {
   /*
-   * Persist first. If the file cannot be written, do not change the live
-   * watcher state and create panel/file disagreement.
+   * Watch state is runtime-only; toggles do not touch esbuild.config.json.
+   * Persistence (autostart) is the dataverseIde.esbuild.autoStartWatch
+   * setting.
    */
-  currentConfig = await updateEsbuildConfig(
-    vscode,
-    context.workspaceRootUri,
-    {
-      watch: enabled,
-    },
-  )
-
-  setWatchRuntimeEnabled(currentConfig.watch)
+  setWatchRuntimeEnabled(enabled)
 }
 
     const startWatchCommand = vscode.commands.registerCommand(
@@ -589,7 +801,7 @@ async function setWatchEnabled(
       title: 'esbuild',
       icon: createPanelIcon(PANEL_GLYPHS.zap),
       description:
-        'Build settings are defined in esbuild.config.json. Open the file to edit entry points, output, format, minification, external packages, defines, and watch preference.',
+        'Build settings are defined in esbuild.config.json. Open the file to edit entry points, output, format, minification, external packages, and defines. Watch is controlled by the dataverseIde.esbuild.autoStartWatch setting, or the Start/Stop Watch actions.',
       workspaceRootUri: context.workspaceRootUri,
       actions: [
         {
@@ -636,6 +848,7 @@ async function setWatchEnabled(
     return {
       dispose() {
         watcher?.dispose()
+        watchSettingListener.dispose()
         watchStatusItem.dispose()
         buildPanel.dispose()
 

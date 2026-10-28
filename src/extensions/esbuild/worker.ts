@@ -53,6 +53,13 @@ type BuildRequest = {
   define?: Record<string, string>
 
   /*
+   * Lazy resolution: paths the caller has already proven unreadable (absent
+   * on the filesystem). The resolver skips recording them as needed files,
+   * so a follow-up round finalizes instead of asking for them again.
+   */
+  absentPaths?: string[]
+
+  /*
    * Entry-relative or workspace-relative pattern such as "[dir]/[name]".
    */
   entryNames?: string
@@ -63,6 +70,7 @@ type TransformRequest = {
   type: 'transform'
   filename: string
   source: string
+  minify?: boolean
 }
 
 export type WorkerRequest =
@@ -79,6 +87,15 @@ type BuildSuccessResponse = {
   ok: true
   outputs: BuildOutputFile[]
   warnings: string[]
+
+  /*
+   * Lazy resolution round: paths the resolver needed but the files map did
+   * not contain. Non-empty means this is a PROBE round — outputs/warnings
+   * are empty and the caller should read these paths from the workspace and
+   * send the build request again (merging files, marking unreadable paths
+   * in absentPaths).
+   */
+  needFiles?: string[]
 }
 
 type BuildFailureResponse = {
@@ -208,6 +225,100 @@ const NODE_BUILTINS = new Set([
   'worker_threads',
   'zlib',
 ])
+
+/*
+ * Conditions this browser resolver activates when walking a package's
+ * conditional exports/imports map. "browser" is listed first for
+ * documentation only: precedence inside a single map always comes from the
+ * package's own key order, not from this set.
+ */
+const EXPORT_CONDITIONS = new Set([
+  'browser',
+  'import',
+  'module',
+  'default',
+  'require',
+])
+
+/*
+ * Resolve a conditional exports/imports target into a concrete path string.
+ *
+ * Follows the Node.js PACKAGE_EXPORTS_RESOLVE algorithm: iterate the object's
+ * own key order and take the first key that is an active condition, recursing
+ * when that branch is itself an object. Key order wins over the condition list
+ * order, which is what Node, esbuild, and Vite all do - iterating our
+ * condition list first would pick a different file than Node does whenever a
+ * package lists two active conditions in an order we don't happen to agree
+ * with.
+ */
+function resolveConditionalExport(
+  target: unknown,
+  conditions: Set<string>,
+): string | undefined {
+  if (typeof target === 'string') {
+    return target
+  }
+
+  if (Array.isArray(target)) {
+    for (const entry of target) {
+      const resolved = resolveConditionalExport(
+        entry,
+        conditions,
+      )
+
+      if (resolved != null) {
+        return resolved
+      }
+    }
+
+    return undefined
+  }
+
+  if (typeof target !== 'object' || target == null) {
+    return undefined
+  }
+
+  for (const key of Object.keys(target as Record<string, unknown>)) {
+    if (!conditions.has(key)) {
+      continue
+    }
+
+    const resolved = resolveConditionalExport(
+      (target as Record<string, unknown>)[key],
+      conditions,
+    )
+
+    if (resolved != null) {
+      return resolved
+    }
+  }
+
+  return undefined
+}
+
+/*
+ * A path "has a file extension" when its last segment contains a dot and is
+ * followed by a known extension. Extension-less paths (package roots,
+ * "fp", index candidates) must be probed against every extension; existing
+ * extensioned paths must not be probed further (probing "index.mjs.cjs" is
+ * always pointless).
+ */
+const KNOWN_EXTENSIONS = new Set([
+  ...RESOLVABLE_EXTENSIONS,
+  ...COMPANION_EXTENSIONS,
+  ...INDEX_TRAILS,
+])
+
+function hasFileExtension(path: string): boolean {
+  const basename = path.split('/').pop() ?? ''
+  const dotIndex = basename.lastIndexOf('.')
+
+  if (dotIndex <= 0) {
+    return false
+  }
+
+  return KNOWN_EXTENSIONS.has(basename.slice(dotIndex))
+}
 
 function normalizePath(value: string): string {
   const segments: string[] = []
@@ -493,28 +604,26 @@ function resolveExportsField(
       }
 
       /*
-       * Conditional wildcard targets are uncommon but valid. This recursive
-       * call resolves a conditional target after replacing its wildcard in
-       * any direct-string branch handled above.
+       * Conditional wildcard targets are uncommon but valid. Resolve the
+       * conditional object the same way as elsewhere: package key order
+       * defines precedence, then substitute the wildcard into the winning
+       * template.
        */
       if (
         typeof target === 'object' &&
         target != null &&
         !Array.isArray(target)
       ) {
-        for (const conditionTarget of Object.values(target)) {
-          if (typeof conditionTarget !== 'string') {
-            continue
-          }
+        const conditionTarget = resolveConditionalExport(
+          target,
+          EXPORT_CONDITIONS,
+        )
 
-          const resolved = resolveExportTarget(
+        if (conditionTarget != null) {
+          return resolveExportTarget(
             `${pkgDir}/${conditionTarget.replaceAll('*', wildcardValue)}`,
             lookup,
           )
-
-          if (resolved != null) {
-            return resolved
-          }
         }
       }
     }
@@ -525,22 +634,36 @@ function resolveExportsField(
   /*
    * Conditional export map.
    *
-   * Prefer browser-compatible ESM output. "require" remains a final fallback
-   * for packages that expose CommonJS only.
+   * Follows the Node.js PACKAGE_EXPORTS_RESOLVE algorithm: iterate the
+   * object's own key order and take the first key that is an active
+   * condition, recursing when that branch is itself an object. Key order
+   * wins over the condition list order, which is what Node, esbuild, and
+   * Vite all do - iterating a fixed condition list first would pick a
+   * different file than Node does whenever a package lists two active
+   * conditions in an order we don't happen to agree with.
    */
-  const conditions = [
-    'browser',
-    'import',
-    'module',
-    'default',
-    'require',
-  ]
-
-  for (const condition of conditions) {
-    const target = map[condition]
-
-    if (target == null) {
+  for (const key of Object.keys(map)) {
+    if (!EXPORT_CONDITIONS.has(key)) {
       continue
+    }
+
+    const target = map[key]
+
+    /*
+     * A matched string target is authoritative. The package said "under
+     * this condition, this exact file is the entry point". If we then fail
+     * to find it in the virtual filesystem and quietly fall through to a
+     * later branch, we resolve a completely different build than the
+     * package intended - typically the server bundle of a library that
+     * also ships a browser one, which then fails to resolve server-only
+     * dependencies several modules later. So a condition match that misses
+     * the filesystem is reported as unresolved instead of being downgraded.
+     */
+    if (typeof target === 'string') {
+      return resolveExportTarget(
+        `${pkgDir}/${target}`,
+        lookup,
+      )
     }
 
     const resolved = resolveExportsField(
@@ -560,6 +683,7 @@ function resolveExportsField(
 
 function createPackageResolver(
   files: Record<string, string>,
+  reportMissing: (path: string) => void,
 ) {
   function lookup(path: string): string | undefined {
     const normalized = normalizePath(path)
@@ -568,12 +692,25 @@ function createPackageResolver(
       return normalized
     }
 
+    /*
+     * Lazy resolution: report the exact requested path, then extension
+     * candidates. For an extensioned request (e.g. an exports target such
+     * as "./dist/index.mjs") probing further extensions is pointless;
+     * only index trails apply to extension-less requests.
+     */
+    if (hasFileExtension(normalized)) {
+      reportMissing(normalized)
+      return undefined
+    }
+
     for (const extension of COMPANION_EXTENSIONS) {
       const candidate = `${normalized}${extension}`
 
       if (files[candidate] != null) {
         return candidate
       }
+
+      reportMissing(candidate)
     }
 
     for (const trail of INDEX_TRAILS) {
@@ -582,6 +719,8 @@ function createPackageResolver(
       if (files[candidate] != null) {
         return candidate
       }
+
+      reportMissing(candidate)
     }
 
     return undefined
@@ -595,9 +734,19 @@ function createPackageResolver(
       subpath,
     } = splitPackageSpec(specifier)
 
-    const packageJson = parseJsonSafe(
-      files[`${packageDir}/package.json`] ?? '',
-    )
+    const packageJsonText = files[`${packageDir}/package.json`]
+
+    if (packageJsonText == null) {
+      /*
+       * Lazy resolution: without the manifest nothing can be resolved; ask
+       * the main thread for it (next round re-resolves the full package).
+       */
+      reportMissing(`${packageDir}/package.json`)
+    }
+
+    const packageJson = packageJsonText != null
+      ? parseJsonSafe(packageJsonText)
+      : undefined
 
     if (packageJson != null) {
       /*
@@ -667,16 +816,224 @@ function createPackageResolver(
       : lookup(packageDir)
   }
 
+  /*
+   * Find the nearest package root (directory holding a package.json) for an
+   * importer file inside the virtual filesystem, walking up parent
+   * directories. Package "imports" specifiers are resolved against the
+   * importer's nearest package.json, exactly like Node does.
+   */
+  function findPackageRoot(
+    importer: string,
+  ): string | undefined {
+    const segments = normalizePath(importer)
+      .split('/')
+      .filter((segment) => segment.length > 0)
+
+    /*
+     * The importer is a file path; drop the file name so the walk starts at
+     * the containing directory.
+     */
+    if (segments.length > 0) {
+      segments.pop()
+    }
+
+    for (let index = segments.length; index >= 0; index--) {
+      const directory = segments
+        .slice(0, index)
+        .join('/')
+
+      const packageJsonPath = directory.length === 0
+        ? 'package.json'
+        : `${directory}/package.json`
+
+      if (files[packageJsonPath] != null) {
+        return directory.length === 0 ? '' : directory
+      }
+    }
+
+    return undefined
+  }
+
+  /*
+   * Resolve a package "imports" specifier such as "#example" or
+   * "#example/detail" against the importer's nearest package.json.
+   *
+   * Supports direct keys, wildcard keys ("#features/*"), conditional maps,
+   * and nested references (#-targeting #-targets, depth-limited). Paths
+   * must be relative ("./…") and are resolved against the package root.
+   */
+  function resolvePackageImport(
+    specifier: string,
+    importer: string,
+    depth = 0,
+  ): string | undefined {
+    if (depth > 3) {
+      return undefined
+    }
+
+    const packageDir = findPackageRoot(importer)
+
+    if (packageDir == null) {
+      return undefined
+    }
+
+    const packageJson = parseJsonSafe(
+      files[`${packageDir}/package.json`] ?? '',
+    )
+
+    const importsField = packageJson?.imports
+
+    if (
+      importsField == null ||
+      typeof importsField !== 'object' ||
+      Array.isArray(importsField)
+    ) {
+      return undefined
+    }
+
+    const map = importsField as Record<string, unknown>
+    const requested = specifier.slice(1)
+
+    let target = map[specifier]
+    let wildcardValue: string | undefined
+
+    /*
+     * Basic wildcard support:
+     *
+     *   "#features/*": "./src/features/*.js"
+     */
+    if (target == null) {
+      for (const [pattern, value] of Object.entries(map)) {
+        if (!pattern.includes('*')) {
+          continue
+        }
+
+        const wildcardIndex = pattern.indexOf('*')
+        const prefix = pattern.slice(0, wildcardIndex)
+        const suffix = pattern.slice(wildcardIndex + 1)
+
+        if (
+          !specifier.startsWith(prefix) ||
+          !specifier.endsWith(suffix) ||
+          specifier.length < prefix.length + suffix.length
+        ) {
+          continue
+        }
+
+        wildcardValue = specifier.slice(
+          prefix.length,
+          specifier.length - suffix.length,
+        )
+
+        target = value
+        break
+      }
+    }
+
+    if (target == null) {
+      return undefined
+    }
+
+    const template = resolveConditionalExport(
+      target,
+      EXPORT_CONDITIONS,
+    )
+
+    if (template == null) {
+      return undefined
+    }
+
+    const substituted = wildcardValue == null
+      ? template
+      : template.replaceAll('*', wildcardValue)
+
+    /*
+     * An imports target may itself be another "#…" specifier; resolve it
+     * recursively against the same package.json.
+     */
+    if (substituted.startsWith('#')) {
+      return resolvePackageImport(
+        substituted,
+        importer,
+        depth + 1,
+      )
+    }
+
+    if (!substituted.startsWith('./')) {
+      return undefined
+    }
+
+    return resolveExportTarget(
+      `${packageDir}/${substituted}`,
+      lookup,
+    )
+  }
+
   return {
     resolveBareImport,
+    resolvePackageImport,
   }
 }
 
 function createVirtualFsPlugin(
   files: Record<string, string>,
+  externalPaths: string[],
+  absentPaths: Set<string>,
+  reportMissing: (path: string) => void,
   unresolvedBareImports: Set<string>,
 ): esbuild.Plugin {
   const fileNames = Object.keys(files)
+
+  /*
+   * Lazy resolution: record candidate paths the resolver needed but could
+   * not find in the map (unless a previous round already proved them
+   * absent), so the main thread can read them from the workspace and top
+   * the map up in the next round.
+   */
+  function missingProbeCandidates(path: string): void {
+    const normalized = normalizePath(path)
+
+    if (files[normalized] != null || absentPaths.has(normalized)) {
+      return
+    }
+
+    reportMissing(normalized)
+
+    if (hasFileExtension(normalized)) {
+      return
+    }
+
+    for (const extension of RESOLVABLE_EXTENSIONS) {
+      const candidate = `${normalized}${extension}`
+
+      if (extension.length > 0 && !absentPaths.has(candidate)) {
+        reportMissing(candidate)
+      }
+    }
+
+    for (const trail of INDEX_TRAILS) {
+      const candidate = `${normalized}${trail}`
+
+      if (!absentPaths.has(candidate)) {
+        reportMissing(candidate)
+      }
+    }
+  }
+
+  /*
+   * Mirror esbuild's own `external` semantics: an entry matches the exact
+   * import path or any subpath beneath it, so `external: ["lodash"]` also
+   * leaves `lodash/fp` external. Checked before any other resolution so a
+   * user-configured external is never accidentally captured by the
+   * virtual filesystem's package resolver.
+   */
+  function isConfiguredExternal(path: string): boolean {
+    return externalPaths.some(
+      (external) =>
+        path === external ||
+        path.startsWith(`${external}/`),
+    )
+  }
 
   function lookup(path: string): string | undefined {
     const normalized = normalizePath(path)
@@ -708,7 +1065,10 @@ function createVirtualFsPlugin(
     name: 'dataverse-ide-virtual-fs',
 
     setup(build) {
-      const packageResolver = createPackageResolver(files)
+      const packageResolver = createPackageResolver(
+        files,
+        reportMissing,
+      )
 
       build.onResolve({ filter: /.*/ }, (args) => {
         if (args.kind === 'entry-point') {
@@ -718,12 +1078,35 @@ function createVirtualFsPlugin(
           }
         }
 
+        if (isConfiguredExternal(args.path)) {
+          return {
+            path: args.path,
+            external: true,
+          }
+        }
+
         /*
-         * Package-import aliases need package.json "imports" support, which
-         * is not yet implemented in this browser resolver. Let esbuild decide
-         * whether another plugin/setting can resolve them.
+         * Package-import aliases ("#…") resolve against the importer's
+         * nearest package.json "imports" field.
          */
         if (args.path.startsWith('#')) {
+          const resolvedPackageImport = packageResolver.resolvePackageImport(
+            args.path.normalize('NFC'),
+            args.importer.normalize('NFC'),
+          )
+
+          if (resolvedPackageImport != null) {
+            return {
+              path: resolvedPackageImport,
+              namespace: 'virtual',
+            }
+          }
+
+          /*
+           * Unresolved "#…": let esbuild decide whether another
+           * plugin/setting can resolve them; otherwise the build fails
+           * visibly instead of silently externalizing.
+           */
           return undefined
         }
 
@@ -798,6 +1181,8 @@ function createVirtualFsPlugin(
          * Let esbuild continue resolution for paths the virtual filesystem
          * cannot satisfy. This preserves CSS import behavior where possible.
          */
+        missingProbeCandidates(args.path)
+
         return {
           path: args.path,
         }
@@ -867,6 +1252,7 @@ async function transform(
         format: 'cjs',
         target: 'es2022',
         sourcemap: false,
+        minify: request.minify ?? false,
         logLevel: 'silent',
       },
     )
@@ -903,6 +1289,18 @@ async function build(
     await ensureInitialized()
 
     const unresolvedBareImports = new Set<string>()
+    const absentPaths = new Set(request.absentPaths ?? [])
+    const missingPaths = new Set<string>()
+
+    const reportMissing = (path: string): void => {
+      /*
+       * Only report paths the caller could plausibly read next round;
+       * absentPaths entries were already proven unreadable.
+       */
+      if (!absentPaths.has(path)) {
+        missingPaths.add(path)
+      }
+    }
 
     const result = await esbuild.build({
       entryPoints: [
@@ -921,12 +1319,34 @@ async function build(
       plugins: [
         createVirtualFsPlugin(
           request.files,
+          request.external ?? [],
+          absentPaths,
+          reportMissing,
           unresolvedBareImports,
         ),
       ],
       outbase: '.',
       outdir: 'out',
     })
+
+    const needFiles = [...missingPaths]
+      .filter((path) => request.files[path] == null && !absentPaths.has(path))
+      .sort()
+
+    if (needFiles.length > 0) {
+      /*
+       * Probe round: the resolver needed files the caller has not provided
+       * yet. The outputs of this build are not final (unresolved imports
+       * were externalized), so return the requested paths instead.
+       */
+      return {
+        id: request.id,
+        ok: true,
+        outputs: [],
+        warnings: [],
+        needFiles,
+      }
+    }
 
     const warnings = [
       ...result.warnings.map(

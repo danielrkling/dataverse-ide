@@ -19,17 +19,30 @@ export type BuildRequestInput = {
   external?: string[]
   define?: Record<string, string>
   entryNames?: string
+
+  /*
+   * Lazy resolution: paths proven unreadable in earlier rounds, so the
+   * resolver stops requesting them.
+   */
+  absentPaths?: string[]
 }
 
 export type TransformRequestInput = {
   filename: string
   source: string
+  minify?: boolean
 }
 
 export type BuildResponseOk = {
   ok: true
   outputs: BuildOutputFile[]
   warnings: string[]
+
+  /**
+   * Lazy resolution probe round: paths to read and retry with.
+   * Non-empty outputs/warnings are provisional when this is set.
+   */
+  needFiles?: string[]
 }
 
 export type BuildResponseErr = {

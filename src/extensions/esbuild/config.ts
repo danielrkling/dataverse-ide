@@ -15,8 +15,7 @@ import type * as vscodeType from 'vscode'
  *     "target": "es2022",
  *     "bundle": true,
  *     "external": [],
- *     "define": {},
- *     "watch": false
+ *     "define": {}
  *   }
  */
 
@@ -32,7 +31,6 @@ export type EsbuildConfig = {
   bundle: boolean
   external: string[]
   define: Record<string, string>
-  watch: boolean
 }
 
 export const ESBUILD_DEFAULT_CONFIG: EsbuildConfig = {
@@ -45,7 +43,6 @@ export const ESBUILD_DEFAULT_CONFIG: EsbuildConfig = {
   bundle: true,
   external: [],
   define: {},
-  watch: false,
 }
 
 const FORMATS = new Set(['esm', 'iife', 'cjs'])
@@ -92,7 +89,15 @@ export async function readEsbuildConfig(
   const config: EsbuildConfig = { ...defaults }
 
   if (typeof parsed.entry === 'string' && parsed.entry.trim().length > 0) {
-    config.entry = parsed.entry.trim().replaceAll('\\', '/')
+    /*
+     * Canonicalize: workspace paths are stored slash-normalized without a
+     * leading './' (the collected files map keys carry no './' prefix), so
+     * "entry": "./src/index.ts" must become "src/index.ts" or lookup fails.
+     */
+    config.entry = parsed.entry
+      .trim()
+      .replaceAll('\\', '/')
+      .replace(/^(?:\.{1,2}\/)+/, '')
   }
 
   if (typeof parsed.outDir === 'string' && parsed.outDir.trim().length > 0) {
@@ -155,9 +160,11 @@ export async function readEsbuildConfig(
     config.define = define
   }
 
-  if (typeof parsed.watch === 'boolean') {
-    config.watch = parsed.watch
-  }
+  /*
+   * A legacy "watch" key in the file is deliberately ignored (and preserved
+   * as an unknown user key when rewriting): watch is controlled by the VS
+   * Code setting dataverseIde.esbuild.autoStartWatch, not by the config file.
+   */
 
   return { text, config }
 }
@@ -200,7 +207,6 @@ export async function updateEsbuildConfig(
     bundle: merged.bundle,
     external: merged.external,
     define: merged.define,
-    watch: merged.watch,
   }
 
   await vscode.workspace.fs.writeFile(

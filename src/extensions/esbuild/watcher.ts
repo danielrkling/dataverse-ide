@@ -34,6 +34,8 @@ export class EsbuildWatcher {
       outDir: () => string
       entry: () => string
       build: (entry: string) => Promise<void>
+      /** Config file to ignore; defaults to esbuild.config.json. */
+      configFileName?: string
     },
   ) {
     const rootPath = rootUri.path.replace(/\/+$/, '')
@@ -42,7 +44,8 @@ export class EsbuildWatcher {
       const normalized = fsPath.replaceAll('\\', '/')
 
       const outDir = this.options.outDir().replaceAll('\\', '/').replace(/^\/+/, '')
-      const configPath = `${rootPath}/esbuild.config.json`
+      const configPath =
+        `${rootPath}/${this.options.configFileName ?? 'esbuild.config.json'}`
 
       if (normalized === configPath) {
         return true
