@@ -77,7 +77,18 @@ type BuildRequest = {
    * Entry-relative or workspace-relative pattern such as "[dir]/[name]".
    */
   entryNames?: string;
+
+  /*
+   * Tagged JSX plugin (@tagged-jsx/transform), applied to workspace source
+   * files on load: "toJsx" converts html`...` templates to JSX (then the
+   * normal TS/JSX loaders + any downstream JSX tooling transpile it),
+   * "toTagged" converts JSX to templates so you can write JSX and ship the
+   * no-build-step runtime. Defaults to "off".
+   */
+  taggedJsx?: TaggedJsxMode;
 };
+
+export type TaggedJsxMode = "off" | "toJsx" | "toTagged";
 
 type TransformRequest = {
   id: number;
@@ -137,6 +148,92 @@ async function ensureInitialized(): Promise<void> {
   await initialization;
 }
 
+/*
+ * Tagged JSX plugin (@tagged-jsx/transform): Transformers are created once
+ * per worker (both directions) and memoized; the TypeScript compiler module
+ * they require is dynamically imported so builds that never enable the
+ * plugin don't pay for it (~3.6 MB worker chunk).
+ */
+type TaggedJsxTransformers = {
+  toJsx: (code: string) => { code: string; errors: unknown[] };
+  toTagged: (code: string) => { code: string; errors: unknown[] };
+};
+
+let taggedJsxTransformersPromise: Promise<TaggedJsxTransformers> | undefined;
+
+function ensureTaggedJsxTransformers(): Promise<TaggedJsxTransformers> {
+  taggedJsxTransformersPromise ??= Promise.all([
+    import("@tagged-jsx/transform"),
+    import("typescript"),
+  ]).then(([transform, ts]) => {
+    const callbacks = transform.createExpressionTransformCallbacks(ts);
+
+    return {
+      toJsx: transform.createJsxTransformer({
+        tags: ["html", "jsx"],
+        ts,
+        callbacks,
+      }),
+      toTagged: transform.createTaggedTransformer({
+        tag: "html",
+        ts,
+        callbacks,
+        registeredComponents: [],
+      }),
+    };
+  }) as Promise<TaggedJsxTransformers>;
+
+  return taggedJsxTransformersPromise;
+}
+
+/*
+ * Source-loadable file types the plugin may rewrite. After a successful
+ * conversion the content's syntax class changes (html template -> JSX), so
+ * the esbuild loader is upgraded too: TS-family content loaded through the
+ * tsx loader, JS through the jsx loader (both accept JSX-free sources).
+ */
+function transformTaggedJsxLoader(currentLoader: esbuild.Loader, changed: boolean): esbuild.Loader {
+  if (!changed) {
+    return currentLoader;
+  }
+
+  if (currentLoader === "ts") {
+    return "tsx";
+  }
+
+  if (currentLoader === "js") {
+    return "jsx";
+  }
+
+  return currentLoader;
+}
+
+function isTaggedJsxCandidate(loader: esbuild.Loader): boolean {
+  return loader === "ts" || loader === "tsx" || loader === "js" || loader === "jsx";
+}
+
+function convertTaggedJsx(
+  contents: string,
+  mode: TaggedJsxMode,
+  transformers: TaggedJsxTransformers,
+): { code: string; errors: string[] } {
+  if (mode === "toJsx") {
+    const result = transformers.toJsx(contents);
+
+    return {
+      code: result.code,
+      errors: result.errors.map((error) => String(error)),
+    };
+  }
+
+  const result = transformers.toTagged(contents);
+
+  return {
+    code: result.code,
+    errors: result.errors.map((error) => String(error)),
+  };
+}
+
 function getLoaderForPath(path: string): esbuild.Loader {
   if (path.endsWith(".css")) {
     return "css";
@@ -161,12 +258,17 @@ function getLoaderForPath(path: string): esbuild.Loader {
   return "js";
 }
 
+function isVirtualModulePath(path: string): boolean {
+  return path.startsWith("__") || path.includes("node_modules") || path.startsWith("/node_modules");
+}
+
 function createVirtualFsPlugin(
   files: Record<string, string>,
   externalPaths: string[],
   absentPaths: Set<string>,
   reportMissing: (path: string) => void,
   unresolvedBareImports: Set<string>,
+  taggedJsxRequest: TaggedJsxMode = "off",
 ): esbuild.Plugin {
   const fileNames = Object.keys(files);
 
@@ -248,6 +350,7 @@ function createVirtualFsPlugin(
 
     setup(build) {
       const packageResolver = createPackageResolver(files, reportMissing);
+      const taggedJsxMode = taggedJsxRequest;
 
       build.onResolve({ filter: /.*/ }, (args) => {
         if (args.kind === "entry-point") {
@@ -344,12 +447,34 @@ function createVirtualFsPlugin(
 
         /*
          * Let esbuild continue resolution for paths the virtual filesystem
-         * cannot satisfy. This preserves CSS import behavior where possible.
+         * cannot satisfy; probe candidates against the IMPORTER-JOINED path
+         * (the raw specifier like "./core/error.js" would be probed against
+         * the workspace root, so the lazy-request loop read garbage paths
+         * and never asked for the real file - see TODO "esbuild worker:
+         * lazy resolution never fetched package-internal relative
+         * imports"). Chevron: preserves CSS import behavior where possible.
          */
-        missingProbeCandidates(args.path);
+        missingProbeCandidates(joined);
+
+        /*
+         * Fall through non-fatally with the importer-joined path marked
+         * external: returning a bare relative path (no namespace in the
+         * virtual namespace) makes esbuild abort the WHOLE build with
+         * "Plugin returned a non-absolute path", and that destroys the
+         * pending missing-probe list in the same round - exactly one round
+         * before the joined-path probe would have surfaced the real file.
+         * The next round reads the fetched sibling and the import binds.
+         */
+        if (args.path.startsWith(".")) {
+          unresolvedBareImports.add(
+            `Relative import "${args.path}" imported by "${args.importer || "<entry point>"}" ` +
+              "was not found in the virtual filesystem and was left external in the output.",
+          );
+        }
 
         return {
-          path: args.path,
+          path: joined,
+          external: true,
         };
       });
 
@@ -358,9 +483,9 @@ function createVirtualFsPlugin(
           filter: /.*/,
           namespace: "virtual",
         },
-        (args) => {
+        async (args) => {
           const normalizedPath = normalizePath(args.path);
-          const contents = files[normalizedPath];
+          let contents = files[normalizedPath];
 
           if (contents == null) {
             const available = fileNames.slice(0, 12).join(", ");
@@ -370,15 +495,61 @@ function createVirtualFsPlugin(
                 {
                   text:
                     `File not found in workspace: "${normalizedPath}" ` +
-                    `(available: ${available}â€¦).`,
+                    `(available: ${available}…).`,
                 },
               ],
             };
           }
 
+          let loader = getLoaderForPath(normalizedPath);
+
+          /*
+           * Tagged JSX plugin: rewrite workspace source files before the
+           * loaders. node_modules content is untouched (it ships compiled
+           * code); only files esbuild may transpile as TS/JS(x) are
+           * candidates. Transform failures surface as errors attributed to
+           * the current file (esbuild's onLoad context) after the original
+           * content, so the source still round-trips to the loader.
+           */
+          if (
+            taggedJsxMode !== "off" &&
+            !isVirtualModulePath(normalizedPath) &&
+            isTaggedJsxCandidate(loader)
+          ) {
+            try {
+              const transformers = await ensureTaggedJsxTransformers();
+              const converted = convertTaggedJsx(contents, taggedJsxMode, transformers);
+
+              if (converted.code !== contents) {
+                contents = converted.code;
+                loader = transformTaggedJsxLoader(loader, true);
+              }
+
+              if (converted.errors.length > 0) {
+                return {
+                  contents,
+                  loader,
+                  errors: converted.errors.slice(0, 8).map((text) => ({ text })),
+                };
+              }
+            } catch (error) {
+              return {
+                contents,
+                loader,
+                errors: [
+                  {
+                    text: `taggedJsx transform failed: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  },
+                ],
+              };
+            }
+          }
+
           return {
             contents,
-            loader: getLoaderForPath(normalizedPath),
+            loader,
           };
         },
       );
@@ -468,6 +639,7 @@ async function build(request: BuildRequest): Promise<BuildResponse> {
           absentPaths,
           reportMissing,
           unresolvedBareImports,
+          request.taggedJsx ?? "off",
         ),
       ],
       outbase: ".",

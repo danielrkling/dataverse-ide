@@ -1,0 +1,139 @@
+{
+  "scopeName": "text.jsx",
+  "injectionSelector": "L:source.js, L:source.ts T:template-string.jsx",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#empty-closing-tag" },
+    { "include": "#dynamic-tag" },
+    { "include": "#tag" }
+  ],
+  "repository": {
+    "empty-closing-tag": {
+      "match": "(<\\s*)(//\\s*>)",
+      "captures": {
+        "1": { "name": "punctuation.definition.tag.jsx" },
+        "2": { "name": "punctuation.definition.tag.jsx" }
+      }
+    },
+    "dynamic-tag": {
+      "begin": "(<\\s*/?)\\s*(\\$\\{)([^}]*)(\\})",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.jsx" },
+        "2": { "name": "punctuation.definition.template-expression.begin.ts" },
+        "3": { "name": "entity.name.class.jsx" },
+        "4": { "name": "punctuation.definition.template-expression.end.ts" }
+      },
+      "end": "(\\s*/?\\s*>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.jsx" }
+      },
+      "patterns": [{ "include": "#tag-stuff" }]
+    },
+    "tag": {
+      "begin": "(<\\s*/?)\\s*(?=[a-zA-Z])",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.jsx" }
+      },
+      "end": "(\\s*/?\\s*>)",
+      "endCaptures": { "1": { "name": "punctuation.definition.tag.jsx" } },
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#tag-stuff" }
+      ]
+    },
+    "tag-stuff": {
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#inside-string" },
+        { "include": "#string-substitution" },
+        {
+          "match": "(?<=<\\s*/?\\s*)[A-Z][\\w\\-\\.]*",
+          "name": "entity.name.class.jsx"
+        },
+        {
+          "match": "(?<=<\\s*/?\\s*)[a-z][\\w\\-\\.]*",
+          "name": "entity.name.tag.jsx"
+        },
+        { "name": "keyword.operator.assignment.jsx", "match": "\\s*=\\s*" },
+        { "name": "variable.parameter.jsx", "match": "[a-zA-Z_][\\w\\-\\.:]*" },
+        { "name": "variable.parameter.jsx.spread", "match": "\\.\\.\\." }
+      ]
+    },
+    "inside-string": {
+      "patterns": [
+        {
+          "name": "string.quoted.jsx",
+          "begin": "(?<==\\s*)(\"|')",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.string.begin.jsx" }
+          },
+          "end": "(?<!\\\\)\\1",
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.string.end.jsx" }
+          },
+          "patterns": [{ "include": "#string-substitution" }]
+        }
+      ]
+    },
+    "string-substitution": {
+      "begin": "(\\$\\{)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.template-expression.begin.ts" }
+      },
+      "end": "(\\})",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.template-expression.end.ts" }
+      },
+      "name": "meta.template.expression.ts",
+      "contentName": "meta.embedded.ts",
+      "patterns": [{ "include": "source.ts" }]
+    },
+    "comment": {
+      "patterns": [
+        {
+          "name": "comment.block.jsx",
+          "begin": "\\{/\\*",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.jsx" }
+          },
+          "end": "\\*/\\}",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.comment.jsx" }
+          },
+          "contentName": "comment.block.jsx"
+        },
+        {
+          "name": "comment.block.jsx",
+          "begin": "<!--",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.jsx" }
+          },
+          "end": "-->",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.comment.jsx" }
+          },
+          "contentName": "comment.block.jsx"
+        },
+                {
+          "name": "comment.block.jsx",
+          "begin": "/\\*",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.jsx" }
+          },
+          "end": "\\*/",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.comment.jsx" }
+          },
+          "contentName": "comment.block.jsx"
+        },
+        {
+          "name": "comment.line.double-slash.jsx",
+          "match": "(//.*)$",
+          "captures": {
+            "1": { "name": "punctuation.definition.comment.jsx" }
+          }
+        }
+      ]
+    }
+  }
+}

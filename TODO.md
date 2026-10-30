@@ -37,6 +37,29 @@
 - Kept: `dataverseIde.esbuild.buildWorkspace` registration fix; improved esbuild worker error
   reporting in buildRunner (event.error stack + messageerror). These are orthogonal.
 
+## [re-fixed 2026-10-29] esbuild worker: lazy resolution never fetched package-internal relative imports
+
+- Re-applied today: BOTH fixes below were still lost from worker.ts - the
+  "in-worker integration rolled back" revert took the whole file (including
+  these resolution fixes) with it. Live symptom on the #test workspace
+  (manifests-only collection, 0 node_modules files in the map): relative
+  imports from fetched package files ("./core/error.js" etc. from
+  @solidjs/signals/dist/prod/index.js) hit the onResolve relative fallthrough
+  which returned a bare relative path -> fatal
+  "Plugin "dataverse-ide-virtual-fs" returned a non-absolute path" x29, again
+  exactly one round before the joined-path probe would have asked for the
+  real sibling file.
+- worker.ts now: (1) missingProbeCandidates(joined) probes the
+  importer-joined path, (2) the relative fallthrough returns
+  { path: joined, external: true } (non-fatal) and only reports a warning for
+  truly skipped relative imports ("... was not found in the virtual
+  filesystem and was left external"). Note: a relative fallthrough warning
+  can natter for genuinely missing files; intermediate probe rounds produce
+  no user-visible output anyway.
+- TODO tested only via tsc + vite build; re-run tests/solid2/replica.mjs-style
+  worker-pipeline replica (tests/ - see original verification notes below)
+  and/or manually rebuild the #test workspace to confirm.
+
 ## [fixed 2026-10-29] esbuild worker: lazy resolution never fetched package-internal relative imports
 
 - Symptom: "Plugin "dataverse-ide-virtual-fs" returned a non-absolute path: ./core/error.js" x29
@@ -114,6 +137,55 @@ produced no output.` when the file map lacks node_modules contents (overlay-FS w
   - 1.9 support via babel-preset-solid
 
 # Tagged JSX extension
+
+- [added 2026-10-29] src/extensions/taggedJsx/ - port of the "Tagged JSX Tools"
+  (DanielRKling.tagged-jsx-vscode) extension features for tagged template literals
+  (`html`...`` - the @solidjs/html / @dom-expressions/tagged-jsx runtime syntax):
+  - Conversion commands `taggedJsx.toggle` (smart direction by content regex) /
+    `taggedJsx.convertToJsx` / `taggedJsx.convertToTagged`, whole-document transform
+    via lazily-imported `@tagged-jsx/transform@2.0.0` (shipped as `typescript` +
+    `diff`; tsc loads as its own async chunk on first conversion). useCallbacks
+    setting wired to `createExpressionTransformCallbacks` (Solid `() =>` lazy bridging),
+    registeredComponents / preferredTag / customTags handled by the package. Verified
+    round-trips incl. nested JSX in expressions -> nested templates (tests/tagged-transform.sanity.mts,
+    run with `node --experimental-strip-types`).
+  - TextMate injection grammar (JSX highlighting inside tagged templates): the three
+    upstream grammars vendored into src/extensions/taggedJsx/syntaxes/ (jsx.json embedded
+    JSX incl. `<${Comp}>` dynamic tags + `<//>` close, lit-jsx-string-injection.json), and
+    the primary lit-jsx grammar REGENERATED at runtime from tagged-jsx.customTags with the
+    upstream generator algorithm (grammar.ts). JSON served as base64 data URLs via
+    registerFileUrl; registered on a single LocalProcess extension via contributes.grammars
+    - contributes.languages (jsxt) - extension registry is main-thread shared and
+      registerFileUrl only exists on ext-host registrations. "Regenerate Grammar" command
+      disposes + re-registers from current tags.
+  - Settings under `tagged-jsx.*` (customTags, preferredTag, useCallbacks, registeredComponents)
+    contributed identically to upstream defaults.
+  - Formatting inside templates was ALREADY covered by the prettier extension
+    (@tagged-jsx/prettier-plugin, embeddedJsxTags).
+  - NOT ported yet: ts-plugin TypeScript diagnostics inside templates (upstream uses a
+    typescriptServerPlugins package; would need a monaco-vscode TS plugin bridge),
+    toggleComment command, exemplified keybindings (commands are palette-only for now).
+- [added 2026-10-29] esbuild build plugin: `taggedJsx: "off" | "toJsx" | "toTagged"`
+  key in esbuild.config.json (default off) + quick pick
+  `esbuild: Tagged JSX Transform…` (dataverseIde.esbuild.configureTaggedJsx) that
+  writes it. Plumb-through: EsbuildConfig (config.ts parse + write) ->
+  BuildRequestInput.taggedJsx (buildRunner.ts) -> BuildRequest.taggedJsx
+  (worker.ts) -> the virtual-fs plugin's onLoad.
+  - worker.ts: Workspace SOURCE files only (node_modules paths skipped); loaders
+    ts/tsx/js/jsx only. The transform runs before the esbuild loaders, memoized
+    transformers created on first use (dynamic `import("@tagged-jsx/transform")` +
+    `import("typescript")` inside the worker; builds with the plugin off never load
+    the ~3.6 MB typescript chunk - vite emits a separate lazy worker-graph chunk:
+    typescript-DPm3id58.js).
+  - Loader upgrade after a successful conversion: ts -> tsx, js -> jsx (content
+    class changes: tagged->JSX direction introduces JSX; the reverse removes it -
+    the tsx/jsx loaders accept JSX-free sources so no downgrade needed).
+  - Transform failures return the ORIGINAL contents + esbuild onLoad errors
+    attributed to that file (build does not abort); toTagged on `.ts`/`.js` files is
+    a no-op round trip at worst (no JSX to convert).
+  - Same limitations noted for the reverted Solid worker integration: no sourcemap
+    chaining (transform is character-mapped, not byte-identical), and in-browser
+    end-to-end build with the plugin on still needs a manual test run.
 
 # Rolldown
 
@@ -194,6 +266,33 @@ produced no output.` when the file map lacks node_modules contents (overlay-FS w
     does not otherwise re-read those files.
     first-message debug reporting disabled for happy boot (was 20 lines spam);
     error paths (worker-error/init-failed/messageerror/console forwarding) stay on.
+
+## Solid 2.0 toolchain (second attempt, 2026-10-29, VIA THE ROLLDOWN WORKER)
+
+- Routed through the rolldown bundler worker (its own dedicated worker + proven wasi glue) instead
+  of piggybacking on the esbuild worker (first attempt was rolled back for the blob-worker/wasi-pool
+  crashes that are now understood and fixed in scripts/unify-rolldown.cjs).
+- `@solidjs/compiler-wasm32-wasi@2.0.0-rc.19` installed (hoisted @emnapi 1.11.3 + wasm-runtime
+  1.2.6 satisfy it; no nested copies). Its glue patch joins the postinstall: shim prelude, wasm
+  data URL -> NEW virtual module `virtual:solid-wasm-data-url` (solid's OWN .wasm - NOT rolldown's),
+  relative './wasi-worker-browser.mjs' worker URL, debug hooks; vite optimizeDeps.exclude +
+  rolldownPatchHotReload watch list extended; vite fallback patch branch covers 'compiler.wasi-browser.js'.
+- bundleCore: request.solid ('v2' | 'off'); a lazy-loaded Dataverse-ide-solid plugin transform
+  compiles workspace .jsx/.tsx (node_modules untouched) with { moduleName: '@solidjs/web',
+  generate: 'dom', dev: true } BEFORE bundling; compile errors surface as [solid] compile errors for
+  the right file. GOTCHA verified: the wasm transform returns errors as UNDEFINED on success - never
+  assume result.errors is an array.
+- config: rolldown.config.json key "solid": "auto" (default) | "v2" | "off"; 'auto' detects
+  solid-js@2.x from node_modules/solid-js/package.json in the collected manifests (same detection
+  protocol as the esbuild extension) and logs that it engaged; explicit key wins.
+- verified: tests/rolldownSolid.sanity.mts (node) - 'v2' compiles to template()/@solidjs/web with
+  externals preserved and NO residual jsx expressions/TS; 'off' keeps oxc loaders (note: uncompiled
+  .tsx JSX defaults to react-style jsx-runtime imports - externalize react to finalize in a
+  react-less workspace); tsc + vite build pass. Browser e2e (dev server + a solid-js@2 workspace
+  through rolldown: Build Current File) still open.
+- still open (carry-over from the rolled-back attempt): sourcemap chaining (solid map -> rolldown
+  map) - currently not forwarded (map skipped); 1.9 support via babel-preset-solid; node-runtime
+  engine does not use this path.
 
 # Prettier
 

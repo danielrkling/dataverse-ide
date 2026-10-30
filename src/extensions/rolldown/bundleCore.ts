@@ -30,6 +30,14 @@ export type BundleCoreRequest = {
   external?: string[];
   define?: Record<string, string>;
 
+  /**
+   * Solid 2.0 toolchain: 'v2' compiles workspace .jsx/.tsx modules with
+   * @solidjs/compiler-wasm32-wasi before bundling (rolldown plugin
+   * transform hook); 'off' leaves them to the default oxc TS/JSX loader.
+   * The extension resolves 'auto' from manifests before dispatching.
+   */
+  solid?: "v2" | "off";
+
   /*
    * Lazy resolution: paths the caller has already proven unreadable. The
    * resolver skips reporting them, so a follow-up round finalizes instead
@@ -289,6 +297,72 @@ const FORMAT_BY_CONFIG: Record<
   umd: "umd",
 };
 
+/**
+ * Solid 2.0 JSX compiler glue, loaded lazily on the first 'v2' bundle so
+ * worker boot stays light and any glue failure surfaces as a catchable
+ * error (dynamic-import chains make glue-internal top-level failures
+ * catchable - see worker.ts).
+ */
+let solidPlugin: Plugin | undefined;
+
+async function loadSolidPlugin(): Promise<Plugin> {
+  if (solidPlugin != null) {
+    return solidPlugin;
+  }
+
+  const glue = await import("@solidjs/compiler-wasm32-wasi");
+
+  solidPlugin = {
+    name: "dataverse-ide-solid",
+
+    async transform(code, id) {
+      if (id.startsWith("node_modules/")) {
+        return;
+      }
+
+      if (!(id.endsWith(".tsx") || id.endsWith(".jsx"))) {
+        return;
+      }
+
+      const result = await glue.transform(code, {
+        filename: id,
+        moduleName: "@solidjs/web",
+        generate: "dom",
+        dev: true,
+        sourceMap: false,
+      });
+
+      /*
+       * The wasm transform returns `errors` as `undefined` on success
+       * (verified via tests/solid2 + node probe) - optional-chain all
+       * access; a non-empty array is a real compile error.
+       */
+      if (result.errors != null && result.errors.length > 0) {
+        const messages = result.errors
+          .map((error) =>
+            typeof error === "string"
+              ? error
+              : ((error as { message?: string }).message ?? JSON.stringify(error)),
+          )
+          .join("\n");
+
+        throw new Error(`[solid] compile error in ${id}:\n${messages}`);
+      }
+
+      /*
+       * Chained source maps are not implemented yet (see TODO) - forward
+       * only the compiled code; returning no map tells rolldown the module
+       * has no map.
+       */
+      return {
+        code: result.code,
+      };
+    },
+  };
+
+  return solidPlugin;
+}
+
 export async function bundle(request: BundleCoreRequest): Promise<BundleCoreResponse> {
   const entryPath = normalizePath(request.entry);
   const absentPaths = new Set(request.absentPaths ?? []);
@@ -306,19 +380,27 @@ export async function bundle(request: BundleCoreRequest): Promise<BundleCoreResp
   };
 
   try {
-    const virtualFs = createVirtualFsPlugin(
-      entryPath,
-      request.files,
-      request.external ?? [],
-      absentPaths,
-      reportMissing,
-      unresolvedImports,
+    const plugins: Plugin[] = [];
+
+    if (request.solid === "v2") {
+      plugins.push(await loadSolidPlugin());
+    }
+
+    plugins.push(
+      createVirtualFsPlugin(
+        entryPath,
+        request.files,
+        request.external ?? [],
+        absentPaths,
+        reportMissing,
+        unresolvedImports,
+      ),
     );
 
     const bundleInstance = await rolldown({
       input: entryPath,
       platform: "browser",
-      plugins: [virtualFs],
+      plugins,
       moduleTypes: MODULE_TYPES,
 
       /*

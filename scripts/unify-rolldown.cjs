@@ -31,14 +31,31 @@ const path = require("node:path");
 
 const repo = process.cwd();
 
-const glueFiles = [
-  "node_modules/@rolldown/binding-wasm32-wasi/rolldown-binding.wasi-browser.js",
-  "node_modules/@rolldown/browser/dist/rolldown-binding.wasi-browser.js",
+const glueConfigs = [
+  {
+    file: "node_modules/@rolldown/binding-wasm32-wasi/rolldown-binding.wasi-browser.js",
+    wasmVirtual: "virtual:rolldown-wasm-data-url",
+  },
+  {
+    file: "node_modules/@rolldown/browser/dist/rolldown-binding.wasi-browser.js",
+    wasmVirtual: "virtual:rolldown-wasm-data-url",
+  },
+  {
+    /*
+     * Solid 2.0 compiler wasm (JSX transform); its own .wasm differs from
+     * rolldown's - a dedicated virtual module is injected.
+     */
+    file: "node_modules/@solidjs/compiler-wasm32-wasi/compiler.wasi-browser.js",
+    wasmVirtual: "virtual:solid-wasm-data-url",
+  },
 ];
+
+const glueFiles = glueConfigs.map((config) => config.file);
 
 const workerFiles = [
   "node_modules/@rolldown/binding-wasm32-wasi/wasi-worker-browser.mjs",
   "node_modules/@rolldown/browser/dist/wasi-worker-browser.mjs",
+  "node_modules/@solidjs/compiler-wasm32-wasi/wasi-worker-browser.mjs",
 ];
 
 const SHIM_FILE_NAME = "dataverse-process-shim.mjs";
@@ -77,17 +94,20 @@ const SHIM_CONTENT = [
 
 const SENTINEL = "virtual:rolldown-wasm-data-url";
 
+
 /*
  * Every runtime that touches the glue imports the shim FIRST: the glue
  * preamble (main/module workers) and the wasi thread worker bootstrap
  * (pthread workers). Module-graph evaluation order guarantees the shim
  * installs before any later bare `process` reference executes.
  */
-const GLUE_PREAMBLE =
+const gluePreambleFor = (wasmVirtual) =>
   "import './" +
   SHIM_FILE_NAME +
   "'\n" +
-  "import __rolldownWasmDataUrl from 'virtual:rolldown-wasm-data-url'\n\n";
+  "import __rolldownWasmDataUrl from '" +
+  wasmVirtual +
+  "'\n\n";
 
 const WORKER_PRELUDE = "import './" + SHIM_FILE_NAME + "'\n";
 
@@ -114,8 +134,9 @@ const WASM_URL_REPLACEMENT = "const __wasmUrl = __rolldownWasmDataUrl";
 const V1_PREAMBLE_RE =
   /import __rolldownWasiWorkerCode from 'virtual:rolldown-wasi-inline-worker'\nimport \{ createNapiWasiWorkerBlobUrl as __createNapiWasiWorkerBlobUrl \} from 'virtual:rolldown-wasi-worker-factory'\nconst __rolldownWasiBlobUrl = __createNapiWasiWorkerBlobUrl\(__rolldownWasiWorkerCode\)\n\n/;
 
-function patchGlue(files) {
-  for (const relative of files) {
+function patchGlue() {
+  for (const config of glueConfigs) {
+    const relative = config.file;
     const file = path.join(repo, relative);
 
     if (!fs.existsSync(file)) {
@@ -135,7 +156,7 @@ function patchGlue(files) {
       "const __workerPoolSize = Math.max(2, globalThis.navigator?.hardwareConcurrency ?? 4)",
     );
 
-    if (!code.includes(SENTINEL)) {
+    if (!code.includes(config.wasmVirtual) && !code.includes("__rolldownWasmDataUrl from")) {
       const patterns = [
         [WASM_URL_RE, WASM_URL_REPLACEMENT],
         [WORKER_URL_RE, WORKER_URL_REPLACEMENT],
@@ -149,15 +170,15 @@ function patchGlue(files) {
         code = code.replace(pattern, replacement);
       }
 
-      code = GLUE_PREAMBLE + code;
+      code = gluePreambleFor(config.wasmVirtual) + code;
     } else if (!code.includes(SHIM_FILE_NAME)) {
       /*
        * Sentinel patch exists but lacks the shim import (v1/v2 glue) -
        * insert the shim import as the FIRST statement.
        */
       code = code.replace(
-        "import __rolldownWasmDataUrl from 'virtual:rolldown-wasm-data-url'",
-        GLUE_PREAMBLE.trimEnd(),
+        /import __rolldownWasmDataUrl from 'virtual:(rolldown|solid)-wasm-data-url'/,
+        gluePreambleFor(config.wasmVirtual).trimEnd(),
       );
     }
 
@@ -245,7 +266,7 @@ if (browserNodeModules) {
   console.log("[unify-rolldown] unify: nothing to remove (no nested @emnapi/@napi-rs).");
 }
 
-patchGlue(glueFiles);
+patchGlue();
 
 patchWorkers();
 

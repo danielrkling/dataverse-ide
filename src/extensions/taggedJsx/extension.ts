@@ -5,35 +5,32 @@ import { ExtensionHostKind, registerExtension } from "@codingame/monaco-vscode-a
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
 import {
-  convertJsxSourceToTagged,
-  convertSelectionToTagged,
-  convertTaggedSourceToJsx,
-  smartConvertSource,
-  type ConversionResult,
-  type ConvertOptions,
-} from "./convert.js";
-import { buildTaggedJsxGrammar, grammarDataUrl, GRAMMAR_FILE_PATH } from "./grammar.js";
+  buildGrammarContributions,
+  regenerateLitJsx,
+  type GrammarRegistrationData,
+} from "./grammar.js";
 
 /*
- * Tagged JSX extension: editor convenience for JSX written inside tagged
- * template literals (the `html`...`` syntax of Solid's tagged-template
- * runtime). Ported from the "Tagged JSX Tools" VS Code extension.
+ * Tagged JSX extension: editor support for JSX inside tagged template
+ * literals (`html`...`` / `jsx`...``, the syntax of Solid's tagged-template
+ * runtime). Port of the "Tagged JSX Tools" VS Code extension features.
  *
- * Features:
- *  - Conversion commands (smart toggle, to JSX, to tagged template) that work
- *    on the whole document or the active selection, powered by
- *    @tagged-jsx/parse + the prettier parsers (see convert.ts).
- *  - A generated TextMate injection grammar that highlights JSX inside
- *    configured tagged templates (see grammar.ts), contributed through
- *    `contributes.grammars` + injectTo. Formatting inside templates is
- *    provided by the prettier extension (@tagged-jsx/prettier-plugin).
- *  - Configuration under "tagged-jsx.*" (customTags, preferredTag,
- *    useCallbacks, registeredComponents).
+ *  - Conversion commands (Toggle / Convert to JSX / Convert to tagged
+ *    template), powered by @tagged-jsx/transform with the SolidJS
+ *    `() =>` lazy-expression callbacks (useCallbacks setting). Conversion
+ *    replaces the whole document, like the upstream extension.
+ *  - TextMate grammar injection: JSX syntax highlighting inside configured
+ *    tagged templates. The primary grammar is regenerated from the
+ *    `tagged-jsx.customTags` setting (also available as the Regenerate
+ *    Grammar command); the embedded JSX + string-substitution grammars are
+ *    vendored from upstream. Formatting inside templates comes from the
+ *    prettier extension (@tagged-jsx/prettier-plugin is already wired there).
  *
- * Two registrations are used: a main-thread registration that only carries
- * the grammar contribution (the textmate service consumes contributed
- * grammars from the extension registry), and a LocalProcess registration
- * whose extension-host api provides commands + the configuration schema.
+ * Everything is contributed by a single LocalProcess extension: commands +
+ * configuration + `contributes.grammars` + `contributes.languages`. The
+ * extension registry is shared with the main thread, and registerFileUrl
+ * (needed to serve the grammar JSON via data URLs) is only exposed for
+ * extension-host registrations.
  */
 
 const COMMAND_TOGGLE = "taggedJsx.toggle";
@@ -41,247 +38,247 @@ const COMMAND_TO_JSX = "taggedJsx.convertToJsx";
 const COMMAND_TO_TAGGED = "taggedJsx.convertToTagged";
 const COMMAND_REGENERATE_GRAMMAR = "taggedJsx.regenerateGrammar";
 
-const GRAMMAR_ID = "dataverse-ide-tagged-jsx-grammar";
-const INJECT_INTO = ["source.js", "source.ts", "source.tsx"];
+const MANIFEST_NAME = "dataverse-ide-tagged-jsx";
 
-const DEFAULT_OPTIONS: ConvertOptions = {
-  tags: ["html", "jsx"],
-  preferredTag: "html",
-  useCallbacks: true,
-  registeredComponents: [],
-};
+interface TransformResult {
+  code: string;
+  errors: unknown[];
+}
+
+interface TransformerModule {
+  createJsxTransformer(options: {
+    tags: string[];
+    ts: unknown;
+    callbacks?: unknown;
+  }): (code: string) => TransformResult;
+  createTaggedTransformer(options: {
+    tag: string;
+    ts: unknown;
+    callbacks?: unknown;
+    registeredComponents: string[];
+  }): (code: string) => TransformResult;
+  createExpressionTransformCallbacks(ts: unknown): unknown;
+}
+
+interface TaggedJsxConfig {
+  tags: string[];
+  preferredTag: string;
+  useCallbacks: boolean;
+  registeredComponents: string[];
+}
+
+function getConfig(vscodeApi: typeof vscodeType): TaggedJsxConfig {
+  const config = vscodeApi.workspace.getConfiguration("tagged-jsx");
+
+  return {
+    tags: config.get<string[]>("customTags") ?? ["jsx", "html"],
+    preferredTag: config.get<string>("preferredTag") ?? "html",
+    useCallbacks: config.get<boolean>("useCallbacks") ?? true,
+    registeredComponents: config.get<string[]>("registeredComponents") ?? [],
+  };
+}
 
 /*
- * Grammar registration state, so "Regenerate Grammar" can dispose the
- * previous contribution and register a fresh one from the current tags.
+ * @tagged-jsx/transform needs a TypeScript module instance (it parses with
+ * the compiler API). ~8 MB, so both imports are lazy and memoized: nothing
+ * loads until the first conversion command runs.
  */
-let currentGrammarRegistration: { dispose(): Promise<void> } | undefined;
+let transformModulePromise: Promise<TransformerModule> | undefined;
+let tsModulePromise: Promise<unknown> | undefined;
 
-function getOptions(
-  vscodeApi: typeof vscodeType,
-  rootUri: vscodeType.Uri | undefined,
-): ConvertOptions {
-  const config = vscodeApi.workspace.getConfiguration("tagged-jsx", rootUri ?? null);
+async function getTransformers(config: TaggedJsxConfig): Promise<{
+  toJsx: (code: string) => TransformResult;
+  toTagged: (code: string) => TransformResult;
+}> {
+  transformModulePromise ??=
+    import("@tagged-jsx/transform") as unknown as Promise<TransformerModule>;
+  tsModulePromise ??= import("typescript");
+
+  const [transform, ts] = await Promise.all([transformModulePromise, tsModulePromise]);
+  const callbacks = config.useCallbacks
+    ? transform.createExpressionTransformCallbacks(ts)
+    : undefined;
 
   return {
-    tags: config.get<string[]>("customTags") ?? DEFAULT_OPTIONS.tags,
-    preferredTag: config.get<string>("preferredTag") ?? DEFAULT_OPTIONS.preferredTag,
-    useCallbacks: config.get<boolean>("useCallbacks") ?? DEFAULT_OPTIONS.useCallbacks,
-    registeredComponents:
-      config.get<string[]>("registeredComponents") ?? DEFAULT_OPTIONS.registeredComponents,
+    toJsx: transform.createJsxTransformer({
+      tags: config.tags,
+      ts,
+      callbacks,
+    }),
+    toTagged: transform.createTaggedTransformer({
+      tag: config.preferredTag,
+      ts,
+      callbacks,
+      registeredComponents: config.registeredComponents,
+    }),
   };
 }
 
-function grammarManifest(tagsScopeName: string): object {
-  return {
-    name: GRAMMAR_ID,
-    publisher: "dataverse-ide",
-    version: "0.1.0",
-    engines: { vscode: "*" },
-    displayName: "Dataverse IDE Tagged JSX Grammar",
-    description: "TextMate grammar injecting JSX highlighting into tagged templates.",
-    contributes: {
-      grammars: [
-        {
-          scopeName: tagsScopeName,
-          path: `./${GRAMMAR_FILE_PATH}`,
-          injectTo: INJECT_INTO,
-        },
-      ],
-    },
-  };
-}
+/*
+ * Grammar registration state, so Regenerate Grammar can dispose the previous
+ * contribution and re-register from the current tags.
+ */
+let currentRegistration:
+  { extensionId: string; api: ReturnType<typeof registerExtension> } | undefined;
 
-function registerGrammar(tags: string[]): { dispose(): Promise<void> } {
-  const grammar = buildTaggedJsxGrammar(tags, INJECT_INTO);
+function registerTaggedJsxExtension(tags: string[]): ReturnType<typeof registerExtension> {
+  const grammarData: GrammarRegistrationData = buildGrammarContributions();
+
   const api = registerExtension(
-    grammarManifest(grammar.scopeName) as never,
-    undefined, // main-thread data-only registration: no extension host
+    {
+      name: MANIFEST_NAME,
+      publisher: "dataverse-ide",
+      version: "0.2.0",
+      engines: { vscode: "*" },
+      displayName: "Dataverse IDE Tagged JSX",
+      description:
+        "Highlights JSX inside tagged template literals and converts between the syntaxes.",
+      contributes: {
+        languages: grammarData.languages,
+        grammars: grammarData.contributions,
+        commands: [
+          { command: COMMAND_TOGGLE, title: "Tagged JSX: Toggle (Smart Convert)" },
+          { command: COMMAND_TO_JSX, title: "Tagged JSX: Convert to jsx tag" },
+          { command: COMMAND_TO_TAGGED, title: "Tagged JSX: Convert to tagged template" },
+          { command: COMMAND_REGENERATE_GRAMMAR, title: "Tagged JSX: Regenerate Grammar" },
+        ],
+        configuration: {
+          title: "JSX Tagged Templates",
+          properties: {
+            "tagged-jsx.customTags": {
+              type: "array",
+              items: { type: "string" },
+              default: ["jsx", "html"],
+              description:
+                "Tags to treat as JSX tagged templates when converting to JSX. As well as format and highlighting support.",
+            },
+            "tagged-jsx.preferredTag": {
+              type: "string",
+              default: "html",
+              enum: ["html", "jsx"],
+              description: "Tag to use when converting from JSX to tagged template",
+            },
+            "tagged-jsx.useCallbacks": {
+              type: "boolean",
+              default: true,
+              description:
+                "Enable expression transform callbacks (wraps expressions with () => for tagged templates)",
+            },
+            "tagged-jsx.registeredComponents": {
+              type: "array",
+              items: { type: "string" },
+              default: [],
+              description:
+                "Component names to emit as literal tag names in tagged templates instead of ${} expressions.",
+            },
+          },
+        },
+      },
+    } as never,
+    ExtensionHostKind.LocalProcess,
   );
 
-  api.registerFileUrl(GRAMMAR_FILE_PATH, grammarDataUrl(grammar));
+  for (const file of grammarData.files) {
+    api.registerFileUrl(file.path, file.url);
+  }
 
-  return {
-    dispose: () => api.dispose(),
-  };
-}
+  // The generated lit-jsx grammar is refreshed from the current tag set.
+  const generated = regenerateLitJsx(tags);
 
-/** `.ts` selections wrap in a synthetic source that must parse as TSX. */
-function syntheticFileName(fileName: string): string {
-  return /\.(tsx|jsx)$/i.test(fileName) ? fileName : `${fileName}x`;
-}
+  api.registerFileUrl(generated.path, generated.url);
 
-function createConverter(
-  vscodeApi: typeof vscodeType,
-  rootUri: vscodeType.Uri | undefined,
-  outputChannel: { appendLine(line: string): void },
-) {
-  return async (mode: "toggle" | "toJsx" | "toTagged"): Promise<void> => {
-    const editor = vscodeApi.window.activeTextEditor;
-
-    if (editor == null) {
-      outputChannel.appendLine("No active editor; nothing to convert.");
-
-      return;
-    }
-
-    const document = editor.document;
-    const selection = editor.selection;
-    const hasSelection = selection != null && !selection.isEmpty;
-    const options = getOptions(vscodeApi, rootUri);
-
-    let result: ConversionResult & { direction?: string };
-
-    if (hasSelection) {
-      const source = document.getText(selection);
-
-      if (mode === "toTagged") {
-        result = convertSelectionToTagged(source, syntheticFileName(document.fileName), options);
-      } else if (mode === "toJsx") {
-        result = convertTaggedSourceToJsx(document.getText(), document.fileName, options, {
-          start: selection.start,
-          end: selection.end,
-        });
-      } else {
-        const selectionHasTagged = new RegExp(`\\b(?:${options.tags.join("|")})\\b\\s*\x60`).test(
-          source,
-        );
-
-        result = selectionHasTagged
-          ? convertTaggedSourceToJsx(document.getText(), document.fileName, options, {
-              start: selection.start,
-              end: selection.end,
-            })
-          : convertSelectionToTagged(source, syntheticFileName(document.fileName), options);
-      }
-    } else if (mode === "toTagged") {
-      result = convertJsxSourceToTagged(document.getText(), document.fileName, options);
-    } else if (mode === "toJsx") {
-      result = convertTaggedSourceToJsx(document.getText(), document.fileName, options);
-    } else {
-      result = smartConvertSource(document.getText(), document.fileName, options);
-    }
-
-    if (result.encounteredError != null) {
-      outputChannel.appendLine(`Conversion error: ${result.encounteredError}`);
-      void vscodeApi.window.showErrorMessage(`Tagged JSX: ${result.encounteredError}`);
-
-      return;
-    }
-
-    if (result.edits.length === 0) {
-      void vscodeApi.window.showInformationMessage(`Tagged JSX: nothing to convert (${mode}).`);
-
-      return;
-    }
-
-    /*
-     * Converters emit absolute-offset edits (selection conversions emit
-     * selection-relative ones); shift selection-relative edits back into
-     * document space before applying.
-     */
-    const edit = new vscodeApi.WorkspaceEdit();
-    const sorted = [...result.edits].sort((a, b) => b.start - a.start);
-
-    for (const sourceEdit of sorted) {
-      const startOffset = hasSelection ? selection.start + sourceEdit.start : sourceEdit.start;
-      const endOffset = hasSelection ? selection.start + sourceEdit.end : sourceEdit.end;
-
-      edit.replace(
-        document.uri,
-        new vscodeApi.Range(document.positionAt(startOffset), document.positionAt(endOffset)),
-        sourceEdit.text,
-      );
-    }
-
-    await vscodeApi.workspace.applyEdit(edit);
-
-    if (result.direction === "toTagged") {
-      outputChannel.appendLine(
-        "Converted JSX to a tagged template. Run Format Document to tidy layout (the prettier extension formats templates via @tagged-jsx/prettier-plugin).",
-      );
-    }
-  };
+  return api;
 }
 
 export default {
   id: "taggedJsx",
 
   async activate(context: ExtensionContext): Promise<vscodeType.Disposable | void> {
-    const { vscode, workspaceRootUri, outputChannel } = context;
+    const { vscode, outputChannel } = context;
+    const options = getConfig(vscode);
 
-    // 1. Grammar contribution (main-thread registration + data-URL file).
-    const initialOptions = getOptions(vscode, workspaceRootUri);
+    // Grammar + commands + configuration in one LocalProcess extension.
+    const api = registerTaggedJsxExtension(options.tags);
+    currentRegistration = { extensionId: String(api.id), api };
 
-    currentGrammarRegistration = registerGrammar(initialOptions.tags);
-
-    // 2. Extension-host registration for commands + configuration schema.
-    const { getApi } = registerExtension(
-      {
-        name: "dataverse-ide-tagged-jsx-tools",
-        publisher: "dataverse-ide",
-        version: "0.1.0",
-        engines: { vscode: "*" },
-        displayName: "Dataverse IDE Tagged JSX Tools",
-        description: "Convert between tagged template literals and JSX syntax.",
-        contributes: {
-          commands: [
-            { command: COMMAND_TOGGLE, title: "Tagged JSX: Toggle (Smart Convert)" },
-            { command: COMMAND_TO_JSX, title: "Tagged JSX: Convert to JSX" },
-            { command: COMMAND_TO_TAGGED, title: "Tagged JSX: Convert to tagged template" },
-            { command: COMMAND_REGENERATE_GRAMMAR, title: "Tagged JSX: Regenerate Grammar" },
-          ],
-          configuration: {
-            title: "Tagged JSX",
-            properties: {
-              "tagged-jsx.customTags": {
-                type: "array",
-                default: ["html", "jsx"],
-                description: "Tags whose template literals contain JSX.",
-              },
-              "tagged-jsx.preferredTag": {
-                type: "string",
-                default: "html",
-                description: "Tag used when converting from JSX to a tagged template.",
-              },
-              "tagged-jsx.useCallbacks": {
-                type: "boolean",
-                default: true,
-                description:
-                  "Wrap non-primitive expressions with '() =>' for lazy tagged-template evaluation.",
-              },
-              "tagged-jsx.registeredComponents": {
-                type: "array",
-                default: [],
-                description: "Component names emitted as literal tag names in tagged templates.",
-              },
-            },
-          },
-        },
-      },
-      ExtensionHostKind.LocalProcess,
-    );
-
+    // Extension-host api for the command registrations.
+    const { getApi } = api as unknown as { getApi: () => Promise<unknown> };
     const vscodeApi = (await getApi()) as unknown as typeof vscodeType;
-    const convert = createConverter(vscodeApi, workspaceRootUri, outputChannel);
+    const disposables: vscodeType.Disposable[] = [];
 
-    const disposables = [
-      vscodeApi.commands.registerCommand(COMMAND_TOGGLE, () => void convert("toggle")),
+    const convert = async (mode: "toggle" | "toJsx" | "toTagged") => {
+      const editor = vscodeApi.window.activeTextEditor;
+
+      if (editor == null) {
+        outputChannel.appendLine("No active editor; nothing to convert.");
+
+        return;
+      }
+
+      const document = editor.document;
+      const source = document.getText();
+      const config = getConfig(vscode);
+
+      try {
+        const { toJsx, toTagged } = await getTransformers(config);
+
+        let converted = source;
+
+        if (mode === "toJsx") {
+          converted = toJsx(source).code;
+        } else if (mode === "toTagged") {
+          converted = toTagged(source).code;
+        } else {
+          // Smart toggle: decide direction by content (upstream heuristic).
+          const tagAlternation = config.tags.join("|");
+          const hasTaggedTemplate = new RegExp(`(${tagAlternation})\`[\\s\\S]*?\``, "g").test(
+            source,
+          );
+
+          converted = hasTaggedTemplate ? toJsx(source).code : toTagged(source).code;
+        }
+
+        if (converted === source) {
+          outputChannel.appendLine(
+            `No changes (${mode}) for ${document.fileName || document.uri.toString()}.`,
+          );
+
+          return;
+        }
+
+        const workspaceEdit = new vscodeApi.WorkspaceEdit();
+        const fullRange = new vscodeApi.Range(
+          document.positionAt(0),
+          document.positionAt(source.length),
+        );
+
+        workspaceEdit.replace(document.uri, fullRange, converted);
+        await vscodeApi.workspace.applyEdit(workspaceEdit);
+      } catch (error) {
+        outputChannel.appendLine(`Convert error (${mode}): ${String(error)}`);
+        void vscodeApi.window.showErrorMessage(`Tagged JSX: ${String(error)}`);
+      }
+    };
+
+    disposables.push(
       vscodeApi.commands.registerCommand(COMMAND_TO_JSX, () => void convert("toJsx")),
       vscodeApi.commands.registerCommand(COMMAND_TO_TAGGED, () => void convert("toTagged")),
+      vscodeApi.commands.registerCommand(COMMAND_TOGGLE, () => void convert("toggle")),
       vscodeApi.commands.registerCommand(COMMAND_REGENERATE_GRAMMAR, () => {
-        const { tags } = getOptions(vscode, workspaceRootUri);
-        const previous = currentGrammarRegistration;
+        const { tags } = getConfig(vscode);
+        const previous = currentRegistration;
 
-        void Promise.resolve(previous?.dispose() ?? Promise.resolve()).then(() => {
-          currentGrammarRegistration = registerGrammar(tags);
+        void Promise.resolve(previous?.api.dispose() ?? Promise.resolve()).then(() => {
+          const refreshed = registerTaggedJsxExtension(tags);
+
+          currentRegistration = { extensionId: String(refreshed.id), api: refreshed };
 
           void vscodeApi.window.showInformationMessage(
             "Tagged JSX: grammar regenerated. Reload the window if colors look stale.",
           );
         });
       }),
-    ];
+    );
 
     return {
       dispose() {
@@ -289,8 +286,8 @@ export default {
           disposable.dispose();
         }
 
-        void currentGrammarRegistration?.dispose();
-        currentGrammarRegistration = undefined;
+        void currentRegistration?.api.dispose();
+        currentRegistration = undefined;
       },
     };
   },

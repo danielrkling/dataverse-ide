@@ -230,6 +230,10 @@ export default {
           command: "dataverseIde.esbuild.toggleWatch",
           title: "esbuild: Toggle Watch",
         },
+        {
+          command: "dataverseIde.esbuild.configureTaggedJsx",
+          title: "esbuild: Tagged JSX Transform…",
+        },
       ],
       configuration: {
         title: "esbuild",
@@ -431,6 +435,7 @@ export default {
             bundle: currentConfig.bundle,
             external: currentConfig.external,
             define: currentConfig.define,
+            taggedJsx: currentConfig.taggedJsx,
             absentPaths: [...absentPaths],
           });
 
@@ -798,6 +803,49 @@ export default {
       },
     );
 
+    /*
+     * Configure the tagged JSX build plugin (@tagged-jsx/transform):
+     * convert tagged templates to JSX before transpiling (toJsx), convert
+     * JSX into tagged templates so JSX code ships the no-build-step runtime
+     * (toTagged), or leave sources untouched (off). Persisted in
+     * esbuild.config.json under "taggedJsx".
+     */
+    const configureTaggedJsxCommand = vscode.commands.registerCommand(
+      "dataverseIde.esbuild.configureTaggedJsx",
+      async () => {
+        const modes: { value: EsbuildConfig["taggedJsx"]; label: string }[] = [
+          { value: "off", label: "off — no conversion (sources built as-is)" },
+          {
+            value: "toJsx",
+            label: "toJsx — tagged templates (html`…`) are compiled as JSX by the build",
+          },
+          {
+            value: "toTagged",
+            label: "toTagged — JSX is converted to tagged templates in the output bundle",
+          },
+        ];
+
+        const picked = await vscode.window.showQuickPick(modes, {
+          title: "esbuild: Tagged JSX transform (@tagged-jsx/transform)",
+          placeHolder: `Current: ${currentConfig.taggedJsx}`,
+        });
+
+        if (picked == null || picked.value === currentConfig.taggedJsx) {
+          return;
+        }
+
+        const merged = await updateEsbuildConfig(vscode, context.workspaceRootUri, {
+          taggedJsx: picked.value,
+        });
+
+        currentConfig = merged;
+
+        await vscode.window.showInformationMessage(
+          `esbuild: taggedJsx set to "${picked.value}" (esbuild.config.json).`,
+        );
+      },
+    );
+
     const outputChannelCommand = vscode.commands.registerCommand(
       "dataverseIde.esbuild.showOutput",
       () => {
@@ -828,6 +876,7 @@ export default {
         buildConfiguredEntryCommand.dispose();
         buildWorkspaceCommand.dispose();
         openConfigCommand.dispose();
+        configureTaggedJsxCommand.dispose();
         outputChannelCommand.dispose();
         reloadConfigCommand.dispose();
 

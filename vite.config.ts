@@ -47,10 +47,13 @@ const rolldownPatchHotReload: Plugin = {
     const watchedFiles = [
       "node_modules/@rolldown/binding-wasm32-wasi/rolldown-binding.wasi-browser.js",
       "node_modules/@rolldown/browser/dist/rolldown-binding.wasi-browser.js",
+      "node_modules/@solidjs/compiler-wasm32-wasi/compiler.wasi-browser.js",
       "node_modules/@rolldown/binding-wasm32-wasi/wasi-worker-browser.mjs",
       "node_modules/@rolldown/browser/dist/wasi-worker-browser.mjs",
+      "node_modules/@solidjs/compiler-wasm32-wasi/wasi-worker-browser.mjs",
       "node_modules/@rolldown/binding-wasm32-wasi/dataverse-process-shim.mjs",
       "node_modules/@rolldown/browser/dist/dataverse-process-shim.mjs",
+      "node_modules/@solidjs/compiler-wasm32-wasi/dataverse-process-shim.mjs",
       "node_modules/@rolldown/browser/dist/create-bundler-option-BxvvnNQf.js",
     ];
 
@@ -120,6 +123,7 @@ const webResourceWasmInline: Plugin = {
     if (
       id === "virtual:esbuild-wasm-binary" ||
       id === "virtual:rolldown-wasm-data-url" ||
+      id === "virtual:solid-wasm-data-url" ||
       id === "virtual:rolldown-wasi-inline-worker" ||
       id === "virtual:brotli-wasm-data-url" ||
       id === "virtual:rolldown-wasi-worker-factory"
@@ -146,6 +150,17 @@ const webResourceWasmInline: Plugin = {
       const wasmPath = path.join(
         import.meta.dirname,
         "node_modules/@rolldown/binding-wasm32-wasi/rolldown-binding.wasm32-wasi.wasm",
+      );
+
+      const base64 = fs.readFileSync(wasmPath).toString("base64");
+
+      return `export default ${JSON.stringify(`data:application/wasm;base64,${base64}`)}`;
+    }
+
+    if (id === "virtual:solid-wasm-data-url") {
+      const wasmPath = path.join(
+        import.meta.dirname,
+        "node_modules/@solidjs/compiler-wasm32-wasi/compiler.wasm32-wasi.wasm",
       );
 
       const base64 = fs.readFileSync(wasmPath).toString("base64");
@@ -180,7 +195,16 @@ const webResourceWasmInline: Plugin = {
   transform(code: string, id: string) {
     const normalizedId = id.replaceAll("\\", "/");
 
-    if (normalizedId.endsWith("rolldown-binding.wasi-browser.js")) {
+    if (
+      normalizedId.endsWith("rolldown-binding.wasi-browser.js") ||
+      normalizedId.endsWith("compiler.wasi-browser.js")
+    ) {
+      const isSolidGlue = normalizedId.endsWith("compiler.wasi-browser.js");
+
+      const wasmVirtual = isSolidGlue
+        ? "virtual:solid-wasm-data-url"
+        : "virtual:rolldown-wasm-data-url";
+
       /*
        * Sources are normally ALREADY patched in-place by
        * scripts/unify-rolldown.cjs (postinstall); skip those. For
@@ -189,7 +213,7 @@ const webResourceWasmInline: Plugin = {
        * module workers cannot resolve bare imports, which broke boots and
        * pthread spawns) and leave the thread pools at their defaults.
        */
-      if (code.includes("__rolldownWasmDataUrl")) {
+      if (code.includes("__rolldownWasmDataUrl") || code.includes("__dataverseRolldownDebug")) {
         return null;
       }
 
@@ -200,7 +224,7 @@ const webResourceWasmInline: Plugin = {
           "new Worker(new URL('./wasi-worker-browser.mjs', import.meta.url)",
         );
 
-      const preamble = "import __rolldownWasmDataUrl from 'virtual:rolldown-wasm-data-url'\n\n";
+      const preamble = `import __rolldownWasmDataUrl from '${wasmVirtual}'\n\n`;
 
       return {
         code: preamble + patched,
@@ -293,12 +317,13 @@ export default defineConfig({
     exclude: [
       "@vscode/diff",
       "brotli-wasm",
-      // esbuild's optimizer cannot bundle the rolldown browser glue (wasi
-      // cjs entry, dynamic worker URLs): serve them through the transform
-      // pipeline instead, which also applies the wasm/worker inliner
-      // (webResourceWasmInline)
+      // esbuild's optimizer cannot bundle the rolldown/solid wasm glues
+      // (wasi cjs entries, dynamic worker URLs): serve them through the
+      // transform pipeline instead, which also applies the wasm/worker
+      // inliner (webResourceWasmInline)
       "@rolldown/browser",
       "@rolldown/binding-wasm32-wasi",
+      "@solidjs/compiler-wasm32-wasi",
     ],
     esbuildOptions: {
       plugins: [importMetaUrlPlugin],

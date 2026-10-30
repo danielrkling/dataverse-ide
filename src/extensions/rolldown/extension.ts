@@ -9,6 +9,7 @@ import { EsbuildWatcher } from "../esbuild/watcher.js";
 import { lazyBuild } from "../esbuild/lazyBuild.js";
 
 import { describeWorkerError } from "./workerError.js";
+import { parseJsonSafe } from "../shared/packageResolver.js";
 
 import type { BuildRequestInput, BuildRunnerResponse } from "../esbuild/buildRunner.js";
 
@@ -559,19 +560,47 @@ export default {
           );
         }
 
-        const request: BuildRequestInput & { files: Record<string, string> } = {
-          entry: entryPath,
-          files,
-          /*
-           * BuildRequestInput's format union is the esbuild one; rolldown
-           * additionally supports 'umd' and the rolldown worker maps it.
-           */
-          format: currentConfig.format as BuildRequestInput["format"],
-          minify: currentConfig.minify,
-          sourcemap: currentConfig.sourcemap,
-          external: currentConfig.external,
-          define: currentConfig.define,
-        };
+        /*
+         * Solid 2.0 toolchain resolution. "auto" detects a solid-js 2.x
+         * install from the collected node_modules manifests (exact match
+         * with the esbuild extension's detection logic); a config key
+         * always wins.
+         */
+        let solidOption: "v2" | "off" = "off";
+
+        if (currentConfig.solid === "v2") {
+          solidOption = "v2";
+        } else if (currentConfig.solid === "auto") {
+          const solidJsManifest = parseJsonSafe(files["node_modules/solid-js/package.json"] ?? "");
+
+          if (
+            solidJsManifest != null &&
+            typeof solidJsManifest.version === "string" &&
+            solidJsManifest.version.startsWith("2.")
+          ) {
+            solidOption = "v2";
+
+            outputChannel.appendLine(
+              "[rolldown] solid-js 2.x detected - compiling workspace .jsx/.tsx with @solidjs/compiler-wasm32-wasi.",
+            );
+          }
+        }
+
+        const request: BuildRequestInput & { files: Record<string, string>; solid: "v2" | "off" } =
+          {
+            entry: entryPath,
+            files,
+            /*
+             * BuildRequestInput's format union is the esbuild one; rolldown
+             * additionally supports 'umd' and the rolldown worker maps it.
+             */
+            format: currentConfig.format as BuildRequestInput["format"],
+            minify: currentConfig.minify,
+            sourcemap: currentConfig.sourcemap,
+            external: currentConfig.external,
+            define: currentConfig.define,
+            solid: solidOption,
+          };
 
         const response = await lazyBuild(
           vscode,

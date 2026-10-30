@@ -45,6 +45,13 @@ export type RolldownConfig = {
   sourcemap: boolean;
   external: string[];
   define: Record<string, string>;
+  /**
+   * Solid 2.0 toolchain: "v2" compiles workspace .jsx/.tsx with
+   * @solidjs/compiler-wasm32-wasi; "off" uses the default oxc loaders;
+   * "auto" (default) detects solid-js@2.x from the workspace node_modules
+   * manifests at build time.
+   */
+  solid: "auto" | "v2" | "off";
 };
 
 export const ROLLDOWN_DEFAULT_CONFIG: RolldownConfig = {
@@ -55,6 +62,7 @@ export const ROLLDOWN_DEFAULT_CONFIG: RolldownConfig = {
   sourcemap: false,
   external: [],
   define: {},
+  solid: "auto",
 };
 
 const FORMATS = new Set(["esm", "iife", "cjs", "umd"]);
@@ -134,6 +142,13 @@ export async function readRolldownConfig(
     config.external = externals.map((entry) => entry.trim());
   }
 
+  if (
+    typeof parsed.solid === "string" &&
+    (parsed.solid === "auto" || parsed.solid === "v2" || parsed.solid === "off")
+  ) {
+    config.solid = parsed.solid;
+  }
+
   if (parsed.define != null && typeof parsed.define === "object" && !Array.isArray(parsed.define)) {
     const define: Record<string, string> = {};
 
@@ -191,6 +206,7 @@ export async function updateRolldownConfig(
     sourcemap: merged.sourcemap,
     external: merged.external,
     define: merged.define,
+    solid: merged.solid,
   };
 
   await vscode.workspace.fs.writeFile(

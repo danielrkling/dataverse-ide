@@ -42,6 +42,16 @@ export type EsbuildConfig = {
   bundle: boolean;
   external: string[];
   define: Record<string, string>;
+
+  /*
+   * Tagged JSX transform applied to workspace source files before the
+   * esbuild loaders see them (@tagged-jsx/transform):
+   *   - "off"      no conversion (default)
+   *   - "toJsx"    tagged templates (html`...`) -> JSX source, transpiled normally
+   *   - "toTagged" JSX source -> tagged templates (html`...`), so you can write
+   *                JSX and ship the no-build-step runtime
+   */
+  taggedJsx: "off" | "toJsx" | "toTagged";
 };
 
 export const ESBUILD_DEFAULT_CONFIG: EsbuildConfig = {
@@ -54,9 +64,11 @@ export const ESBUILD_DEFAULT_CONFIG: EsbuildConfig = {
   bundle: true,
   external: [],
   define: {},
+  taggedJsx: "off",
 };
 
 const FORMATS = new Set(["esm", "iife", "cjs"]);
+const TAGGED_JSX_TRANSFORMS = new Set(["off", "toJsx", "toTagged"]);
 
 export function configFilePath(vscode: typeof vscodeType, rootUri: vscodeType.Uri): vscodeType.Uri {
   return configFilePathFor(vscode, rootUri, CONFIG_PATH_OPTIONS);
@@ -117,6 +129,10 @@ export async function readEsbuildConfig(
 
   if (typeof parsed.format === "string" && FORMATS.has(parsed.format)) {
     config.format = parsed.format as EsbuildConfig["format"];
+  }
+
+  if (typeof parsed.taggedJsx === "string" && TAGGED_JSX_TRANSFORMS.has(parsed.taggedJsx)) {
+    config.taggedJsx = parsed.taggedJsx as EsbuildConfig["taggedJsx"];
   }
 
   if (typeof parsed.minify === "boolean") {
@@ -208,6 +224,7 @@ export async function updateEsbuildConfig(
     bundle: merged.bundle,
     external: merged.external,
     define: merged.define,
+    taggedJsx: merged.taggedJsx,
   };
 
   await vscode.workspace.fs.writeFile(
