@@ -1,4 +1,4 @@
-import type * as vscodeType from 'vscode'
+import type * as vscodeType from "vscode";
 
 /*
  * IntelliSense for tailwind.config.json.
@@ -16,187 +16,177 @@ import type * as vscodeType from 'vscode'
  * file is untouched.
  */
 
-const CONFIG_FILE_NAME = 'tailwind.config.json'
+const CONFIG_FILE_NAME = "tailwind.config.json";
 
 type PropertyDoc = {
-  key: string
-  type: 'string' | 'boolean'
-  detail: string
-  documentation: string
-  defaultValue?: string
-}
+  key: string;
+  type: "string" | "boolean";
+  detail: string;
+  documentation: string;
+  defaultValue?: string;
+};
 
 const PROPERTY_DOCS: PropertyDoc[] = [
   {
-    key: 'input',
-    type: 'string',
-    detail: 'Workspace CSS entry file',
+    key: "input",
+    type: "string",
+    detail: "Workspace CSS entry file",
     documentation:
-      'Workspace-relative path to the tailwind CSS entry (e.g. `src/tailwind.css`). ' +
+      "Workspace-relative path to the tailwind CSS entry (e.g. `src/tailwind.css`). " +
       'The file is the single source of truth: it can `@import "tailwindcss"`, define `@theme` blocks, ' +
-      '`@plugin`s, and import other workspace stylesheets. ' +
+      "`@plugin`s, and import other workspace stylesheets. " +
       'If the key is absent, the default input `@import "tailwindcss";` is used.',
   },
   {
-    key: 'output',
-    type: 'string',
-    detail: 'Output CSS file',
+    key: "output",
+    type: "string",
+    detail: "Output CSS file",
     documentation:
-      'Workspace-relative path the compiled CSS is written to. ' +
-      'Defaults to `dist/tailwind.css`.',
-    defaultValue: 'dist/tailwind.css',
+      "Workspace-relative path the compiled CSS is written to. " +
+      "Defaults to `dist/tailwind.css`.",
+    defaultValue: "dist/tailwind.css",
   },
   {
-    key: 'minify',
-    type: 'boolean',
-    detail: 'Minify the compiled CSS',
+    key: "minify",
+    type: "boolean",
+    detail: "Minify the compiled CSS",
     documentation:
-      'Minifies the compiled CSS with the esbuild CSS minifier before writing. ' +
-      'Useful when the output feeds an uploaded bundle. Defaults to `false`.',
-    defaultValue: 'false',
+      "Minifies the compiled CSS with the esbuild CSS minifier before writing. " +
+      "Useful when the output feeds an uploaded bundle. Defaults to `false`.",
+    defaultValue: "false",
   },
-]
-
-function isConfigDocument(
-  document: vscodeType.TextDocument,
-): boolean {
-  return (
-    document.languageId === 'json' &&
-    document.uri.path.split('/').pop() === CONFIG_FILE_NAME
-  )
-}
+];
 
 export function registerConfigIntellisense(
   vscode: typeof vscodeType,
+  options?: { getConfigPath?: () => string },
 ): vscodeType.Disposable {
-  const keyItems: vscodeType.CompletionItem[] = PROPERTY_DOCS.map(
-    (property) => {
-      const item = new vscode.CompletionItem(
-        property.key,
-        vscode.CompletionItemKind.Property,
-      )
+  const getConfigPath = options?.getConfigPath;
 
-      item.detail = `tailwind.config.json · ${property.detail}`
+  const isConfigDocument = (document: vscodeType.TextDocument): boolean => {
+    if (document.languageId !== "json") {
+      return false;
+    }
 
-      item.insertText = new vscode.SnippetString(
-        property.type === 'boolean'
-          ? `${property.key}: ${property.defaultValue ?? 'false'}`
-          : `${property.key}: "$0"`,
-      )
+    if (document.uri.path.split("/").pop() === CONFIG_FILE_NAME) {
+      return true;
+    }
 
-      item.documentation = new vscode.MarkdownString(
-        property.documentation,
-      )
+    if (getConfigPath == null) {
+      return false;
+    }
 
-      item.sortText = `0${property.key}`
+    /*
+     * Custom config paths (dataverseIde.tailwind.configPath) can live in
+     * subdirectories or under a different basename.
+     */
+    return (
+      vscode.workspace.asRelativePath(document.uri, false).replaceAll("\\", "/") === getConfigPath()
+    );
+  };
 
-      return item
-    },
-  )
+  const keyItems: vscodeType.CompletionItem[] = PROPERTY_DOCS.map((property) => {
+    const item = new vscode.CompletionItem(property.key, vscode.CompletionItemKind.Property);
 
-  const booleanItems = (
-    property: PropertyDoc,
-  ): vscodeType.CompletionItem[] =>
-    ['true', 'false'].map((value) => {
-      const item = new vscode.CompletionItem(
-        value,
-        vscode.CompletionItemKind.Value,
-      )
+    item.detail = `tailwind.config.json · ${property.detail}`;
 
-      item.detail = `tailwind.config.json · ${property.key}`
+    item.insertText = new vscode.SnippetString(
+      property.type === "boolean"
+        ? `${property.key}: ${property.defaultValue ?? "false"}`
+        : `${property.key}: "$0"`,
+    );
 
-      item.sortText = `0${value}`
+    item.documentation = new vscode.MarkdownString(property.documentation);
 
-      return item
-    })
+    item.sortText = `0${property.key}`;
 
-  const completionProviderDisposable =
-    vscode.languages.registerCompletionItemProvider(
-      'json',
-      {
-        provideCompletionItems(document, position) {
-          if (!isConfigDocument(document)) {
-            return undefined
-          }
+    return item;
+  });
 
-          const lineText = document.lineAt(position).text
-          const prefix = lineText.slice(0, position.character)
+  const booleanItems = (property: PropertyDoc): vscodeType.CompletionItem[] =>
+    ["true", "false"].map((value) => {
+      const item = new vscode.CompletionItem(value, vscode.CompletionItemKind.Value);
 
-          /*
-           * Value position: `"key": <cursor>` — offer values for the key
-           * being set. Keys without enumerated values (paths) get nothing;
-           * the editor's normal word completion still applies.
-           */
-          if (/:\s*(?:"[^"]*)?$/.test(prefix)) {
-            const key = /"([^"]+)"\s*:\s*(?:"[^"]*)?$/.exec(prefix)?.[1]
+      item.detail = `tailwind.config.json · ${property.key}`;
 
-            const property = PROPERTY_DOCS.find(
-              (candidate) => candidate.key === key,
-            )
+      item.sortText = `0${value}`;
 
-            if (property?.type === 'boolean') {
-              return new vscode.CompletionList(
-                booleanItems(property),
-                false,
-              )
-            }
+      return item;
+    });
 
-            return undefined
-          }
-
-          /*
-           * Key position: offer the full key set. The workbench filters
-           * against the typed text, so the whole list is returned.
-           */
-          return new vscode.CompletionList(keyItems, false)
-        },
-      },
-      '"',
-      't',
-      'f',
-      ' ',
-    )
-
-  const hoverProviderDisposable = vscode.languages.registerHoverProvider(
-    'json',
+  const completionProviderDisposable = vscode.languages.registerCompletionItemProvider(
+    "json",
     {
-      provideHover(document, position) {
+      provideCompletionItems(document, position) {
         if (!isConfigDocument(document)) {
-          return undefined
+          return undefined;
         }
 
-        const wordRange = document.getWordRangeAtPosition(
-          position,
-          /[a-zA-Z-]+/,
-        )
+        const lineText = document.lineAt(position).text;
+        const prefix = lineText.slice(0, position.character);
 
-        if (wordRange == null) {
-          return undefined
+        /*
+         * Value position: `"key": <cursor>` — offer values for the key
+         * being set. Keys without enumerated values (paths) get nothing;
+         * the editor's normal word completion still applies.
+         */
+        if (/:\s*(?:"[^"]*)?$/.test(prefix)) {
+          const key = /"([^"]+)"\s*:\s*(?:"[^"]*)?$/.exec(prefix)?.[1];
+
+          const property = PROPERTY_DOCS.find((candidate) => candidate.key === key);
+
+          if (property?.type === "boolean") {
+            return new vscode.CompletionList(booleanItems(property), false);
+          }
+
+          return undefined;
         }
 
-        const word = document.getText(wordRange)
-
-        const property = PROPERTY_DOCS.find(
-          (candidate) => candidate.key === word,
-        )
-
-        if (property == null) {
-          return undefined
-        }
-
-        const markdown = new vscode.MarkdownString(
-          `**${property.key}**${property.defaultValue != null ? ` *(default: \`${property.defaultValue}\`)*` : ''}\n\n${property.documentation}`,
-        )
-
-        return new vscode.Hover(markdown, wordRange)
+        /*
+         * Key position: offer the full key set. The workbench filters
+         * against the typed text, so the whole list is returned.
+         */
+        return new vscode.CompletionList(keyItems, false);
       },
     },
-  )
+    '"',
+    "t",
+    "f",
+    " ",
+  );
+
+  const hoverProviderDisposable = vscode.languages.registerHoverProvider("json", {
+    provideHover(document, position) {
+      if (!isConfigDocument(document)) {
+        return undefined;
+      }
+
+      const wordRange = document.getWordRangeAtPosition(position, /[a-zA-Z-]+/);
+
+      if (wordRange == null) {
+        return undefined;
+      }
+
+      const word = document.getText(wordRange);
+
+      const property = PROPERTY_DOCS.find((candidate) => candidate.key === word);
+
+      if (property == null) {
+        return undefined;
+      }
+
+      const markdown = new vscode.MarkdownString(
+        `**${property.key}**${property.defaultValue != null ? ` *(default: \`${property.defaultValue}\`)*` : ""}\n\n${property.documentation}`,
+      );
+
+      return new vscode.Hover(markdown, wordRange);
+    },
+  });
 
   return {
     dispose() {
-      completionProviderDisposable.dispose()
-      hoverProviderDisposable.dispose()
+      completionProviderDisposable.dispose();
+      hoverProviderDisposable.dispose();
     },
-  }
+  };
 }

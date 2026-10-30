@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "postinstall": "node scripts/unify-rolldown.cjs"
   },
   "dependencies": {
     "@codingame/monaco-vscode-api": "^38.0.4",
@@ -68,9 +69,11 @@
     "@codingame/monaco-vscode-views-service-override": "^38.0.4",
     "@codingame/monaco-vscode-workbench-service-override": "^38.0.4",
     "@codingame/monaco-vscode-workspace-trust-service-override": "^38.0.4",
+    "@tagged-jsx/parse": "^1.4.0",
     "@codingame/monaco-vscode-xml-default-extension": "^38.0.4",
     "@codingame/monaco-vscode-yaml-default-extension": "^38.0.4",
     "@rolldown/binding-wasm32-wasi": "^1.2.15",
+    "@rolldown/browser": "^1.2.15",
     "@tailwindcss/browser": "^4.3.3",
     "@types/wicg-file-system-access": "^2023.10.7",
     "almostnode": "^0.2.14",
@@ -79,12 +82,16 @@
     "isomorphic-git": "^1.44.4",
     "monaco-editor": "npm:@codingame/monaco-vscode-editor-api@^38.0.4",
     "rolldown": "^1.2.15",
+    "semver": "^7.8.5",
     "tailwindcss": "^4.3.3",
     "vscode": "npm:@codingame/monaco-vscode-extension-api@^38.0.4"
   },
   "devDependencies": {
     "@codingame/esbuild-import-meta-url-plugin": "^1.0.3",
+    "@tagged-jsx/prettier-plugin": "^1.2.0",
+    "@types/semver": "^7.8.0",
     "@types/vscode": "^1.102.0",
+    "prettier": "^3.9.10",
     "typescript": "^5.6.0",
     "vite": "^6.0.0"
   }

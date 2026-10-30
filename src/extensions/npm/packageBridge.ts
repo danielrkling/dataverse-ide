@@ -1,19 +1,12 @@
-/*
- * Bridge between the workspace (via vscode.workspace.fs) and almostnode's
- * VirtualFS-backed PackageManager.
+﻿/*
+ * Bridge between the workspace (via vscode.workspace.fs) and the npm registry.
  *
- * Install flow:
- *   1. Workspace package.json is copied into the VFS so emergent
- *      dependencies can be resolved from the real dependency spec.
- *   2. almostnode PackageManager resolves + extracts real npm tarballs into
- *      the VFS at /node_modules (it transforms ESM packages to CJS by
- *      default, matching its runtime).
- *   3. /node_modules is written back into the real workspace filesystem so
- *      files visible in the explorer, git status, and the node-runtime
- *      extension all agree.
+ * All metadata helpers read the real workspace package.json / node_modules
+ * directly; installing does not use a VirtualFS at all (see
+ * ./directInstaller.ts). package.json is consulted with ensureWorkspacePackageJson
+ * so npm commands do not require the user to hand-write one first.
  */
-import { VirtualFS } from 'almostnode'
-import type { PackageManager } from 'almostnode'
+import { rsort } from 'semver'
 
 import type * as vscodeType from 'vscode'
 
@@ -29,7 +22,7 @@ async function readWorkspaceFileText(
   return DECODER.decode(bytes)
 }
 
-async function writeWorkspaceFileText(
+export async function writeWorkspaceFileText(
   vscode: typeof vscodeType,
   fileUri: vscodeType.Uri,
   text: string,
@@ -46,7 +39,7 @@ const MINIMAL_PACKAGE_JSON = {
   private: true,
 }
 
-async function ensureWorkspacePackageJson(
+export async function ensureWorkspacePackageJson(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
 ): Promise<string | undefined> {
@@ -59,10 +52,7 @@ async function ensureWorkspacePackageJson(
      * Create a starter package.json when none exists - npm commands should
      * not require the user to hand-write one first.
      */
-    if (
-      error instanceof vscode.FileSystemError &&
-      error.code === 'FileNotFound'
-    ) {
+    if (isFileNotFound(error)) {
       // fall through to creation
     } else {
       return undefined
@@ -74,14 +64,21 @@ async function ensureWorkspacePackageJson(
   try {
     await writeWorkspaceFileText(vscode, packageJsonUri, created)
 
-    const createdInformation = await vscode.window.showInformationMessage(
-      'npm: created a starter package.json in the workspace root.',
-      'Open',
-    )
-
-    if (createdInformation === 'Open') {
-      await vscode.window.showTextDocument(packageJsonUri)
-    }
+    /*
+     * Do not await the notification/dialog here - an earlier version blocked
+     * the install flow on this await, so the package the user asked to
+     * install was never processed after the starter package.json was created.
+     */
+    void vscode.window
+      .showInformationMessage(
+        'npm: created a starter package.json in the workspace root.',
+        'Open',
+      )
+      .then((createdInformation) => {
+        if (createdInformation === 'Open') {
+          void vscode.window.showTextDocument(packageJsonUri)
+        }
+      })
 
     return created
   } catch {
@@ -89,146 +86,21 @@ async function ensureWorkspacePackageJson(
   }
 }
 
-export async function loadPackageJsonIntoVfs(
-  vscode: typeof vscodeType,
-  rootUri: vscodeType.Uri,
-  vfs: VirtualFS,
-): Promise<boolean> {
-  const text = await ensureWorkspacePackageJson(vscode, rootUri)
+function isFileNotFound(error: unknown): boolean {
+  const code = (error as { code?: string | number } | undefined)?.code
 
-  if (text == null) {
-    return false
-  }
-
-  try {
-    JSON.parse(text)
-
-    vfs.writeFileSync('/package.json', text)
-
-    return true
-  } catch {
-    return false
-  }
+  // vscode.FileSystemError instances carry the string code; monaco-vscode-api
+  // internal provider errors may carry the numeric enum value 1 (FileNotFound).
+  return code === 'FileNotFound' || code === 1
 }
 
-export async function writePackageJsonBackToWorkspace(
-  vscode: typeof vscodeType,
-  rootUri: vscodeType.Uri,
-  vfs: VirtualFS,
-): Promise<void> {
-  if (!vfs.existsSync('/package.json')) {
-    return
-  }
 
-  const text = vfs.readFileSync(
-    '/package.json',
-    'utf8',
-  ) as string
 
-  const packageJsonUri = vscode.Uri.joinPath(rootUri, 'package.json')
 
-  await vscode.workspace.fs.writeFile(
-    packageJsonUri,
-    ENCODER.encode(text),
-  )
-}
 
-async function copyVfsSubtree(
-  vfs: VirtualFS,
-  path: string,
-  vscode: typeof vscodeType,
-  rootUri: vscodeType.Uri,
-  fileCountRef: { count: number },
-): Promise<void> {
-  const workspacePath = path.split('/').slice(1)
 
-  if (workspacePath.length > 0) {
-    await vscode.workspace.fs.createDirectory(
-      vscode.Uri.joinPath(rootUri, ...workspacePath),
-    )
-  }
 
-  for (const entry of vfs.readdirSync(path).sort()) {
-    const childPath = `${path}/${entry}`.replace(/\/{2,}/g, '/')
 
-    const stats = vfs.statSync(childPath)
-
-    if (stats.isDirectory()) {
-      await copyVfsSubtree(
-        vfs,
-        childPath,
-        vscode,
-        rootUri,
-        fileCountRef,
-      )
-
-      continue
-    }
-
-    if (stats.isFile()) {
-      const content = vfs.readFileSync(childPath)
-
-      await vscode.workspace.fs.writeFile(
-        vscode.Uri.joinPath(
-          rootUri,
-          ...childPath.split('/').slice(1),
-        ),
-        content instanceof Uint8Array
-          ? content
-          : ENCODER.encode(content as string),
-      )
-
-      fileCountRef.count++
-    }
-  }
-}
-
-export async function writeNodeModulesBackToWorkspace(
-  vscode: typeof vscodeType,
-  rootUri: vscodeType.Uri,
-  vfs: VirtualFS,
-): Promise<number> {
-  if (!vfs.existsSync('/node_modules')) {
-    return 0
-  }
-
-  const fileCountRef = { count: 0 }
-
-  await copyVfsSubtree(
-    vfs,
-    '/node_modules',
-    vscode,
-    rootUri,
-    fileCountRef,
-  )
-
-  return fileCountRef.count
-}
-
-export async function installPackages(
-  packageManager: PackageManager,
-  specs: string[],
-  onProgress: (message: string) => void,
-): Promise<string[]> {
-  const added: string[] = []
-
-  for (const spec of specs) {
-    /*
-     * transform: false keeps packages byte-perfect as shipped (ESM where the
-     * package ships ESM). The node runtime transpiles ESM on the fly, and
-     * the esbuild/rolldown extensions bundle raw ESM with tree-shaking.
-     */
-    const result = await packageManager.install(spec, {
-      onProgress,
-      save: true,
-      transform: false,
-    })
-
-    added.push(...result.added)
-  }
-
-  return added
-}
 
 export type NpmDependencySection = 'dependencies' | 'devDependencies'
 
@@ -284,29 +156,15 @@ export async function readWorkspaceDependencies(
   return result
 }
 
-function compareVersions(left: string, right: string): number {
-  const leftParts = left.split(/[.\-+]/).map(Number)
-  const rightParts = right.split(/[.\-+]/).map(Number)
-
-  for (let index = 0; index < 3; index++) {
-    const leftPart = leftParts[index] ?? 0
-    const rightPart = rightParts[index] ?? 0
-
-    if (leftPart !== rightPart) {
-      return rightPart - leftPart
-    }
-  }
-
-  return right.localeCompare(left)
-}
+const registryUrl = (packageName: string): string =>
+  `https://registry.npmjs.org/${encodeURIComponent(packageName).replace('%2F', '%2f')}`
 
 export async function fetchPackageVersions(
   packageName: string,
 ): Promise<string[]> {
-  const response = await fetch(
-    `https://registry.npmjs.org/${encodeURIComponent(packageName).replace('%5E', '').replace('%2F', '%2f')}`,
-    { headers: { Accept: 'application/vnd.npm.install-v1+json' } },
-  )
+  const response = await fetch(registryUrl(packageName), {
+    headers: { Accept: 'application/vnd.npm.install-v1+json' },
+  })
 
   if (!response.ok) {
     throw new Error(
@@ -328,7 +186,13 @@ export async function fetchPackageVersions(
     versions.unshift(latest)
   }
 
-  return versions.sort(compareVersions).slice(0, 200)
+  /*
+   * Reverse-sorted newest first via the `semver` package (proper prerelease
+   * ordering). The previous in-place Number()-coercion sort mangled
+   * prerelease identifiers (`2.0.0-rc.19` sorted via NaN comparisons and
+   * could lose to `rc.9`).
+   */
+  return rsort(versions, { loose: true }).slice(0, 200)
 }
 
 export async function uninstallDependency(
@@ -383,9 +247,7 @@ export type NpmPackageView = {
 export async function viewPackage(
   packageName: string,
 ): Promise<NpmPackageView> {
-  const response = await fetch(
-    `https://registry.npmjs.org/${encodeURIComponent(packageName).replace('%5E', '').replace('%2F', '%2f')}`,
-  )
+  const response = await fetch(registryUrl(packageName))
 
   if (!response.ok) {
     throw new Error(
@@ -510,6 +372,156 @@ export async function listInstalledPackages(
 }
 
 /*
+ * npm prune: remove top-level packages under node_modules that are neither
+ * declared in package.json nor required by anything that IS declared.
+ *
+ * The "required transitively" part matters because the flat installer places
+ * every dependency closure member at node_modules top level — pruning purely
+ * against declared sections would delete packages other packages need.
+ */
+export async function listExtraneousPackages(
+  vscode: typeof vscodeType,
+  rootUri: vscodeType.Uri,
+): Promise<InstalledPackage[]> {
+  const installed = await listInstalledPackages(vscode, rootUri)
+
+  const installedByName = new Map(
+    installed
+      .filter((entry) => entry.version !== '(unknown)')
+      .map((entry) => [entry.name, entry]),
+  )
+
+  const declared = await readWorkspaceDependencies(vscode, rootUri)
+
+  const keep = new Set<string>()
+
+  const readAllRequirements = async (
+    name: string,
+  ): Promise<string[]> => {
+    try {
+      const bytes = await vscode.workspace.fs.readFile(
+        vscode.Uri.joinPath(rootUri, 'node_modules', ...name.split('/'), 'package.json'),
+      )
+
+      const manifest = JSON.parse(DECODER.decode(bytes)) as {
+        dependencies?: Record<string, string>
+        peerDependencies?: Record<string, string>
+        peerDependenciesMeta?: Record<string, { optional?: boolean }>
+      }
+
+      const required: string[] = Object.keys(manifest.dependencies ?? {})
+
+      if (manifest.peerDependencies != null) {
+        const peerMeta = manifest.peerDependenciesMeta ?? {}
+
+        for (const [peerName, peerRange] of Object.entries(
+          manifest.peerDependencies,
+        )) {
+          if (peerRange.length > 0 && !peerMeta[peerName]?.optional) {
+            required.push(peerName)
+          }
+        }
+      }
+
+      return required
+    } catch {
+      return []
+    }
+  }
+
+  const queue = [...new Set(declared.map((dep) => dep.name))]
+
+  for (const name of queue) {
+    if (installedByName.has(name)) {
+      keep.add(name)
+    }
+  }
+
+  while (queue.length > 0) {
+    const name = queue.shift() as string
+
+    if (!keep.has(name)) {
+      continue
+    }
+
+    for (const requiredName of await readAllRequirements(name)) {
+      if (keep.has(requiredName)) {
+        continue
+      }
+
+      if (!installedByName.has(requiredName)) {
+        continue
+      }
+
+      keep.add(requiredName)
+      queue.push(requiredName)
+    }
+  }
+
+  /*
+   * Packages without a readable package.json (corrupt/partial installs) have
+   * no way to prove they are needed - npm prune removes those too.
+   */
+  return installed.filter((entry) => !keep.has(entry.name))
+}
+
+export async function pruneExtraneousPackages(
+  vscode: typeof vscodeType,
+  rootUri: vscodeType.Uri,
+  onRemoved: (name: string) => void,
+): Promise<number> {
+  const extraneous = await listExtraneousPackages(vscode, rootUri)
+
+  let removedCount = 0
+  const removedNames = new Set<string>()
+
+  for (const entry of extraneous) {
+    try {
+      await vscode.workspace.fs.delete(
+        vscode.Uri.joinPath(rootUri, 'node_modules', ...entry.name.split('/')),
+        { recursive: true },
+      )
+
+      removedNames.add(entry.name)
+      onRemoved(entry.name)
+      removedCount++
+    } catch {
+      // already gone or undeletable: leave it alone
+    }
+  }
+
+  if (removedNames.size > 0) {
+    try {
+      const lockPath = vscode.Uri.joinPath(
+        rootUri,
+        'node_modules',
+        '.package-lock.json',
+      )
+
+      const lockBytes = await vscode.workspace.fs.readFile(lockPath)
+      const lock = JSON.parse(DECODER.decode(lockBytes)) as Record<
+        string,
+        unknown
+      >
+
+      for (const name of removedNames) {
+        delete lock[name]
+      }
+
+      await writeWorkspaceFileText(
+        vscode,
+        lockPath,
+        `${JSON.stringify(lock, null, 2)}\n`,
+      )
+    } catch {
+      // no lockfile or unreadable: nothing to sync
+    }
+  }
+
+  return removedCount
+}
+
+/*
  * npm outdated: compare each declared dependency's installed version
  * against the registry's latest dist-tag.
  */
@@ -551,10 +563,9 @@ export async function checkOutdatedPackages(
     let latest = '(registry lookup failed)'
 
     try {
-      const response = await fetch(
-        `https://registry.npmjs.org/${encodeURIComponent(dependency.name).replace('%5E', '').replace('%2F', '%2f')}`,
-        { headers: { Accept: 'application/vnd.npm.install-v1+json' } },
-      )
+      const response = await fetch(registryUrl(dependency.name), {
+        headers: { Accept: 'application/vnd.npm.install-v1+json' },
+      })
 
       if (response.ok) {
         const manifest = await response.json() as {
@@ -579,50 +590,3 @@ export async function checkOutdatedPackages(
   return results
 }
 
-export function moveInstalledPackagesToSection(
-  vfs: VirtualFS,
-  packageNames: string[],
-  targetSection: NpmDependencySection,
-): void {
-  if (!vfs.existsSync('/package.json')) {
-    return
-  }
-
-  const text = vfs.readFileSync('/package.json', 'utf8') as string
-
-  const packageJson = JSON.parse(text) as {
-    dependencies?: Record<string, string>
-    devDependencies?: Record<string, string>
-  }
-
-  packageJson.dependencies ??= {}
-  packageJson.devDependencies ??= {}
-
-  const sourceSection =
-    targetSection === 'dependencies'
-      ? packageJson.devDependencies
-      : packageJson.dependencies
-
-  const destinationSection =
-    targetSection === 'dependencies'
-      ? packageJson.dependencies
-      : packageJson.devDependencies
-
-  for (const packageName of packageNames) {
-    const version =
-      packageJson.dependencies[packageName] ??
-      packageJson.devDependencies[packageName]
-
-    if (version == null) {
-      continue
-    }
-
-    destinationSection[packageName] = version
-    delete sourceSection[packageName]
-  }
-
-  vfs.writeFileSync(
-    '/package.json',
-    `${JSON.stringify(packageJson, null, 2)}\n`,
-  )
-}

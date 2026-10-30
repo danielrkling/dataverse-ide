@@ -31,6 +31,7 @@ import tailwindPreflightCss from 'tailwindcss/preflight.css?raw'
 import tailwindThemeCss from 'tailwindcss/theme.css?raw'
 
 import { EsbuildBuildRunner } from '../esbuild/buildRunner.js'
+import { lazyBuild } from '../esbuild/lazyBuild.js'
 
 import type * as vscodeType from 'vscode'
 
@@ -345,20 +346,28 @@ async function collectModuleSources(
  * subpaths) resolves them against the collected node_modules file map.
  * Unresolved bare imports are left external by the worker — which would
  * break the blob import — so they are reported as an error instead.
+ *
+ * Uses the shared lazyBuild loop: the worker may answer with a probe
+ * response (outputs: [], needFiles: [...]) when the collected map lacks
+ * package files (e.g. overlay-FS workspaces where findFiles cannot see
+ * node_modules); the loop reads the requested paths from the workspace
+ * before finalizing. Without it, a probe round looks exactly like
+ * "produced no output".
  */
 async function bundleAndImportModule(
+  vscode: typeof vscodeType,
+  rootUri: vscodeType.Uri,
   runner: EsbuildBuildRunner,
   files: Record<string, string>,
   entry: string,
+  outputChannel?: vscodeType.OutputChannel,
 ): Promise<{ module: unknown; text: string }> {
-  const response = await runner.build({
-    entry,
-    files,
-    bundle: true,
-    format: 'esm',
-    minify: false,
-    sourcemap: false,
-  })
+  const response = await lazyBuild(
+    vscode,
+    rootUri,
+    runner,
+    { entry, files, bundle: true, format: 'esm', minify: false, sourcemap: false },
+  )
 
   if (!response.ok) {
     throw new Error(`Bundling tailwind module "${entry}" failed: ${response.error}`)
@@ -383,7 +392,13 @@ async function bundleAndImportModule(
   )
 
   try {
-    const module = await import(blobUrl)
+    const module = await import(blobUrl).catch((error: unknown) => {
+      throw new Error(
+        `Importing the bundled tailwind module "${entry}" failed: ` +
+          (error instanceof Error ? error.message : String(error)) +
+          `. Bundle head: ${bundle.text.slice(0, 400)}`,
+      )
+    })
 
     return { module, text: bundle.text }
   } finally {
@@ -408,6 +423,7 @@ function createLoadModule(
   rootUri: vscodeType.Uri,
   runner: EsbuildBuildRunner | undefined,
   pluginInputs: string[],
+  outputChannel?: vscodeType.OutputChannel,
 ): TailwindLoadModule {
   /*
    * The file map is collected lazily on the first plugin load and reused
@@ -457,10 +473,24 @@ function createLoadModule(
 
         files[VIRTUAL_PLUGIN_ENTRY] = `import plugin from "${escaped}";\nexport default plugin;\n`
 
-        return bundleAndImportModule(runner, files, VIRTUAL_PLUGIN_ENTRY)
+        return bundleAndImportModule(
+          vscode,
+          rootUri,
+          runner,
+          files,
+          VIRTUAL_PLUGIN_ENTRY,
+          outputChannel,
+        )
       }
 
-      return bundleAndImportModule(runner, files, joinWorkspacePath(base, id))
+      return bundleAndImportModule(
+        vscode,
+        rootUri,
+        runner,
+        files,
+        joinWorkspacePath(base, id),
+        outputChannel,
+      )
     })()
 
     /*
@@ -469,10 +499,23 @@ function createLoadModule(
      */
     pluginInputs.push(`${cacheKey}\u0000${bundled.text}`)
 
+    /*
+     * Interop, same as the http path: the blob import's namespace wraps the
+     * plugin function in `default`. Handing the raw namespace to compile()
+     * makes tailwind invoke an object and fail with minified errors like
+     * "k is not a function".
+     */
+    const rawModule = bundled.module as { default?: unknown } | null
+
+    const pluginModule =
+      typeof rawModule === 'function'
+        ? rawModule
+        : (rawModule?.default ?? rawModule)
+
     return {
       path: id,
       base,
-      module: bundled.module as TailwindModule,
+      module: pluginModule as TailwindModule,
     }
   }
 }
@@ -486,6 +529,8 @@ export async function compileTailwindCss(
     pluginRunner?: EsbuildBuildRunner
     /** Minify the compiled CSS through the esbuild worker. */
     minify?: boolean
+    /** Output channel for lazy-resolution diagnostics. */
+    outputChannel?: vscodeType.OutputChannel
   } = {},
 ): Promise<TailwindCompileResult> {
   const inputPath = options.input
@@ -526,6 +571,7 @@ export async function compileTailwindCss(
       rootUri,
       options.pluginRunner,
       pluginInputs,
+      options.outputChannel,
     ),
   })
 

@@ -1,40 +1,36 @@
-import {
-  initialize,
-  IWorkbenchConstructionOptions,
-  LogLevel
-} from '@codingame/monaco-vscode-api'
-import getWorkbenchServiceOverride from '@codingame/monaco-vscode-workbench-service-override'
-import getQuickAccessServiceOverride from '@codingame/monaco-vscode-quickaccess-service-override'
-import getConfigurationServiceOverride from '@codingame/monaco-vscode-configuration-service-override'
-import getDialogsServiceOverride from '@codingame/monaco-vscode-dialogs-service-override'
-import getEnvironmentServiceOverride from '@codingame/monaco-vscode-environment-service-override'
-import getExplorerServiceOverride from '@codingame/monaco-vscode-explorer-service-override'
-import getExtensionServiceOverride from '@codingame/monaco-vscode-extensions-service-override'
-import getKeybindingsServiceOverride from '@codingame/monaco-vscode-keybindings-service-override'
-import getLanguagesServiceOverride from '@codingame/monaco-vscode-languages-service-override'
-import getLocalizationServiceOverride from '@codingame/monaco-vscode-localization-service-override'
-import getLogServiceOverride from '@codingame/monaco-vscode-log-service-override'
-import getMarkersServiceOverride from '@codingame/monaco-vscode-markers-service-override'
-import getModelServiceOverride from '@codingame/monaco-vscode-model-service-override'
-import getNotificationServiceOverride from '@codingame/monaco-vscode-notifications-service-override'
-import getOutlineServiceOverride from '@codingame/monaco-vscode-outline-service-override'
-import getOutputServiceOverride from '@codingame/monaco-vscode-output-service-override'
-import getPreferencesServiceOverride from '@codingame/monaco-vscode-preferences-service-override'
-import getSearchServiceOverride from '@codingame/monaco-vscode-search-service-override'
-import getSnippetServiceOverride from '@codingame/monaco-vscode-snippets-service-override'
-import getTextmateServiceOverride from '@codingame/monaco-vscode-textmate-service-override'
-import getThemeServiceOverride from '@codingame/monaco-vscode-theme-service-override'
-import getStorageServiceOverride from '@codingame/monaco-vscode-storage-service-override'
-import * as vscode from 'vscode'
-import { rootUri } from './fsProvider.js'
-import getBulkEditServiceOverride from '@codingame/monaco-vscode-bulk-edit-service-override'
-import getWorkspaceTrustServiceOverride from '@codingame/monaco-vscode-workspace-trust-service-override'
+import { initialize, IWorkbenchConstructionOptions, LogLevel } from "@codingame/monaco-vscode-api";
+import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-service-override";
+import getQuickAccessServiceOverride from "@codingame/monaco-vscode-quickaccess-service-override";
+import getConfigurationServiceOverride from "@codingame/monaco-vscode-configuration-service-override";
+import getDialogsServiceOverride from "@codingame/monaco-vscode-dialogs-service-override";
+import getEnvironmentServiceOverride from "@codingame/monaco-vscode-environment-service-override";
+import getExplorerServiceOverride from "@codingame/monaco-vscode-explorer-service-override";
+import getExtensionServiceOverride from "@codingame/monaco-vscode-extensions-service-override";
+import getKeybindingsServiceOverride from "@codingame/monaco-vscode-keybindings-service-override";
+import getLanguagesServiceOverride from "@codingame/monaco-vscode-languages-service-override";
+import getLocalizationServiceOverride from "@codingame/monaco-vscode-localization-service-override";
+import getLogServiceOverride from "@codingame/monaco-vscode-log-service-override";
+import getMarkersServiceOverride from "@codingame/monaco-vscode-markers-service-override";
+import getModelServiceOverride from "@codingame/monaco-vscode-model-service-override";
+import getNotificationServiceOverride from "@codingame/monaco-vscode-notifications-service-override";
+import getOutlineServiceOverride from "@codingame/monaco-vscode-outline-service-override";
+import getOutputServiceOverride from "@codingame/monaco-vscode-output-service-override";
+import getPreferencesServiceOverride from "@codingame/monaco-vscode-preferences-service-override";
+import getSearchServiceOverride from "@codingame/monaco-vscode-search-service-override";
+import getSnippetServiceOverride from "@codingame/monaco-vscode-snippets-service-override";
+import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
+import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
+import getStorageServiceOverride from "@codingame/monaco-vscode-storage-service-override";
+import * as vscode from "vscode";
+import { rootUri } from "./workspace/fsProvider.js";
+import getBulkEditServiceOverride from "@codingame/monaco-vscode-bulk-edit-service-override";
+import getWorkspaceTrustServiceOverride from "@codingame/monaco-vscode-workspace-trust-service-override";
 // NOTE: do not enable getViewsServiceOverride() here - see the service list
 // below; it conflicts with the workbench override's own part rendering.
-import getEmmetServiceOverride from '@codingame/monaco-vscode-emmet-service-override'
-import getSecretStorageServiceOverride from '@codingame/monaco-vscode-secret-storage-service-override'
+import getEmmetServiceOverride from "@codingame/monaco-vscode-emmet-service-override";
+import getSecretStorageServiceOverride from "@codingame/monaco-vscode-secret-storage-service-override";
 // import getTerminalServiceOverride from '@codingame/monaco-vscode-terminal-service-override'
-import getSCMServiceOverride from '@codingame/monaco-vscode-scm-service-override'
+import getSCMServiceOverride from "@codingame/monaco-vscode-scm-service-override";
 // import getDebugServiceOverride from '@codingame/monaco-vscode-debug-service-override'
 
 // The extension host (and other vscode service workers) run in web workers.
@@ -42,20 +38,19 @@ import getSCMServiceOverride from '@codingame/monaco-vscode-scm-service-override
 // build time - passing the `extensionHostWorkerMain` label to the sandboxed
 // web worker extension host iframe works out of the box in production,
 // where optimized deps' `import.meta.url`-based resolution breaks
-import editorWorkerUrl from 'monaco-editor/esm/vs/editor/editor.worker.js?worker&url'
-import extensionHostWorkerUrl from '@codingame/monaco-vscode-api/workers/extensionHost.worker?worker&url'
-import textMateWorkerUrl from '@codingame/monaco-vscode-textmate-service-override/worker?worker&url'
-import localFileSearchWorkerUrl from '@codingame/monaco-vscode-search-service-override/worker?worker&url'
-import outputLinkComputerWorkerUrl from '@codingame/monaco-vscode-output-service-override/worker?worker&url'
-import outputLinkDetectionWorkerUrl from '@codingame/monaco-vscode-output-service-override/worker?worker&url'
+import editorWorkerUrl from "monaco-editor/esm/vs/editor/editor.worker.js?worker&url";
+import extensionHostWorkerUrl from "@codingame/monaco-vscode-api/workers/extensionHost.worker?worker&url";
+import textMateWorkerUrl from "@codingame/monaco-vscode-textmate-service-override/worker?worker&url";
+import localFileSearchWorkerUrl from "@codingame/monaco-vscode-search-service-override/worker?worker&url";
+import outputLinkComputerWorkerUrl from "@codingame/monaco-vscode-output-service-override/worker?worker&url";
+import outputLinkDetectionWorkerUrl from "@codingame/monaco-vscode-output-service-override/worker?worker&url";
 
-import {
-  activateExtensions,
-} from './extensions/registry.js'
+import { activateExtensions } from "./extensions/registry.js";
 
-import {
-  workspaceDirectoryHandle,
-} from './fsProvider.js'
+import { workspaceDirectoryHandle } from "./workspace/fsProvider.js";
+
+import { ensureOverlayDirsSetting } from "./workspace/opfsOverlay.js";
+import { ensureWorkspaceSwitcher } from "./workspace/workspaceSwitcher.js";
 
 const workerUrls: Record<string, string> = {
   editorWorkerService: editorWorkerUrl,
@@ -68,7 +63,7 @@ const workerUrls: Record<string, string> = {
   outputLinkComputer: outputLinkComputerWorkerUrl,
   LocalFileSearchWorker: localFileSearchWorkerUrl,
   OutputLinkDetectionWorker: outputLinkDetectionWorkerUrl,
-}
+};
 
 function resolveWorkerUrl(workerUrl: string): string {
   /*
@@ -78,19 +73,13 @@ function resolveWorkerUrl(workerUrl: string): string {
    * Resolve relative to the actual Dataverse web-resource document location:
    * /WebResources/vs_code/dist/index.html
    */
-  return new URL(workerUrl, document.baseURI).href
+  return new URL(workerUrl, document.baseURI).href;
 }
 
-async function verifyWorker(
-  workerName: string,
-  workerUrl: string,
-): Promise<void> {
+async function verifyWorker(workerName: string, workerUrl: string): Promise<void> {
   const resolvedUrl = resolveWorkerUrl(workerUrl);
 
-  console.info(
-    `[Dataverse IDE] Testing ${workerName} worker:`,
-    resolvedUrl,
-  );
+  console.info(`[Dataverse IDE] Testing ${workerName} worker:`, resolvedUrl);
 
   await new Promise<void>((resolve, reject) => {
     const worker = new Worker(resolvedUrl, {
@@ -101,9 +90,7 @@ async function verifyWorker(
     const timeout = window.setTimeout(() => {
       worker.terminate();
 
-      console.info(
-        `[Dataverse IDE] ${workerName} worker loaded without a startup error.`,
-      );
+      console.info(`[Dataverse IDE] ${workerName} worker loaded without a startup error.`);
 
       resolve();
     }, 1000);
@@ -114,11 +101,7 @@ async function verifyWorker(
         window.clearTimeout(timeout);
         worker.terminate();
 
-        reject(
-          new Error(
-            `${workerName} worker failed: ${event.message || "unknown error"}`,
-          ),
-        );
+        reject(new Error(`${workerName} worker failed: ${event.message || "unknown error"}`));
       },
       { once: true },
     );
@@ -129,11 +112,7 @@ async function verifyWorker(
         window.clearTimeout(timeout);
         worker.terminate();
 
-        reject(
-          new Error(
-            `${workerName} worker emitted a message deserialization error.`,
-          ),
-        );
+        reject(new Error(`${workerName} worker emitted a message deserialization error.`));
       },
       { once: true },
     );
@@ -145,78 +124,59 @@ window.MonacoEnvironment = {
     const workerUrl = workerUrls[label];
 
     if (workerUrl == null) {
-      console.error(
-        `[Dataverse IDE] Monaco requested an unmapped worker URL: "${label}"`,
-      );
+      console.error(`[Dataverse IDE] Monaco requested an unmapped worker URL: "${label}"`);
 
-      throw new Error(
-        `[Dataverse IDE] Worker URL for "${label}" is not configured.`,
-      );
+      throw new Error(`[Dataverse IDE] Worker URL for "${label}" is not configured.`);
     }
 
     const resolvedUrl = resolveWorkerUrl(workerUrl);
 
-    console.info(
-      `[Dataverse IDE] Monaco requested worker URL "${label}":`,
-      resolvedUrl,
-    );
+    console.info(`[Dataverse IDE] Monaco requested worker URL "${label}":`, resolvedUrl);
 
     return resolvedUrl;
   },
 
   getWorkerOptions() {
     return {
-      type: 'module',
-    }
+      type: "module",
+    };
   },
 
   getWorker(_workerId, label) {
-    const workerUrl = workerUrls[label]
+    const workerUrl = workerUrls[label];
 
     if (workerUrl == null) {
-      console.error(
-        `[Dataverse IDE] Monaco requested an unmapped worker: "${label}"`,
-      )
+      console.error(`[Dataverse IDE] Monaco requested an unmapped worker: "${label}"`);
 
-      throw new Error(
-        `[Dataverse IDE] Worker "${label}" is not configured.`,
-      )
+      throw new Error(`[Dataverse IDE] Worker "${label}" is not configured.`);
     }
 
-    const resolvedUrl = resolveWorkerUrl(workerUrl)
+    const resolvedUrl = resolveWorkerUrl(workerUrl);
 
-    console.info(
-      `[Dataverse IDE] Monaco requested worker "${label}":`,
-      resolvedUrl,
-    )
+    console.info(`[Dataverse IDE] Monaco requested worker "${label}":`, resolvedUrl);
 
     const worker = new Worker(resolvedUrl, {
-      type: 'module',
+      type: "module",
       name: `dataverse-ide-${label}`,
-    })
+    });
 
-    worker.addEventListener('error', (event) => {
-      console.error(
-        `[Dataverse IDE] Worker "${label}" failed after creation.`,
-        {
-          url: resolvedUrl,
-          message: event.message,
-          filename: event.filename,
-          line: event.lineno,
-          column: event.colno,
-          error: event.error,
-          event,
-        },
-      )
-    })
+    worker.addEventListener("error", (event) => {
+      console.error(`[Dataverse IDE] Worker "${label}" failed after creation.`, {
+        url: resolvedUrl,
+        message: event.message,
+        filename: event.filename,
+        line: event.lineno,
+        column: event.colno,
+        error: event.error,
+        event,
+      });
+    });
 
-    return worker
+    return worker;
   },
-}
+};
 
-function installDocumentAutoSave(
-  delayMs = 1000,
-): vscode.Disposable {
+function installDocumentAutoSave(delayMs = 1000): vscode.Disposable {
   const timers = new Map<string, number>();
 
   function clearTimer(uri: vscode.Uri): void {
@@ -229,81 +189,71 @@ function installDocumentAutoSave(
     }
   }
 
-  const changeSubscription =
-    vscode.workspace.onDidChangeTextDocument((event) => {
-      const document = event.document;
+  const changeSubscription = vscode.workspace.onDidChangeTextDocument((event) => {
+    const document = event.document;
 
-      /*
-       * Ignore non-file resources:
-       * - output channels
-       * - extension documents
-       * - virtual typings
-       * - untitled editors
-       */
-      if (document.uri.scheme !== 'file' || document.isUntitled) {
-        return;
-      }
+    /*
+     * Ignore non-file resources:
+     * - output channels
+     * - extension documents
+     * - virtual typings
+     * - untitled editors
+     */
+    if (document.uri.scheme !== "file" || document.isUntitled) {
+      return;
+    }
 
-      /*
-       * Only autosave files that belong to the currently opened workspace.
-       */
-      if (vscode.workspace.getWorkspaceFolder(document.uri) == null) {
-        return;
-      }
+    /*
+     * Only autosave files that belong to the currently opened workspace.
+     */
+    if (vscode.workspace.getWorkspaceFolder(document.uri) == null) {
+      return;
+    }
 
-      /*
-       * Ignore metadata-only change events.
-       */
-      if (event.contentChanges.length === 0 || !document.isDirty) {
-        return;
-      }
+    /*
+     * Ignore metadata-only change events.
+     */
+    if (event.contentChanges.length === 0 || !document.isDirty) {
+      return;
+    }
 
-      clearTimer(document.uri);
+    clearTimer(document.uri);
 
-      const timer = window.setTimeout(() => {
-        timers.delete(document.uri.toString());
+    const timer = window.setTimeout(() => {
+      timers.delete(document.uri.toString());
 
-        void (async () => {
-          /*
-           * The document might have been manually saved, closed, or changed
-           * again while this timer waited.
-           */
-          if (!document.isDirty) {
-            return;
-          }
+      void (async () => {
+        /*
+         * The document might have been manually saved, closed, or changed
+         * again while this timer waited.
+         */
+        if (!document.isDirty) {
+          return;
+        }
 
-          try {
-            const saved = await document.save();
+        try {
+          const saved = await document.save();
 
-            console.info(
-              '[Dataverse IDE] Autosave attempted:',
-              {
-                file: document.uri.fsPath,
-                saved,
-              },
-            );
-          } catch (error) {
-            console.error(
-              '[Dataverse IDE] Autosave failed:',
-              document.uri.toString(),
-              error,
-            );
-          }
-        })();
-      }, delayMs);
+          console.info("[Dataverse IDE] Autosave attempted:", {
+            file: document.uri.fsPath,
+            saved,
+          });
+        } catch (error) {
+          console.error("[Dataverse IDE] Autosave failed:", document.uri.toString(), error);
+        }
+      })();
+    }, delayMs);
 
-      timers.set(document.uri.toString(), timer);
-    });
+    timers.set(document.uri.toString(), timer);
+  });
 
-  const saveSubscription =
-    vscode.workspace.onDidSaveTextDocument((document) => {
-      clearTimer(document.uri);
-    });
+  const saveSubscription = vscode.workspace.onDidSaveTextDocument((document) => {
+    clearTimer(document.uri);
+  });
 
-  const closeSubscription =
-    vscode.workspace.onDidCloseTextDocument((document) => {
-      clearTimer(document.uri);
-    });
+  const closeSubscription = vscode.workspace.onDidCloseTextDocument((document) => {
+    clearTimer(document.uri);
+  });
 
   return new vscode.Disposable(() => {
     changeSubscription.dispose();
@@ -318,14 +268,11 @@ function installDocumentAutoSave(
   });
 }
 
-export async function startWorkbench(
-  container: HTMLElement,
-): Promise<void> {
+export async function startWorkbench(container: HTMLElement): Promise<void> {
   console.table({
     origin: window.location.origin,
     crossOriginIsolated: window.crossOriginIsolated,
-    sharedArrayBufferAvailable:
-      typeof SharedArrayBuffer !== "undefined",
+    sharedArrayBufferAvailable: typeof SharedArrayBuffer !== "undefined",
   });
 
   // await Promise.all([
@@ -341,56 +288,59 @@ export async function startWorkbench(
   // iframe under a wildcard subdomain (localhost subdomains resolve for free).
   // It is required by the typescript-language-features extension (tsserver forks
   // nested workers, which are only supported there).
-  const extensionHostLocation = new URL('.', import.meta.url)
-  extensionHostLocation.pathname = ''
-  let iframeAlternateDomain: string | undefined
-  if (extensionHostLocation.hostname.startsWith('localhost') && extensionHostLocation.protocol === 'http:') {
-    extensionHostLocation.hostname = `{{uuid}}.${extensionHostLocation.hostname}`
-    iframeAlternateDomain = extensionHostLocation.href
+  const extensionHostLocation = new URL(".", import.meta.url);
+  extensionHostLocation.pathname = "";
+  let iframeAlternateDomain: string | undefined;
+  if (
+    extensionHostLocation.hostname.startsWith("localhost") &&
+    extensionHostLocation.protocol === "http:"
+  ) {
+    extensionHostLocation.hostname = `{{uuid}}.${extensionHostLocation.hostname}`;
+    iframeAlternateDomain = extensionHostLocation.href;
   }
 
   const constructOptions: IWorkbenchConstructionOptions = {
     windowIndicator: {
-      label: 'Dataverse IDE',
-      tooltip: '',
-      command: ''
+      label: "Dataverse IDE",
+      tooltip: "",
+      command: "",
     },
     developmentOptions: {
-      logLevel: LogLevel.Error
+      logLevel: LogLevel.Error,
     },
     configurationDefaults: {
-      'workbench.colorTheme': 'Default Dark Modern',
-      'workbench.iconTheme': 'vs-seti',
-      'window.title': 'Dataverse IDE${separator}${dirty}${activeEditorShort}',
+      "workbench.colorTheme": "Default Dark Modern",
+      "workbench.iconTheme": "vs-seti",
+      "window.title": "Dataverse IDE${separator}${dirty}${activeEditorShort}",
 
       /*
-      * Write dirty editor buffers through the File System Access API provider.
-      */
-      'files.autoSave': 'afterDelay',
-      'files.autoSaveDelay': 1000,
+       * Write dirty editor buffers through the File System Access API provider.
+       */
+      "files.autoSave": "afterDelay",
+      "files.autoSaveDelay": 1000,
 
       /*
        * Optional editor hygiene.
        */
-      'files.trimTrailingWhitespace': true,
-      'files.insertFinalNewline': true,
+      "files.trimTrailingWhitespace": true,
+      "files.insertFinalNewline": true,
 
       /*
        * Avoid remote SchemaStore CORS noise in Dataverse.
        */
-      'json.schemaDownload.enable': false,
+      "json.schemaDownload.enable": false,
     },
     workspaceProvider: {
       trusted: true,
       async open() {
-        window.open(window.location.href)
-        return true
+        window.open(window.location.href);
+        return true;
       },
       workspace: {
-        folderUri: rootUri
-      }
-    }
-  }
+        folderUri: rootUri,
+      },
+    },
+  };
 
   await initialize(
     {
@@ -399,7 +349,7 @@ export async function startWorkbench(
         // Required by the typescript-language-features extension (tsserver forks
         // nested workers, only supported in the web worker extension host iframe)
         enableWorkerExtensionHost: true,
-        iframeAlternateDomain
+        iframeAlternateDomain,
       }),
       ...getModelServiceOverride(),
       ...getNotificationServiceOverride(),
@@ -434,16 +384,16 @@ export async function startWorkbench(
 
       ...getLocalizationServiceOverride({
         async clearLocale() {
-          const url = new URL(window.location.href)
-          url.searchParams.delete('locale')
-          window.history.pushState(null, '', url.toString())
+          const url = new URL(window.location.href);
+          url.searchParams.delete("locale");
+          window.history.pushState(null, "", url.toString());
         },
         async setLocale(id) {
-          const url = new URL(window.location.href)
-          url.searchParams.set('locale', id)
-          window.history.pushState(null, '', url.toString())
+          const url = new URL(window.location.href);
+          url.searchParams.set("locale", id);
+          window.history.pushState(null, "", url.toString());
         },
-        availableLanguages: []
+        availableLanguages: [],
       }),
 
       // editor-centric UI
@@ -457,28 +407,33 @@ export async function startWorkbench(
 
       ...getQuickAccessServiceOverride({
         isKeybindingConfigurationVisible: () => true,
-        shouldUseGlobalPicker: () => true
-      })
+        shouldUseGlobalPicker: () => true,
+      }),
     },
     container,
     constructOptions,
     {
       // Otherwise, VSCode detects the first open workspace folder as home dir
-      userHome: vscode.Uri.file('/')
-    }
-  )
+      userHome: vscode.Uri.file("/"),
+    },
+  );
 
   console.table({
-    filesAutoSave:
-      vscode.workspace
-        .getConfiguration('files')
-        .get<string>('autoSave'),
+    filesAutoSave: vscode.workspace.getConfiguration("files").get<string>("autoSave"),
 
-    filesAutoSaveDelay:
-      vscode.workspace
-        .getConfiguration('files')
-        .get<number>('autoSaveDelay'),
+    filesAutoSaveDelay: vscode.workspace.getConfiguration("files").get<number>("autoSaveDelay"),
   });
+
+  /*
+   * Contribute dataverseIde.overlayDirs (which top-level workspace
+   * directories are persisted in OPFS, default ['node_modules']).
+   */
+  await ensureOverlayDirsSetting();
+
+  /*
+   * Workspace switching commands (hash + reload flow; see workspaceHash.ts).
+   */
+  await ensureWorkspaceSwitcher();
 
   const autoSaveDisposable = installDocumentAutoSave(1000);
 
@@ -486,13 +441,13 @@ export async function startWorkbench(
     vscode,
     workspaceRootUri: rootUri,
     workspaceDirectoryHandle,
-  })
+  });
 
   window.addEventListener(
-    'beforeunload',
+    "beforeunload",
     () => {
       autoSaveDisposable.dispose();
-      extensionsDisposable.dispose()
+      extensionsDisposable.dispose();
     },
     { once: true },
   );

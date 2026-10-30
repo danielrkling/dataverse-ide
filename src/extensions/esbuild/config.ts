@@ -1,4 +1,4 @@
-import type * as vscodeType from 'vscode'
+import type * as vscodeType from "vscode";
 
 /*
  * esbuild.config.json - the source of truth for workspace builds.
@@ -8,7 +8,7 @@ import type * as vscodeType from 'vscode'
  *
  *   {
  *     "entry": "src/index.ts",
- *     "outDir": ".ide-build",
+ *     "outDir": "dist",
  *     "format": "esm",
  *     "minify": false,
  *     "sourcemap": false,
@@ -19,39 +19,52 @@ import type * as vscodeType from 'vscode'
  *   }
  */
 
-const CONFIG_FILE_NAME = 'esbuild.config.json'
+import {
+  configFilePathFor,
+  configRelativePath,
+  type ConfigPathOptions,
+} from "../shared/configPath.js";
+
+const CONFIG_FILE_NAME = "esbuild.config.json";
+
+export const CONFIG_PATH_OPTIONS: ConfigPathOptions = {
+  section: "dataverseIde.esbuild",
+  defaultPath: CONFIG_FILE_NAME,
+};
 
 export type EsbuildConfig = {
-  entry: string
-  outDir: string
-  format: 'esm' | 'iife' | 'cjs'
-  minify: boolean
-  sourcemap: boolean
-  target: string
-  bundle: boolean
-  external: string[]
-  define: Record<string, string>
-}
+  entry: string;
+  outDir: string;
+  format: "esm" | "iife" | "cjs";
+  minify: boolean;
+  sourcemap: boolean;
+  target: string;
+  bundle: boolean;
+  external: string[];
+  define: Record<string, string>;
+};
 
 export const ESBUILD_DEFAULT_CONFIG: EsbuildConfig = {
-  entry: 'src/app.ts',
-  outDir: 'dist',
-  format: 'esm',
+  entry: "src/app.ts",
+  outDir: "dist",
+  format: "esm",
   minify: false,
   sourcemap: false,
-  target: 'esnext',
+  target: "esnext",
   bundle: true,
   external: [],
   define: {},
+};
+
+const FORMATS = new Set(["esm", "iife", "cjs"]);
+
+export function configFilePath(vscode: typeof vscodeType, rootUri: vscodeType.Uri): vscodeType.Uri {
+  return configFilePathFor(vscode, rootUri, CONFIG_PATH_OPTIONS);
 }
 
-const FORMATS = new Set(['esm', 'iife', 'cjs'])
-
-export function configFilePath(
-  vscode: typeof vscodeType,
-  rootUri: vscodeType.Uri,
-): vscodeType.Uri {
-  return vscode.Uri.joinPath(rootUri, CONFIG_FILE_NAME)
+/** Workspace-relative config path (honors dataverseIde.esbuild.configPath). */
+export function configRelativePathFor(vscode: typeof vscodeType, rootUri: vscodeType.Uri): string {
+  return configRelativePath(vscode, rootUri, CONFIG_PATH_OPTIONS);
 }
 
 /*
@@ -64,31 +77,29 @@ export async function readEsbuildConfig(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
 ): Promise<{ text: string | null; config: EsbuildConfig }> {
-  const defaults = { ...ESBUILD_DEFAULT_CONFIG }
+  const defaults = { ...ESBUILD_DEFAULT_CONFIG };
 
-  let text: string | null = null
-
-  try {
-    const bytes = await vscode.workspace.fs.readFile(
-      configFilePath(vscode, rootUri),
-    )
-
-    text = new TextDecoder().decode(bytes)
-  } catch {
-    return { text: null, config: defaults }
-  }
-
-  let parsed: Record<string, unknown>
+  let text: string | null = null;
 
   try {
-    parsed = JSON.parse(text) as Record<string, unknown>
+    const bytes = await vscode.workspace.fs.readFile(configFilePath(vscode, rootUri));
+
+    text = new TextDecoder().decode(bytes);
   } catch {
-    return { text, config: defaults }
+    return { text: null, config: defaults };
   }
 
-  const config: EsbuildConfig = { ...defaults }
+  let parsed: Record<string, unknown>;
 
-  if (typeof parsed.entry === 'string' && parsed.entry.trim().length > 0) {
+  try {
+    parsed = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return { text, config: defaults };
+  }
+
+  const config: EsbuildConfig = { ...defaults };
+
+  if (typeof parsed.entry === "string" && parsed.entry.trim().length > 0) {
     /*
      * Canonicalize: workspace paths are stored slash-normalized without a
      * leading './' (the collected files map keys carry no './' prefix), so
@@ -96,68 +107,58 @@ export async function readEsbuildConfig(
      */
     config.entry = parsed.entry
       .trim()
-      .replaceAll('\\', '/')
-      .replace(/^(?:\.{1,2}\/)+/, '')
+      .replaceAll("\\", "/")
+      .replace(/^(?:\.{1,2}\/)+/, "");
   }
 
-  if (typeof parsed.outDir === 'string' && parsed.outDir.trim().length > 0) {
-    config.outDir = parsed.outDir.trim().replaceAll('\\', '/')
+  if (typeof parsed.outDir === "string" && parsed.outDir.trim().length > 0) {
+    config.outDir = parsed.outDir.trim().replaceAll("\\", "/");
   }
 
-  if (
-    typeof parsed.format === 'string' &&
-    FORMATS.has(parsed.format)
-  ) {
-    config.format = parsed.format as EsbuildConfig['format']
+  if (typeof parsed.format === "string" && FORMATS.has(parsed.format)) {
+    config.format = parsed.format as EsbuildConfig["format"];
   }
 
-  if (typeof parsed.minify === 'boolean') {
-    config.minify = parsed.minify
+  if (typeof parsed.minify === "boolean") {
+    config.minify = parsed.minify;
   }
 
-  if (typeof parsed.sourcemap === 'boolean') {
-    config.sourcemap = parsed.sourcemap
+  if (typeof parsed.sourcemap === "boolean") {
+    config.sourcemap = parsed.sourcemap;
   }
 
-  if (typeof parsed.target === 'string' && parsed.target.trim().length > 0) {
-    config.target = parsed.target.trim()
+  if (typeof parsed.target === "string" && parsed.target.trim().length > 0) {
+    config.target = parsed.target.trim();
   }
 
-  if (typeof parsed.bundle === 'boolean') {
-    config.bundle = parsed.bundle
+  if (typeof parsed.bundle === "boolean") {
+    config.bundle = parsed.bundle;
   }
 
   if (Array.isArray(parsed.external)) {
     const externals = parsed.external.filter(
-      (entry): entry is string =>
-        typeof entry === 'string' && entry.trim().length > 0,
-    )
+      (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
+    );
 
-    config.external = externals.map((entry) => entry.trim())
+    config.external = externals.map((entry) => entry.trim());
   }
 
-  if (
-    parsed.define != null &&
-    typeof parsed.define === 'object' &&
-    !Array.isArray(parsed.define)
-  ) {
-    const define: Record<string, string> = {}
+  if (parsed.define != null && typeof parsed.define === "object" && !Array.isArray(parsed.define)) {
+    const define: Record<string, string> = {};
 
-    for (const [key, value] of Object.entries(
-      parsed.define as Record<string, unknown>,
-    )) {
-      if (typeof value === 'string') {
-        define[key] = value
-      } else if (typeof value === 'number' || typeof value === 'boolean') {
+    for (const [key, value] of Object.entries(parsed.define as Record<string, unknown>)) {
+      if (typeof value === "string") {
+        define[key] = value;
+      } else if (typeof value === "number" || typeof value === "boolean") {
         /*
          * esbuild define values must be code snippets; serialize primitives
          * so {"PORT": 3000} becomes PORT=3000 (number literal).
          */
-        define[key] = JSON.stringify(value)
+        define[key] = JSON.stringify(value);
       }
     }
 
-    config.define = define
+    config.define = define;
   }
 
   /*
@@ -166,7 +167,7 @@ export async function readEsbuildConfig(
    * Code setting dataverseIde.esbuild.autoStartWatch, not by the config file.
    */
 
-  return { text, config }
+  return { text, config };
 }
 
 /*
@@ -178,19 +179,19 @@ export async function updateEsbuildConfig(
   rootUri: vscodeType.Uri,
   updates: Partial<EsbuildConfig>,
 ): Promise<EsbuildConfig> {
-  const { text, config } = await readEsbuildConfig(vscode, rootUri)
+  const { text, config } = await readEsbuildConfig(vscode, rootUri);
 
-  let document: Record<string, unknown> = {}
+  let document: Record<string, unknown> = {};
 
   if (text != null) {
     try {
-      document = JSON.parse(text) as Record<string, unknown>
+      document = JSON.parse(text) as Record<string, unknown>;
     } catch {
-      document = {}
+      document = {};
     }
   }
 
-  const merged = { ...config, ...updates }
+  const merged = { ...config, ...updates };
 
   /*
    * Only write the managed keys; anything else the user keeps in the file
@@ -207,12 +208,12 @@ export async function updateEsbuildConfig(
     bundle: merged.bundle,
     external: merged.external,
     define: merged.define,
-  }
+  };
 
   await vscode.workspace.fs.writeFile(
     configFilePath(vscode, rootUri),
     new TextEncoder().encode(`${JSON.stringify(nextDocument, null, 2)}\n`),
-  )
+  );
 
-  return merged
+  return merged;
 }

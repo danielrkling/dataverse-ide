@@ -1,37 +1,27 @@
-import type * as vscodeType from 'vscode'
+import type * as vscodeType from "vscode";
 
-import { EsbuildBuildRunner } from './buildRunner.js'
+import { EsbuildBuildRunner } from "./buildRunner.js";
 
-import type { BuildRunnerResponse } from './buildRunner.js'
+import type { BuildRunnerResponse } from "./buildRunner.js";
 
-import type { BuildOutputFile } from './worker.js'
+import type { BuildOutputFile } from "./worker.js";
 
-import {
-  contributeExtensionManifest,
-} from '../api.js'
+import { contributeExtensionManifest } from "../api.js";
 
-import {
-  createPanelIcon,
-  PANEL_GLYPHS,
-  registerExtensionPanel,
-} from '../panels.js'
+import { createWatchStatus } from "../watchStatus.js";
 
 import {
   ESBUILD_DEFAULT_CONFIG,
   configFilePath,
+  configRelativePathFor,
   readEsbuildConfig,
   updateEsbuildConfig,
   type EsbuildConfig,
-} from './config.js'
+} from "./config.js";
 
-import {
-  EsbuildWatcher,
-} from './watcher.js'
+import { EsbuildWatcher } from "./watcher.js";
 
-import type {
-  ExtensionContext,
-  IdeExtension,
-} from '../api.js'
+import type { ExtensionContext, IdeExtension } from "../api.js";
 
 /*
  * esbuild-wasm extension.
@@ -43,12 +33,9 @@ import type {
  * rolldown.
  */
 
-const OUTPUT_DIRECTORY = '.ide-build'
+const SOURCE_EXTENSIONS = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|css|json)$/i;
 
-const SOURCE_EXTENSIONS =
-  /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|css|json)$/i
-
-const MAX_COLLECTED_FILES = 8000
+const MAX_COLLECTED_FILES = 8000;
 
 /*
  * Lazy two-pass resolution: initial collection loads only package.json
@@ -58,128 +45,114 @@ const MAX_COLLECTED_FILES = 8000
  * paths from the workspace and retries. This avoids slurping up to
  * MAX_COLLECTED_NODE_MODULES_FILES files per build.
  */
-const MAX_COLLECTED_PACKAGE_MANIFESTS = 5000
+const MAX_COLLECTED_PACKAGE_MANIFESTS = 5000;
 
 /*
  * Safety bound for lazy rounds (each round tops the map up with the files
  * the resolver missed the previous round).
  */
-const MAX_LAZY_ROUNDS = 12
+const MAX_LAZY_ROUNDS = 12;
 
-const EXCLUDE_PATTERN =
-  '{**/.git/**,**/.ide-build/**,**/dist/**,**/out/**,**/node_modules/**}'
+const EXCLUDE_PATTERN = "{**/.git/**,**/.ide-build/**,**/dist/**,**/out/**,**/node_modules/**}";
 
 type BuildRequest = {
-  id: number
-  type: 'build'
-  entry: string
-  files: Record<string, string>
-}
+  id: number;
+  type: "build";
+  entry: string;
+  files: Record<string, string>;
+};
 
 type BuildResponse =
   | {
-      id: number
-      ok: true
-      outputs: BuildOutputFile[]
-      warnings: string[]
+      id: number;
+      ok: true;
+      outputs: BuildOutputFile[];
+      warnings: string[];
     }
   | {
-      id: number
-      ok: false
-      error: string
-    }
+      id: number;
+      ok: false;
+      error: string;
+    };
 
-const CONFIG_SECTION = 'dataverseIde.esbuild'
+const CONFIG_SECTION = "dataverseIde.esbuild";
 
 function getAutoStartWatchSetting(vscode: typeof vscodeType): boolean {
   return vscode.workspace
     .getConfiguration(CONFIG_SECTION, null)
-    .get<boolean>('autoStartWatch', false)
+    .get<boolean>("autoStartWatch", false);
 }
 
 function isBuildResponse(value: unknown): value is BuildResponse {
-  return (
-    typeof value === 'object' &&
-    value != null &&
-    'id' in value &&
-    'ok' in value
-  )
+  return typeof value === "object" && value != null && "id" in value && "ok" in value;
 }
-
 
 async function collectWorkspaceSources(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
 ): Promise<{ files: Record<string, string>; debugLines: string[] }> {
-  const rootPath = rootUri.path.replace(/\/+$/, '')
+  const rootPath = rootUri.path.replace(/\/+$/, "");
 
   const collect = async (
     pattern: vscodeType.GlobPattern,
     exclude: string,
     cap: number,
-  ): Promise<vscodeType.Uri[]> =>
-    vscode.workspace.findFiles(pattern, exclude, cap)
+  ): Promise<vscodeType.Uri[]> => vscode.workspace.findFiles(pattern, exclude, cap);
 
-  const sourceUris = await collect('**/*', EXCLUDE_PATTERN, MAX_COLLECTED_FILES)
+  const sourceUris = await collect("**/*", EXCLUDE_PATTERN, MAX_COLLECTED_FILES);
 
   const nodeModulesManifestUris = await collect(
-    'node_modules/**/package.json',
-    '{**/.git/**}',
+    "node_modules/**/package.json",
+    "{**/.git/**}",
     MAX_COLLECTED_PACKAGE_MANIFESTS,
-  )
+  );
 
   /*
    * Collection diagnostics: report how much was found up front.
    */
   const nodeModulesDebugInfo = [
     `[esbuild] findFiles("node_modules/**/package.json") returned ${nodeModulesManifestUris.length} manifest(s).`,
-  ]
+  ];
 
-  const uris = [...sourceUris, ...nodeModulesManifestUris]
+  const uris = [...sourceUris, ...nodeModulesManifestUris];
 
-  const files: Record<string, string> = {}
+  const files: Record<string, string> = {};
 
   for (const uri of uris) {
     if (!SOURCE_EXTENSIONS.test(uri.path)) {
-      continue
+      continue;
     }
 
-    let relativePath = uri.path
-      .slice(rootPath.length)
-      .replace(/^\//, '')
+    let relativePath = uri.path.slice(rootPath.length).replace(/^\//, "");
 
     if (relativePath.length === 0) {
-      continue
+      continue;
     }
 
     // Normalize Windows-style drive artifacts if any
-    relativePath = relativePath.replaceAll('\\', '/')
+    relativePath = relativePath.replaceAll("\\", "/");
 
     // Only collect text; binary assets inside node_modules (wasm, images)
     // are skipped - esbuild loaders cannot consume them via the map anyway
     try {
-      const bytes = await vscode.workspace.fs.readFile(uri)
+      const bytes = await vscode.workspace.fs.readFile(uri);
 
-      files[relativePath] = new TextDecoder().decode(bytes)
+      files[relativePath] = new TextDecoder().decode(bytes);
     } catch (error) {
-      console.warn(
-        '[esbuild] skipping unreadable file:',
-        relativePath,
-        error,
-      )
+      console.warn("[esbuild] skipping unreadable file:", relativePath, error);
     }
   }
 
   const collectedNodeModules = Object.keys(files).filter((key) =>
-    key.startsWith('node_modules/'),
-  ).length
+    key.startsWith("node_modules/"),
+  ).length;
 
   const debugLines = [
     ...nodeModulesDebugInfo,
     `[esbuild] file map: ${Object.keys(files).length} entries (node_modules: ${collectedNodeModules}).`,
-  ]
+  ];
 
-  return { files, debugLines }
+  return { files, debugLines };
 }
 
 async function writeOutputs(
@@ -189,233 +162,215 @@ async function writeOutputs(
   entryPath: string,
   outputs: BuildOutputFile[],
 ): Promise<vscodeType.Uri[]> {
-  const written: vscodeType.Uri[] = []
+  const written: vscodeType.Uri[] = [];
 
   for (const output of outputs) {
-    const baseName = entryPath
-      .split('/')
-      .pop()
-      ?.replace(/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i, '') ?? 'bundle'
+    const baseName =
+      entryPath
+        .split("/")
+        .pop()
+        ?.replace(/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i, "") ?? "bundle";
 
-    const suffix = output.path.endsWith('.css')
-      ? '.css'
-      : '.js'
+    const suffix = output.path.endsWith(".css") ? ".css" : ".js";
 
-    const outFile = vscode.Uri.joinPath(
-      rootUri,
-      outDir,
-      `${baseName}${suffix}`,
-    )
+    const outFile = vscode.Uri.joinPath(rootUri, outDir, `${baseName}${suffix}`);
 
-    const parent = vscode.Uri.joinPath(rootUri, outDir)
+    const parent = vscode.Uri.joinPath(rootUri, outDir);
 
-    await vscode.workspace.fs.createDirectory(parent)
+    await vscode.workspace.fs.createDirectory(parent);
 
-    await vscode.workspace.fs.writeFile(
-      outFile,
-      new TextEncoder().encode(output.text),
-    )
+    await vscode.workspace.fs.writeFile(outFile, new TextEncoder().encode(output.text));
 
-    written.push(outFile)
+    written.push(outFile);
   }
 
-  return written
+  return written;
 }
 
 export default {
-  id: 'esbuild',
+  id: "esbuild",
 
-  async activate(
-    context: ExtensionContext,
-  ): Promise<vscodeType.Disposable | void> {
-    const { vscode, outputChannel } = context
+  async activate(context: ExtensionContext): Promise<vscodeType.Disposable | void> {
+    const { vscode, outputChannel } = context;
 
     async function reloadConfigFromDisk(): Promise<void> {
-      const loaded = await readEsbuildConfig(
-        vscode,
-        context.workspaceRootUri,
-      )
-    
-      currentConfig = loaded.config
-    
-      notifyStatus()
+      const loaded = await readEsbuildConfig(vscode, context.workspaceRootUri);
+
+      currentConfig = loaded.config;
+
+      notifyStatus();
     }
 
     await contributeExtensionManifest({
-      id: 'esbuild',
-      displayName: 'Dataverse IDE esbuild',
-      description: 'esbuild-wasm bundling for workspace files.',
+      id: "esbuild",
+      displayName: "Dataverse IDE esbuild",
+      description: "esbuild-wasm bundling for workspace files.",
       commands: [
         {
-          command: 'dataverseIde.esbuild.build',
-          title: 'esbuild: Build Current File',
+          command: "dataverseIde.esbuild.build",
+          title: "esbuild: Build Current File",
         },
         {
-          command: 'dataverseIde.esbuild.buildActiveFile',
-          title: 'esbuild: Build Active File…',
+          command: "dataverseIde.esbuild.buildActiveFile",
+          title: "esbuild: Build Active File…",
         },
         {
-          command: 'dataverseIde.esbuild.buildWorkspace',
-          title: 'esbuild: Build Workspace…',
+          command: "dataverseIde.esbuild.buildWorkspace",
+          title: "esbuild: Build Workspace…",
         },
         {
-          command: 'dataverseIde.esbuild.startWatch',
-          title: 'esbuild: Start Watch',
+          command: "dataverseIde.esbuild.startWatch",
+          title: "esbuild: Start Watch",
         },
         {
-          command: 'dataverseIde.esbuild.stopWatch',
-          title: 'esbuild: Stop Watch',
+          command: "dataverseIde.esbuild.stopWatch",
+          title: "esbuild: Stop Watch",
         },
         {
-          command: 'dataverseIde.esbuild.toggleWatch',
-          title: 'esbuild: Toggle Watch',
+          command: "dataverseIde.esbuild.toggleWatch",
+          title: "esbuild: Toggle Watch",
         },
       ],
       configuration: {
-        title: 'esbuild',
+        title: "esbuild",
         properties: {
-          'dataverseIde.esbuild.autoStartWatch': {
-            type: 'boolean',
-            default: false,
-            scope: 'window',
+          "dataverseIde.esbuild.configPath": {
+            type: "string",
+            default: "esbuild.config.json",
+            scope: "window",
             description:
-              'Automatically start esbuild watch mode on activation. Watch state is runtime-only; changing this setting does not persist to esbuild.config.json.',
+              "Workspace-relative path of the esbuild build settings file. Example: config/esbuild.config.json.",
           },
 
-          'dataverseIde.esbuild.logCollection': {
-            type: 'boolean',
-            default: true,
-            scope: 'window',
+          "dataverseIde.esbuild.autoStartWatch": {
+            type: "boolean",
+            default: false,
+            scope: "window",
             description:
-              'Log node_modules collection details (findFiles counts, extensions, dropped files) to the esbuild output channel for every build.',
+              "Automatically start esbuild watch mode on activation. Watch state is runtime-only; changing this setting does not persist to esbuild.config.json.",
+          },
+
+          "dataverseIde.esbuild.logCollection": {
+            type: "boolean",
+            default: true,
+            scope: "window",
+            description:
+              "Log node_modules collection details (findFiles counts, extensions, dropped files) to the esbuild output channel for every build.",
           },
         },
       },
-    })
+    });
 
-    const runner = new EsbuildBuildRunner(outputChannel)
+    const runner = new EsbuildBuildRunner(outputChannel);
 
-    outputChannel.appendLine('[esbuild] extension activated.')
+    outputChannel.appendLine("[esbuild] extension activated.");
 
     /*
      * Config-file driven build. All settings come from esbuild.config.json
      * (esbuild/config.ts); there is no vscode-settings fallback.
      */
-    let currentConfig: EsbuildConfig = ESBUILD_DEFAULT_CONFIG
-    let watcher: EsbuildWatcher | undefined
-    let watchEnabled = false
+    let currentConfig: EsbuildConfig = ESBUILD_DEFAULT_CONFIG;
+    let watcher: EsbuildWatcher | undefined;
+    let watchEnabled = false;
 
-    let lastStatus: 'idle' | 'building' | 'ok' | 'error' = 'idle'
-    let lastMessage = 'No build run yet.'
-    let lastFinishedAt: number | undefined
-    
-    const watchStatusItem = vscode.window.createStatusBarItem(
-      vscode.StatusBarAlignment.Left,
-      100,
-    )
-    
-    watchStatusItem.name = 'esbuild Watch'
-    watchStatusItem.command = 'dataverseIde.esbuild.toggleWatch'
+    let lastStatus: "idle" | "building" | "ok" | "error" = "idle";
+    let lastMessage = "No build run yet.";
+    let lastFinishedAt: number | undefined;
 
-    const statusListeners = new Set<() => void>()
+    const watchStatus = createWatchStatus(vscode, {
+      id: "esbuild",
+      label: "esbuild",
+      busyLabel: "Building",
+      isRunning: () => watchEnabled,
+      isBusy: () => lastStatus === "building",
+      isError: () => lastStatus === "error",
+      detail: () => lastMessage,
+      start: () => {
+        void setWatchEnabled(true);
+      },
+      stop: () => {
+        void setWatchEnabled(false);
+      },
+      showOutput: () => {
+        outputChannel.show(true);
+      },
+      openConfig: () => {
+        void vscode.commands.executeCommand("dataverseIde.esbuild.openConfig");
+      },
+      extraItems: () => [
+        {
+          label: "$(zap) Build now (configured)",
+          run: () => {
+            void vscode.commands.executeCommand("dataverseIde.esbuild.buildConfigured");
+          },
+        },
+      ],
+    });
+
+    const statusListeners = new Set<() => void>();
 
     function firstLine(text: string): string {
-      return text.split('\n', 1)[0] ?? text
+      return text.split("\n", 1)[0] ?? text;
     }
 
     function notifyStatus(): void {
-      updateWatchStatusItem()
-    
-      for (const listener of statusListeners) {
-        listener()
-      }
-    }
+      watchStatus.update();
 
-    function updateWatchStatusItem(): void {
-      if (!watchEnabled) {
-        watchStatusItem.hide()
-        return
+      for (const listener of statusListeners) {
+        listener();
       }
-    
-      if (lastStatus === 'building') {
-        watchStatusItem.text = '$(sync~spin) esbuild: Building'
-        watchStatusItem.tooltip =
-          `${lastMessage}\n\nClick to stop esbuild watch.`
-      } else if (lastStatus === 'error') {
-        watchStatusItem.text = '$(warning) esbuild: Watch error'
-        watchStatusItem.tooltip =
-          `${lastMessage}\n\nWatch remains active. Click to stop watching.`
-      } else {
-        watchStatusItem.text = '$(eye) esbuild: Watching'
-        watchStatusItem.tooltip =
-          `${lastMessage}\n\nClick to stop esbuild watch.`
-      }
-    
-      watchStatusItem.show()
     }
 
     /*
      * Load the config file (or defaults when absent) once at activation so
      * the panel and watcher start from the real project settings.
      */
-    await reloadConfigFromDisk()
+    await reloadConfigFromDisk();
 
     /*
      * Watch is runtime-only. Autostart comes from the workspace/user setting
      * dataverseIde.esbuild.autoStartWatch.
      */
-    setWatchRuntimeEnabled(getAutoStartWatchSetting(vscode))
+    setWatchRuntimeEnabled(getAutoStartWatchSetting(vscode));
 
-    const watchSettingListener = vscode.workspace.onDidChangeConfiguration(
-      async (event) => {
-        if (
-          event.affectsConfiguration(
-            'dataverseIde.esbuild.autoStartWatch',
-            context.workspaceRootUri,
-          )
-        ) {
-          setWatchEnabled(getAutoStartWatchSetting(vscode))
-        }
-      },
-    )
+    const watchSettingListener = vscode.workspace.onDidChangeConfiguration(async (event) => {
+      if (
+        event.affectsConfiguration("dataverseIde.esbuild.autoStartWatch", context.workspaceRootUri)
+      ) {
+        setWatchEnabled(getAutoStartWatchSetting(vscode));
+      }
+    });
 
-    async function runBuild(
-      entryPath: string,
-      options?: { silent?: boolean },
-    ): Promise<boolean> {
-      const started = Date.now()
+    async function runBuild(entryPath: string, options?: { silent?: boolean }): Promise<boolean> {
+      const started = Date.now();
 
       /*
        * Canonicalize the entry the same way the config reader does: the
        * collected files map keys carry no './' prefix and store only forward
        * slashes.
        */
-      entryPath = entryPath
-        .replaceAll('\\', '/')
-        .replace(/^(?:\.{1,2}\/)+/, '')
+      entryPath = entryPath.replaceAll("\\", "/").replace(/^(?:\.{1,2}\/)+/, "");
 
       try {
-        await reloadConfigFromDisk()
+        await reloadConfigFromDisk();
 
-        lastStatus = 'building'
-        lastMessage = `Building ${entryPath}…`
-        notifyStatus()
+        lastStatus = "building";
+        lastMessage = `Building ${entryPath}…`;
+        notifyStatus();
 
-        
         if (options?.silent !== true) {
-          outputChannel.show(true)
+          outputChannel.show(true);
         }
 
-        outputChannel.appendLine(`[esbuild] Building ${entryPath}…`)
-        
+        outputChannel.appendLine(`[esbuild] Building ${entryPath}…`);
 
         const { files, debugLines } = await collectWorkspaceSources(
           vscode,
           context.workspaceRootUri,
-        )
+        );
 
         for (const line of debugLines) {
-          outputChannel.appendLine(line)
+          outputChannel.appendLine(line);
         }
 
         /*
@@ -424,33 +379,33 @@ export default {
          * install writes it, but the collector caps node_modules files).
          */
         const collectedNodeModules = Object.keys(files).filter((key) =>
-          key.startsWith('node_modules/'),
-        ).length
+          key.startsWith("node_modules/"),
+        ).length;
 
         outputChannel.appendLine(
           `[esbuild] collected ${Object.keys(files).length} files from the workspace ` +
             `(node_modules: ${collectedNodeModules}).`,
-        )
+        );
 
         if (files[entryPath] == null) {
           const nearby = Object.keys(files)
             .filter(
               (key) =>
-                key.startsWith(entryPath.replace(/\.[^./]+$/, '')) ||
+                key.startsWith(entryPath.replace(/\.[^./]+$/, "")) ||
                 key.startsWith(`${entryPath}.`),
             )
-            .slice(0, 5)
+            .slice(0, 5);
 
           throw new Error(
             `Entry ${entryPath} was not collected from the workspace ` +
               `(collected source files: ${Object.keys(files).length - collectedNodeModules}).` +
               (nearby.length > 0
-                ? ` Nearby: ${nearby.join(', ')}.`
-                : ' Check the entry setting in esbuild.config.json.'),
-          )
+                ? ` Nearby: ${nearby.join(", ")}.`
+                : " Check the entry setting in esbuild.config.json."),
+          );
         }
 
-        const absentPaths = new Set<string>()
+        const absentPaths = new Set<string>();
 
         /*
          * Lazy two-pass resolution: the first response may be a probe round
@@ -460,11 +415,11 @@ export default {
          * rounds finalize (unresolved → warning + external) instead of
          * re-probing them forever.
          */
-        let round = 0
-        let response: BuildRunnerResponse | undefined
+        let round = 0;
+        let response: BuildRunnerResponse | undefined;
 
         for (;;) {
-          round++
+          round++;
 
           response = await runner.build({
             entry: entryPath,
@@ -477,60 +432,66 @@ export default {
             external: currentConfig.external,
             define: currentConfig.define,
             absentPaths: [...absentPaths],
-          })
+          });
 
           if (!response.ok) {
-            break
+            break;
           }
 
-          const requested = response.needFiles ?? []
+          const requested = response.needFiles ?? [];
 
           if (requested.length === 0 || round >= MAX_LAZY_ROUNDS) {
-            break
+            break;
           }
 
-          let added = 0
+          let added = 0;
+          const readFailed: string[] = [];
 
           for (const relativePath of requested) {
             try {
               const fileUri = vscode.Uri.joinPath(
                 context.workspaceRootUri,
-                ...relativePath.split('/'),
-              )
+                ...relativePath.split("/"),
+              );
 
-              const bytes = await vscode.workspace.fs.readFile(fileUri)
+              const bytes = await vscode.workspace.fs.readFile(fileUri);
 
-              files[relativePath] = new TextDecoder().decode(bytes)
-              added++
+              files[relativePath] = new TextDecoder().decode(bytes);
+              added++;
             } catch {
               /*
                * The path does not exist in the workspace. Remember that so
                * the next round finalizes (warning + external) rather than
                * re-requesting the same paths forever.
                */
-              absentPaths.add(relativePath)
+              absentPaths.add(relativePath);
+              if (readFailed.length < 8) {
+                readFailed.push(relativePath);
+              }
             }
           }
 
           outputChannel.appendLine(
-            `[esbuild] lazy resolution round ${round}: read ${added} of ${requested.length} requested file(s).`,
-          )
+            `[esbuild] lazy resolution round ${round}: read ${added} of ${requested.length} requested file(s).` +
+              ` requested: ${requested.slice(0, 6).join(" | ")}` +
+              (readFailed.length > 0 ? ` | unreadable: ${readFailed.join(", ")}…` : ""),
+          );
         }
 
         if (response == null) {
-          return false
+          return false;
         }
 
         if (!response.ok) {
-          outputChannel.appendLine(response.error)
-          outputChannel.show(true)
+          outputChannel.appendLine(response.error);
+          outputChannel.show(true);
 
-          lastStatus = 'error'
-          lastMessage = firstLine(response.error)
-          lastFinishedAt = Date.now()
-          notifyStatus()
+          lastStatus = "error";
+          lastMessage = firstLine(response.error);
+          lastFinishedAt = Date.now();
+          notifyStatus();
 
-          return false
+          return false;
         }
 
         if ((response.needFiles ?? []).length > 0) {
@@ -539,23 +500,22 @@ export default {
            * files (import cycles probing distinct paths, or a pathological
            * package layout).
            */
-          const stillMissing =
-            (response.needFiles ?? []).slice(0, 5).join(', ')
+          const stillMissing = (response.needFiles ?? []).slice(0, 5).join(", ");
 
           outputChannel.appendLine(
-            `[esbuild] lazy file resolution exceeded ${MAX_LAZY_ROUNDS} rounds; still missing: ${stillMissing}${(response.needFiles ?? []).length > 5 ? '…' : ''}`,
-          )
+            `[esbuild] lazy file resolution exceeded ${MAX_LAZY_ROUNDS} rounds; still missing: ${stillMissing}${(response.needFiles ?? []).length > 5 ? "…" : ""}`,
+          );
 
-          lastStatus = 'error'
-          lastMessage = `${MAX_LAZY_ROUNDS} lazy resolution rounds exceeded; still missing ${stillMissing}`
-          lastFinishedAt = Date.now()
-          notifyStatus()
+          lastStatus = "error";
+          lastMessage = `${MAX_LAZY_ROUNDS} lazy resolution rounds exceeded; still missing ${stillMissing}`;
+          lastFinishedAt = Date.now();
+          notifyStatus();
 
-          return false
+          return false;
         }
 
         for (const warning of response.warnings) {
-          outputChannel.appendLine(`[esbuild] warning: ${warning}`)
+          outputChannel.appendLine(`[esbuild] warning: ${warning}`);
         }
 
         /*
@@ -564,44 +524,43 @@ export default {
          * installed vs not collected vs package shape).
          */
         for (const warning of response.warnings) {
-          const match =
-            /^Could not resolve npm package "([^"\s]+) imported by .*"/.exec(warning)
+          const match = /^Could not resolve npm package "([^"\s]+) imported by .*"/.exec(warning);
 
           if (match == null) {
-            continue
+            continue;
           }
 
-          const packageName = match[1]
-          const packageKey = `node_modules/${packageName}`
+          const packageName = match[1];
+          const packageKey = `node_modules/${packageName}`;
 
           if (files[`${packageKey}/package.json`] == null) {
             outputChannel.appendLine(
               `[esbuild] diagnostic: ${packageKey}/package.json was not collected. ` +
-                'The package is either not installed (npm: Install) or fell outside the node_modules collection cap.',
-            )
-            continue
+                "The package is either not installed (npm: Install) or fell outside the node_modules collection cap.",
+            );
+            continue;
           }
 
           const collectedForPackage = Object.keys(files).filter((key) =>
             key.startsWith(`${packageKey}/`),
-          )
+          );
 
           outputChannel.appendLine(
             `[esbuild] diagnostic: ${packageKey} has ${collectedForPackage.length} collected file(s), ` +
-              `e.g. ${collectedForPackage.slice(0, 6).join(', ')}. The resolver rejected the exports map — ` +
-              'check the package version/exports field.',
-          )
+              `e.g. ${collectedForPackage.slice(0, 6).join(", ")}. The resolver rejected the exports map — ` +
+              "check the package version/exports field.",
+          );
         }
 
         if (response.outputs.length === 0) {
-          outputChannel.appendLine('[esbuild] produced no output.')
+          outputChannel.appendLine("[esbuild] produced no output.");
 
-          lastStatus = 'error'
-          lastMessage = 'Build produced no output.'
-          lastFinishedAt = Date.now()
-          notifyStatus()
+          lastStatus = "error";
+          lastMessage = "Build produced no output.";
+          lastFinishedAt = Date.now();
+          notifyStatus();
 
-          return false
+          return false;
         }
 
         const writtenUris = await writeOutputs(
@@ -610,84 +569,77 @@ export default {
           currentConfig.outDir,
           entryPath,
           response.outputs,
-        )
+        );
 
-        const elapsed = Date.now() - started
+        const elapsed = Date.now() - started;
 
-        const summary = `Built ${entryPath} in ${elapsed}ms → ${writtenUris.map((uri) => vscode.workspace.asRelativePath(uri, false)).join(', ')}`
+        const summary = `Built ${entryPath} in ${elapsed}ms → ${writtenUris.map((uri) => vscode.workspace.asRelativePath(uri, false)).join(", ")}`;
 
-        outputChannel.appendLine(`[esbuild] ${summary}`)
+        outputChannel.appendLine(`[esbuild] ${summary}`);
 
         if (options?.silent !== true) {
-          outputChannel.show(true)
+          outputChannel.show(true);
         }
 
-        lastStatus = 'ok'
-        lastMessage = summary
-        lastFinishedAt = Date.now()
-        notifyStatus()
+        lastStatus = "ok";
+        lastMessage = summary;
+        lastFinishedAt = Date.now();
+        notifyStatus();
 
-        return true
+        return true;
       } catch (error) {
-        console.error('[esbuild] build error:', error)
+        console.error("[esbuild] build error:", error);
 
-        const message =
-          error instanceof Error ? error.message : String(error)
+        const message = error instanceof Error ? error.message : String(error);
 
-        outputChannel.appendLine(`[esbuild] ${message}`)
-        outputChannel.show(true)
+        outputChannel.appendLine(`[esbuild] ${message}`);
+        outputChannel.show(true);
 
-        lastStatus = 'error'
-        lastMessage = message
-        lastFinishedAt = Date.now()
-        notifyStatus()
+        lastStatus = "error";
+        lastMessage = message;
+        lastFinishedAt = Date.now();
+        notifyStatus();
 
         if (options?.silent !== true) {
-          await vscode.window.showErrorMessage(
-            `[esbuild] Build failed: ${message}`,
-          )
+          await vscode.window.showErrorMessage(`[esbuild] Build failed: ${message}`);
         }
 
-        return false
+        return false;
       }
     }
 
     const buildActiveFileCommand = vscode.commands.registerCommand(
-      'dataverseIde.esbuild.build',
+      "dataverseIde.esbuild.build",
       async (arg?: string | unknown) => {
-        let entryPath: string
+        let entryPath: string;
 
-        if (typeof arg === 'string' && arg.trim().length > 0) {
-          entryPath = arg.replaceAll('\\', '/')
+        if (typeof arg === "string" && arg.trim().length > 0) {
+          entryPath = arg.replaceAll("\\", "/");
         } else {
-          const activeEditor = vscode.window.activeTextEditor
+          const activeEditor = vscode.window.activeTextEditor;
 
           if (activeEditor == null) {
             await vscode.window.showWarningMessage(
-              '[esbuild] Open a file in the editor to build it.',
-            )
+              "[esbuild] Open a file in the editor to build it.",
+            );
 
-            return
+            return;
           }
 
-          const document = activeEditor.document
+          const document = activeEditor.document;
 
-          if (document.uri.scheme !== 'file') {
-            await vscode.window.showWarningMessage(
-              '[esbuild] Only workspace files can be built.',
-            )
+          if (document.uri.scheme !== "file") {
+            await vscode.window.showWarningMessage("[esbuild] Only workspace files can be built.");
 
-            return
+            return;
           }
 
-          entryPath = vscode.workspace
-            .asRelativePath(document.uri, false)
-            .replaceAll('\\', '/')
+          entryPath = vscode.workspace.asRelativePath(document.uri, false).replaceAll("\\", "/");
         }
 
-        await runBuild(entryPath)
+        await runBuild(entryPath);
       },
-    )
+    );
 
     /*
      * Watch lifecycle. The watcher reads the live config (entry/outDir)
@@ -695,175 +647,193 @@ export default {
      */
     function ensureWatcher(): EsbuildWatcher {
       if (watcher != null) {
-        return watcher
+        return watcher;
       }
 
-      watcher = new EsbuildWatcher(
-        vscode,
-        context.workspaceRootUri,
-        {
-          outDir: () => currentConfig.outDir,
-          entry: () => currentConfig.entry,
-          build: async (entry) => {
-            await runBuild(entry, { silent: true })
-          },
+      watcher = new EsbuildWatcher(vscode, context.workspaceRootUri, {
+        outDir: () => currentConfig.outDir,
+        entry: () => currentConfig.entry,
+        configPath: () => configRelativePathFor(vscode, context.workspaceRootUri),
+        build: async (entry) => {
+          await runBuild(entry, { silent: true });
         },
-      )
+      });
 
-      return watcher
+      return watcher;
     }
 
     function setWatchRuntimeEnabled(enabled: boolean): void {
       if (enabled === watchEnabled) {
-        return
+        return;
       }
-    
-      watchEnabled = enabled
-    
+
+      watchEnabled = enabled;
+
       if (enabled) {
-        ensureWatcher()
+        ensureWatcher();
+
+        /*
+         * Start-of-watch initial run: build the configured entry once so
+         * the output directory exists before any subsequent save-driven
+         * rebuild (save-driven runs have no initial build otherwise).
+         */
+        void runBuild(currentConfig.entry, { silent: true });
       } else {
-        watcher?.dispose()
-        watcher = undefined
+        watcher?.dispose();
+        watcher = undefined;
       }
-    
-      notifyStatus()
+
+      notifyStatus();
     }
 
-async function setWatchEnabled(
-  enabled: boolean,
-): Promise<void> {
-  /*
-   * Watch state is runtime-only; toggles do not touch esbuild.config.json.
-   * Persistence (autostart) is the dataverseIde.esbuild.autoStartWatch
-   * setting.
-   */
-  setWatchRuntimeEnabled(enabled)
-}
+    async function setWatchEnabled(enabled: boolean): Promise<void> {
+      /*
+       * Watch state is runtime-only; toggles do not touch esbuild.config.json.
+       * Persistence (autostart) is the dataverseIde.esbuild.autoStartWatch
+       * setting.
+       */
+      setWatchRuntimeEnabled(enabled);
+    }
 
     const startWatchCommand = vscode.commands.registerCommand(
-      'dataverseIde.esbuild.startWatch',
+      "dataverseIde.esbuild.startWatch",
       () => setWatchEnabled(true),
-    )
+    );
 
-    const stopWatchCommand = vscode.commands.registerCommand(
-      'dataverseIde.esbuild.stopWatch',
-      () => setWatchEnabled(false),
-    )
+    const stopWatchCommand = vscode.commands.registerCommand("dataverseIde.esbuild.stopWatch", () =>
+      setWatchEnabled(false),
+    );
 
     const toggleWatchCommand = vscode.commands.registerCommand(
-      'dataverseIde.esbuild.toggleWatch',
+      "dataverseIde.esbuild.toggleWatch",
       () => setWatchEnabled(!watchEnabled),
-    )
+    );
 
     const buildConfiguredEntryCommand = vscode.commands.registerCommand(
-      'dataverseIde.esbuild.buildConfigured',
+      "dataverseIde.esbuild.buildConfigured",
       async () => {
-        const { config } = await readEsbuildConfig(
-          vscode,
-          context.workspaceRootUri,
-        )
+        const { config } = await readEsbuildConfig(vscode, context.workspaceRootUri);
 
-        currentConfig = config
+        currentConfig = config;
 
-        await runBuild(config.entry)
+        await runBuild(config.entry);
       },
-    )
+    );
+
+    /*
+     * Remembers the last "Build Workspace…" pick for this activation (the
+     * custom extension context has no workspaceState).
+     */
+    let lastWorkspaceEntry: string | undefined;
+
+    const buildWorkspaceCommand = vscode.commands.registerCommand(
+      "dataverseIde.esbuild.buildWorkspace",
+      async () => {
+        /*
+         * "Build Workspace…": pick a workspace source file as the entry
+         * point (node_modules, build output and VFS internals excluded) and
+         * run a one-shot build against it. The last-used entry is put first.
+         */
+        const uris = await vscode.workspace.findFiles(
+          "**/*.{ts,tsx,js,jsx,mts,cts}",
+          "{**/node_modules/**,**/.ide-build/**,**/.git/**,**/dist/**}",
+          200,
+        );
+
+        if (uris.length === 0) {
+          await vscode.window.showWarningMessage(
+            "[esbuild] No buildable source files found in the workspace.",
+          );
+
+          return;
+        }
+
+        const items = uris
+          .map((uri) => vscode.workspace.asRelativePath(uri, false).replaceAll("\\", "/"))
+          .sort((a, b) => a.localeCompare(b));
+
+        if (lastWorkspaceEntry != null) {
+          const index = items.indexOf(lastWorkspaceEntry);
+
+          if (index > 0) {
+            items.splice(index, 1);
+            items.unshift(lastWorkspaceEntry);
+          }
+        }
+
+        const picked = await vscode.window.showQuickPick(items, {
+          title: "esbuild: Build Workspace…",
+          placeHolder:
+            lastWorkspaceEntry != null
+              ? `Pick a file to bundle as the entry point (last built: ${lastWorkspaceEntry})`
+              : "Pick a file to bundle as the entry point",
+        });
+
+        if (picked == null) {
+          return;
+        }
+
+        lastWorkspaceEntry = picked;
+
+        await runBuild(picked);
+      },
+    );
 
     const openConfigCommand = vscode.commands.registerCommand(
-      'dataverseIde.esbuild.openConfig',
+      "dataverseIde.esbuild.openConfig",
       async () => {
-        const uri = configFilePath(vscode, context.workspaceRootUri)
+        const uri = configFilePath(vscode, context.workspaceRootUri);
 
         try {
-          await vscode.workspace.fs.stat(uri)
+          await vscode.workspace.fs.stat(uri);
         } catch {
           /*
            * Scaffold the file with the merged defaults on first open so the
            * editor shows something meaningful to edit.
            */
-          await updateEsbuildConfig(vscode, context.workspaceRootUri, {})
+          await updateEsbuildConfig(vscode, context.workspaceRootUri, {});
         }
 
-        await vscode.window.showTextDocument(uri)
+        await vscode.window.showTextDocument(uri);
       },
-    )
+    );
 
     const outputChannelCommand = vscode.commands.registerCommand(
-      'dataverseIde.esbuild.showOutput',
+      "dataverseIde.esbuild.showOutput",
       () => {
-        outputChannel.show(true)
+        outputChannel.show(true);
       },
-    )
-
-    const buildPanel = registerExtensionPanel(vscode, {
-      extensionId: 'esbuild',
-      title: 'esbuild',
-      icon: createPanelIcon(PANEL_GLYPHS.zap),
-      description:
-        'Build settings are defined in esbuild.config.json. Open the file to edit entry points, output, format, minification, external packages, and defines. Watch is controlled by the dataverseIde.esbuild.autoStartWatch setting, or the Start/Stop Watch actions.',
-      workspaceRootUri: context.workspaceRootUri,
-      actions: [
-        {
-          label: 'Build Now',
-          command: 'dataverseIde.esbuild.buildConfigured',
-          primary: true,
-        },
-        {
-          label: 'Start Watch',
-          command: 'dataverseIde.esbuild.startWatch',
-        },
-        {
-          label: 'Stop Watch',
-          command: 'dataverseIde.esbuild.stopWatch',
-        },
-        {
-          label: 'Open esbuild.config.json',
-          command: 'dataverseIde.esbuild.openConfig',
-        },
-        {
-          label: 'Reload Config',
-          command: 'dataverseIde.esbuild.reloadConfig',
-        },
-        {
-          label: 'Show Output',
-          command: 'dataverseIde.esbuild.showOutput',
-        },
-      ],
-    })
+    );
 
     const reloadConfigCommand = vscode.commands.registerCommand(
-      'dataverseIde.esbuild.reloadConfig',
+      "dataverseIde.esbuild.reloadConfig",
       async () => {
-        await reloadConfigFromDisk()
-    
-        await vscode.window.showInformationMessage(
-          'esbuild configuration reloaded.',
-        )
-      },
-    )
+        await reloadConfigFromDisk();
 
-    outputChannel.appendLine('[esbuild] commands and panel registered.')
+        await vscode.window.showInformationMessage("esbuild configuration reloaded.");
+      },
+    );
+
+    outputChannel.appendLine("[esbuild] commands registered.");
 
     return {
       dispose() {
-        watcher?.dispose()
-        watchSettingListener.dispose()
-        watchStatusItem.dispose()
-        buildPanel.dispose()
+        watcher?.dispose();
+        watchSettingListener.dispose();
+        watchStatus.dispose();
 
-        startWatchCommand.dispose()
-        stopWatchCommand.dispose()
-        toggleWatchCommand.dispose()
-        buildConfiguredEntryCommand.dispose()
-        openConfigCommand.dispose()
-        outputChannelCommand.dispose()
-        reloadConfigCommand.dispose()
+        startWatchCommand.dispose();
+        stopWatchCommand.dispose();
+        toggleWatchCommand.dispose();
+        buildConfiguredEntryCommand.dispose();
+        buildWorkspaceCommand.dispose();
+        openConfigCommand.dispose();
+        outputChannelCommand.dispose();
+        reloadConfigCommand.dispose();
 
-        buildActiveFileCommand.dispose()
-        runner.dispose()
+        buildActiveFileCommand.dispose();
+        runner.dispose();
       },
-    }
+    };
   },
-} satisfies IdeExtension
-
+} satisfies IdeExtension;

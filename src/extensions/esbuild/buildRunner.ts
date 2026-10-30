@@ -38,6 +38,9 @@ export type BuildResponseOk = {
   outputs: BuildOutputFile[]
   warnings: string[]
 
+  /** Worker pipeline version (stale-bundle diagnosis). */
+  pipeline?: string
+
   /**
    * Lazy resolution probe round: paths to read and retry with.
    * Non-empty outputs/warnings are provisional when this is set.
@@ -84,7 +87,19 @@ export class EsbuildBuildRunner {
 
     this.worker.onerror = (event) => {
       this.outputChannel.appendLine(
-        `[esbuild] worker error: ${event.message ?? 'unknown error'}`,
+        `[esbuild] worker error: ${
+          event.error instanceof Error
+            ? `${event.error.message}\n${event.error.stack ?? ''}`
+            : (event.message ?? 'unknown error')
+        }`,
+      )
+    }
+
+    this.worker.onmessageerror = (event) => {
+      this.outputChannel.appendLine(
+        `[esbuild] worker message error: ${JSON.stringify(
+          event.data ?? null,
+        ).slice(0, 400)}`,
       )
     }
 
@@ -109,6 +124,12 @@ export class EsbuildBuildRunner {
 
         window.clearTimeout(timeout)
         worker.removeEventListener('message', onMessage)
+
+        if (event.data.ok === true && event.data.pipeline != null) {
+          this.outputChannel.appendLine(
+            `[esbuild] worker pipeline ${event.data.pipeline}`,
+          )
+        }
 
         resolve(event.data)
       }

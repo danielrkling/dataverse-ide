@@ -39,13 +39,12 @@ The script lists `dist/**`, upserts each file as a `dv_/ide/<relative-path>`
 web resource via Web API v9.2 (`webresources` entity), then calls
 `PublishAllCustomizations`. Notes:
 
-- dataverse System Settings → Email tab → *Set file size limit for attachments*:
+- dataverse System Settings → Email tab → _Set file size limit for attachments_:
   lift it (default 5 MB) to at least 32 MB so the `builtin-extensions` chunk fits
 - resources are created in the default solution; move them into a proper
   solution in Power Apps once crops in, or extend the script with solution-aware upserts
 - the Dataverse org CSP needs to allow same-origin `blob:` workers
   (`worker-src blob:` / `child-src blob:`) for the extension-host iframe
-
 
 A browser IDE built on [monaco-vscode-api](https://github.com/CodinGame/monaco-vscode-api),
 rendering the full VSCode workbench and opening real local folders through the
@@ -89,8 +88,8 @@ Features live as one folder under `src/extensions/<feature>/` with an
 
 ```ts
 interface IdeExtension {
-  id: string
-  activate(context: ExtensionContext): Promise<vscode.Disposable | void>
+  id: string;
+  activate(context: ExtensionContext): Promise<vscode.Disposable | void>;
 }
 ```
 
@@ -104,43 +103,43 @@ activates it; new features require only a folder plus one entry in
 
 Current extensions:
 
-| Folder            | Status     | Notes                                                        |
-| ----------------- | ---------- | ------------------------------------------------------------ |
-| `git`             | active     | isomorphic-git SCM + HTTPS remotes (clone/fetch/pull/push); PAT cached per host in secret storage |
-| `dataverse`       | active     | webresource upload/publish                                   |
-| `esbuild`         | active     | esbuild-wasm build worker; bundles a workspace entry to `.ide-build/`; npm imports are externalized |
-| `node-runtime`    | active     | almostnode engine, main-thread same-origin (shares page auth); syncs workspace sources into the shared VFS per run; commands `runFile`/`runEntry` |
-| `npm`             | active     | real installs via almostnode PackageManager into node_modules; `npm: Install Package`, `npm: Install All (package.json)` |
-| `gitlab`          | stub       | separate from git; GitLab **REST API** with a PAT via secret storage |
-| `tailwind`        | active     | Tailwind v4 completions + hovers from default-theme data (no WASM); @tailwindcss/browser preview is a later step |
-| `rolldown`        | active*    | oxc WASM primitives in a worker: Transform TS/JSX→JS, Minify. **Full `rolldown()` bundling not available in-browser** — the published binding loader is Node/WebContainer-only, so bundling routes through the esbuild extension; revisit if rolldown ships a browser entry. Also requires cross-origin isolation (SharedArrayBuffer) for the wasi threads runtime |
-
+| Folder         | Status | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| -------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `git`          | active | isomorphic-git SCM + HTTPS remotes (clone/fetch/pull/push); PAT cached per host in secret storage                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `dataverse`    | active | webresource upload/publish                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `esbuild`      | active | esbuild-wasm build worker; bundles a workspace entry to `dist/` (esbuild.config.json `outDir`); npm imports are externalized                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `node-runtime` | active | almostnode engine, main-thread same-origin (shares page auth); syncs workspace sources into the shared VFS per run; commands `runFile`/`runEntry`                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `npm`          | active | real installs via almostnode PackageManager into node_modules; `npm: Install Package`, `npm: Install All (package.json)`                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `gitlab`       | stub   | separate from git; GitLab **REST API** with a PAT via secret storage                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `tailwind`     | active | Tailwind v4 completions + hovers from default-theme data (no WASM); @tailwindcss/browser preview is a later step                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `rolldown`        | active     | `@rolldown/browser` wasm bundling in a dedicated worker: Build Current File / Build Workspace / configured entry + watch (`rolldown.config.json`), plus Transform TS/JSX→JS and Minify (oxc primitives). Bundle verified live in-browser (Solid JSX app: glue boot, thread workers, lazy two-pass rounds over workspace node_modules, single bundle ~2s). Requires cross-origin isolation for the wasi threads runtime. Dev servers need `rolldownPatchHotReload` (or restart) after npm i; `scripts/unify-rolldown.cjs` (postinstall) fixes `@rolldown/browser` dep tree + glue in-place |
 
 ## Using the extensions
 
 All extensions activate automatically after the workbench boots. Their commands show up
 in the command palette (Ctrl+Shift+P / Cmd+Shift+P) via `contributes.commands` manifests:
 
-| Extension    | Commands                                                                                             | Extra setup                                                            |
-| ------------ | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| Git          | `Git: …` (initialize/commit/branches/clone/push/pull/fetch/remotes/PAT credentials)                  | local-folder workspace required                                         |
-| Dataverse    | `Dataverse: …` (webresource upload/publish)                                                          | `dataverseWebResources.*` settings                                      |
-| esbuild      | `esbuild: Build Current File` → writes `.ide-build/<name>.js`                                        | active workspace file; npm imports resolved from `node_modules`         |
-| Node Runtime | `Node: Run File`, `Node: Run Active File` — also powers `require()` for installed npm packages        | output appears in its output channel                                    |
-| npm          | `npm: Install Package`, `npm: Install All Dependencies (package.json)`                                | package.json first (create one with the explorer New File if needed)    |
-| GitLab       | `GitLab: Connect`, `Show Merge Requests / Issues / Pipelines`, `New Merge Request`                     | run **Connect** first; project auto-detected from origin or `dataverseIde.gitlab.project`; baseUrl via `dataverseIde.gitlab.baseUrl` |
-| Tailwind     | `Tailwind: Compile CSS From Workspace` — scans used class names and writes `.ide-build/tailwind.css`; completions/hovers appear only inside class-string contexts |                              |
-| Rolldown     | `rolldown: Transform Current File (TS/JSX → JS)`, `rolldown: Minify Current File`                      | active workspace file; full bundling routes through esbuild (see table) |
+| Extension    | Commands                                                                                                                                                                                                                                   | Extra setup                                                                                                                                                                                                                          |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Git          | `Git: …` (initialize/commit/branches/clone/push/pull/fetch/remotes/PAT credentials)                                                                                                                                                        | local-folder workspace required                                                                                                                                                                                                      |
+| Dataverse    | `Dataverse: …` (webresource upload/publish), `Dataverse: Open dataverse.config.json`                                                                                                                                                       | settings in `dataverse.config.json` (prefix, solution, uploadRoot, files, exclude, publishAfterUpload, apiBaseUrl); watch debounce and config-file location via `dataverseIde.dataverse.watchDebounceMs` / `configPath`              |
+| esbuild      | `esbuild: Build Current File` → writes `<outDir>/<name>.js` (`dist/` by default)                                                                                                                                                           | active workspace file; settings in `esbuild.config.json` (path via `dataverseIde.esbuild.configPath`); npm imports resolved from `node_modules`                                                                                      |
+| Node Runtime | `Node: Run File`, `Node: Run Active File` — also powers `require()` for installed npm packages                                                                                                                                             | output appears in its output channel                                                                                                                                                                                                 |
+| npm          | `npm: Install Package`, `npm: Install All Dependencies (package.json)`                                                                                                                                                                     | package.json first (create one with the explorer New File if needed)                                                                                                                                                                 |
+| GitLab       | `GitLab: Connect`, `Show Merge Requests / Issues / Pipelines`, `New Merge Request`                                                                                                                                                         | run **Connect** first; project auto-detected from origin or `dataverseIde.gitlab.project`; baseUrl via `dataverseIde.gitlab.baseUrl`                                                                                                 |
+| Tailwind     | `Tailwind: Compile CSS From Workspace` — scans used class names and writes the configured output (`dist/tailwind.css` by default); completions/hovers appear only inside class-string contexts                                             | settings in `tailwind.config.json` (path via `dataverseIde.tailwind.configPath`)                                                                                                                                                     |     |
+| Rolldown     | olldown: Transform Current File (TS/JSX → JS), olldown: Minify Current File, olldown: Build Current File, olldown: Build Workspace…, olldown: Build Configured Entry, olldown: Start/Stop/Toggle Watch, olldown: Open rolldown.config.json | settings in rolldown.config.json (entry, outDir, format esm/iife/cjs/umd, minify, sourcemap [inline], external, define; path via `dataverseIde.rolldown.configPath`); npm imports resolved from ode_modules via lazy two-pass rounds |
 
 ### Sidebars (activity bar → "Dataverse IDE")
 
-- **Dataverse Settings** — click an item to edit (`Web Resource Prefix`, `Solution`,
-  `Upload Root`, `Publish After Upload`, `API Base URL Override`, include/exclude globs).
 - **npm Packages** — Dependencies / Dev Dependencies groups; click a dependency for
-  *Install specific version…* (fetched from the npm registry), *Uninstall*, or
-  *Open registry page*; palette also has `npm: Add Dependency…`.
-- **esbuild Build Settings** — Output Directory, Minify on/off, output Format
-  (esm/iife/cjs), and **Watch** (re-bundles the last built entry on save).
+  _Install specific version…_ (fetched from the npm registry), _Uninstall_, or
+  _Open registry page_; palette also has `npm: Add Dependency…`.
+- **Extensions** — enable/disable toggles per extension (apply after reload).
+
+Dataverse, esbuild, and rolldown no longer have their own panels — everything is
+driven by `dataverse.config.json` / `esbuild.config.json` / `rolldown.config.json`
+and the `Dataverse: …` / `esbuild: …` / `rolldown: …` commands.
 
 Each extension also owns an output channel: Output panel → "Dataverse IDE: <id>".
 
@@ -155,6 +154,7 @@ Each extension also owns an output channel: Output panel → "Dataverse IDE: <id
   (top-level await) and the `@codingame/esbuild-import-meta-url-plugin`.
 
 ### esbuild wasm packaging note
+
 `esbuild.wasm` cannot ship as a discrete Dataverse web resource, so the esbuild
 extension imports it via `virtual:esbuild-wasm-binary` (see
 `esbuildWasmInline` in `vite.config.ts`), which embeds the binary as base64 and
@@ -176,4 +176,7 @@ The rolldown wasm binding's browser glue is source-patched at build time in
 `webResourceWasmInline` (vite.config.ts): its wasm URL becomes an inlined
 data URL and its WASI worker is embedded as a blob URL
 (`src/extensions/rolldown/inlineWorkerFactory.ts`), so the build never emits
-separate .wasm asset files.
+separate .wasm asset files. The patch covers both glue copies (the
+`@rolldown/binding-wasm32-wasi` package used by the oxc transform/minify
+primitives, and the `@rolldown/browser` copy bundled with the full
+`rolldown()` bundler in the rolldown worker).

@@ -1,6 +1,4 @@
-﻿import { PackageManager, VirtualFS } from 'almostnode'
-
-import type * as vscodeType from 'vscode'
+﻿import type * as vscodeType from 'vscode'
 
 import {
   contributeExtensionManifest,
@@ -17,31 +15,29 @@ import type {
 } from '../api.js'
 
 import {
-  installPackages,
-  loadPackageJsonIntoVfs,
   readWorkspaceDependencies,
   uninstallDependency,
   fetchPackageVersions,
-  writeNodeModulesBackToWorkspace,
-  writePackageJsonBackToWorkspace,
   listInstalledPackages,
+  listExtraneousPackages,
+  pruneExtraneousPackages,
   viewPackage,
   checkOutdatedPackages,
-  moveInstalledPackagesToSection,
   type NpmDependency,
   type NpmDependencySection,
 } from './packageBridge.js'
+import { directInstall } from './directInstaller.js'
 
 /*
- * The shared VFS is owned collectively: node-runtime requires packages out
- * of it, npm installs into it.
+ * Install flow: resolution + tarball extraction write straight through
+ * vscode.workspace.fs (see ./directInstaller.ts). The shared VFS is left to
+ * the node-runtime extension, which still mounts workspace files itself.
  */
-import { getSharedVfs } from '../sharedVfs.js'
 
 /*
  * npm extension: resolves and installs real npm packages into the workspace
- * using almostnode's PackageManager (registry metadata + tarball extraction,
- * ESM preserved for the esbuild/rolldown bundle pipeline).
+ * straight through vscode.workspace.fs (registry metadata + tarball
+ * extraction, ESM preserved for the esbuild/rolldown bundle pipeline).
  *
  * "Dataverse IDE" activity bar sidebar: the "npm Packages" tree lists
  * dependencies + devDependencies; clicking a dependency offers actions
@@ -64,6 +60,8 @@ const COMMAND_REFRESH_PACKAGES = 'dataverseIde.npm.refreshPackages'
 const COMMAND_LS = 'dataverseIde.npm.ls'
 const COMMAND_VIEW = 'dataverseIde.npm.view'
 const COMMAND_OUTDATED = 'dataverseIde.npm.outdated'
+
+const COMMAND_PRUNE = 'dataverseIde.npm.prune'
 
 const DEPENDENCY_ACTIONS_SUBMENU =
   'dataverseIde.npm.dependencyActions'
@@ -184,23 +182,6 @@ class DependenciesTreeProvider
   }
 }
 
-async function createPackageManager(
-  vscode: typeof vscodeType,
-  rootUri: vscodeType.Uri,
-): Promise<{ packageManager: PackageManager; vfs: VirtualFS } | undefined> {
-  const vfs = getSharedVfs()
-
-  const loaded = await loadPackageJsonIntoVfs(vscode, rootUri, vfs)
-
-  if (!loaded) {
-    return undefined
-  }
-
-  const packageManager = new PackageManager(vfs, { cwd: '/' })
-
-  return { packageManager, vfs }
-}
-
 function parseSpecs(raw: string): string[] {
   return raw
     .split(/\s+/)
@@ -273,6 +254,11 @@ export default {
           command: COMMAND_OUTDATED,
           title: 'npm: Check Outdated Dependencies',
         },
+        {
+          command: COMMAND_PRUNE,
+          title: 'npm: Prune Extraneous Packages',
+          icon: '$(fold-down)',
+        },
       ],
       views: {
         containerId: 'dataverseIde.npm',
@@ -306,6 +292,12 @@ export default {
           command: COMMAND_REFRESH_PACKAGES,
           when: 'view == dataverseIde.npm.packages',
           group: 'navigation@30',
+        },
+        {
+          menu: 'view/title',
+          command: COMMAND_PRUNE,
+          when: 'view == dataverseIde.npm.packages',
+          group: 'navigation@40',
         },
         /*
          * Inline plus actions on the section rows.
@@ -435,28 +427,33 @@ export default {
       return undefined
     }
 
+    const sectionLabelOf = (section: NpmDependencySection): string =>
+      section === 'devDependencies' ? 'dev dependency' : 'dependency'
+
+    const progressToChannel = (message: string): void => {
+      outputChannel.appendLine(`[npm] ${message}`)
+    }
+
+    function reportFailure(operation: string, error: unknown): void {
+      console.error(`[npm] ${operation} failed:`, error)
+
+      const message =
+        error instanceof Error ? error.message : String(error)
+
+      outputChannel.appendLine(`[npm] ${operation} failed: ${message}`)
+      outputChannel.show(true)
+
+      void vscode.window.showErrorMessage(
+        `npm ${operation} failed: ${message}`,
+      )
+    }
+
     async function installFromSpecs(
       specs: string[],
       section: NpmDependencySection = 'dependencies',
     ): Promise<void> {
-      const setup = await createPackageManager(
-        vscode,
-        context.workspaceRootUri,
-      )
-
-      if (setup == null) {
-        await vscode.window.showErrorMessage(
-          'npm: The workspace has no valid package.json.',
-        )
-
-        return
-      }
-
       try {
-        const sectionLabel =
-          section === 'devDependencies'
-            ? 'dev dependency'
-            : 'dependency'
+        const sectionLabel = sectionLabelOf(section)
 
         const added = await vscode.window.withProgress(
           {
@@ -464,39 +461,13 @@ export default {
             title: `npm: installing ${specs.join(', ')}…`,
             cancellable: false,
           },
-          async () => {
-            const installed = await installPackages(
-              setup.packageManager,
-              specs,
-              (message) => {
-                outputChannel.appendLine(`[npm] ${message}`)
-              },
-            )
-
-            /*
-             * almostnode saves installs as normal dependencies. Reclassify the
-             * packages before copying package.json back to the workspace.
-             */
-            moveInstalledPackagesToSection(
-              setup.vfs,
-              installed,
+          async () =>
+            directInstall(
+              vscode,
+              context.workspaceRootUri,
+              { specs, onProgress: progressToChannel },
               section,
-            )
-
-            await writeNodeModulesBackToWorkspace(
-              vscode,
-              context.workspaceRootUri,
-              setup.vfs,
-            )
-
-            await writePackageJsonBackToWorkspace(
-              vscode,
-              context.workspaceRootUri,
-              setup.vfs,
-            )
-
-            return installed
-          },
+            ).then((result) => result.installed),
         )
 
         outputChannel.show(true)
@@ -510,17 +481,7 @@ export default {
           `npm: installed ${added.join(', ')} as ${sectionLabel}${added.length === 1 ? '' : ' packages'}.`,
         )
       } catch (error) {
-        console.error('[npm] install failed:', error)
-
-        const message =
-          error instanceof Error ? error.message : String(error)
-
-        outputChannel.appendLine(`[npm] install failed: ${message}`)
-        outputChannel.show(true)
-
-        await vscode.window.showErrorMessage(
-          `npm install failed: ${message}`,
-        )
+        reportFailure('install', error)
       }
     }
 
@@ -537,37 +498,15 @@ export default {
           return
         }
 
-        const specInput = await vscode.window.showInputBox({
-          title: 'npm: Install Package',
-          prompt: 'Enter one or more packages (space separated, e.g. "lodash dayjs@1.11.0").',
-          placeHolder: 'lodash',
-          ignoreFocusOut: true,
-        })
-
-        if (specInput == null || specInput.trim().length === 0) {
-          return
-        }
-
-        await installFromSpecs(parseSpecs(specInput))
+        // no-arg entry point shares the same prompt as Add Dependency, so
+        // "install something" and "add dependency" cannot drift apart.
+        await promptForDependencySpec('dependencies')
       },
     )
 
     const installAllCommand = vscode.commands.registerCommand(
       COMMAND_INSTALL_ALL,
       async () => {
-        const setup = await createPackageManager(
-          vscode,
-          context.workspaceRootUri,
-        )
-
-        if (setup == null) {
-          await vscode.window.showErrorMessage(
-            'npm: The workspace has no valid package.json.',
-          )
-
-          return
-        }
-
         try {
           await vscode.window.withProgress(
             {
@@ -576,24 +515,20 @@ export default {
               cancellable: false,
             },
             async () => {
-              const result = await setup.packageManager.installFromPackageJson({
-                onProgress: (message) => {
-                  outputChannel.appendLine(`[npm] ${message}`)
-                },
-                transform: false
-              })
-
-              const fileCount = await writeNodeModulesBackToWorkspace(
+              const result = await directInstall(
                 vscode,
                 context.workspaceRootUri,
-                setup.vfs,
+                {
+                  allDependencies: true,
+                  onProgress: progressToChannel,
+                },
               )
 
               outputChannel.show(true)
               dependencyTreeProvider.refresh()
 
               outputChannel.appendLine(
-                `[npm] Wrote ${fileCount} files to node_modules. Packages: ${result.added.join(', ')}.`,
+                `[npm] Wrote ${result.installed.length} packages to node_modules. Packages: ${result.installed.join(', ')}.`,
               )
             },
           )
@@ -602,17 +537,7 @@ export default {
             'npm: all dependencies installed.',
           )
         } catch (error) {
-          console.error('[npm] install-all failed:', error)
-
-          const message =
-            error instanceof Error ? error.message : String(error)
-
-          outputChannel.appendLine(`[npm] install failed: ${message}`)
-          outputChannel.show(true)
-
-          await vscode.window.showErrorMessage(
-            `npm install failed: ${message}`,
-          )
+          reportFailure('install-all', error)
         }
       },
     )
@@ -730,19 +655,7 @@ export default {
             `npm: uninstalled ${dependency.name}.`,
           )
         } catch (error) {
-          const message =
-            error instanceof Error
-              ? error.message
-              : String(error)
-    
-          outputChannel.appendLine(
-            `[npm] uninstall failed: ${message}`,
-          )
-          outputChannel.show(true)
-    
-          await vscode.window.showErrorMessage(
-            `npm uninstall failed: ${message}`,
-          )
+          reportFailure('uninstall', error)
         }
       },
     )
@@ -771,13 +684,8 @@ export default {
     async function promptForDependencySpec(
       section: NpmDependencySection,
     ): Promise<void> {
-      const sectionLabel =
-        section === 'devDependencies'
-          ? 'dev dependency'
-          : 'dependency'
-
       const specInput = await vscode.window.showInputBox({
-        title: `npm: Add ${sectionLabel}`,
+        title: `npm: Add ${sectionLabelOf(section)}`,
         prompt:
           'Enter one or more packages, optionally with versions, separated by spaces.',
         placeHolder: 'lodash dayjs@1.11.0',
@@ -938,20 +846,106 @@ export default {
           )
 
           if (selection === 'Update All') {
-            await installFromSpecs(
-              stale
-                /*
-                 * Install the concrete latest version fetched above;
-                 * "@latest" is a dist-tag that the package manager does
-                 * not resolve.
-                 */
-                .map((entry) =>
-                  entry.latest.startsWith('(')
-                    ? entry.name
-                    : `${entry.name}@${entry.latest}`,
-                ),
-            )
+            /*
+             * Install the concrete latest version fetched above. A
+             * placeholder "(registry lookup failed)" tag falls back to the
+             * bare name, which resolves via dist-tags.latest. Grouped by
+             * section so devDependencies are not silently moved into
+             * dependencies on update.
+             */
+            const specsBySection = new Map<NpmDependencySection, string[]>()
+
+            for (const entry of stale) {
+              const spec = entry.latest.startsWith('(')
+                ? entry.name
+                : `${entry.name}@${entry.latest}`
+
+              const group = specsBySection.get(entry.section) ?? []
+
+              group.push(spec)
+              specsBySection.set(entry.section, group)
+            }
+
+            for (const [section, specs] of specsBySection) {
+              await installFromSpecs(specs, section)
+            }
           }
+        }
+      },
+    )
+
+    const pruneCommand = vscode.commands.registerCommand(
+      COMMAND_PRUNE,
+      async () => {
+        let extraneous: Awaited<
+          ReturnType<typeof listExtraneousPackages>
+        > = []
+
+        try {
+          extraneous = await listExtraneousPackages(
+            vscode,
+            context.workspaceRootUri,
+          )
+        } catch (error) {
+          reportFailure('prune (scan)', error)
+          return
+        }
+
+        if (extraneous.length === 0) {
+          await vscode.window.showInformationMessage(
+            'npm: node_modules is already in sync with package.json — nothing to prune.',
+          )
+
+          return
+        }
+
+        const names = extraneous.map((entry) => entry.name).join(', ')
+
+        const confirmation = await vscode.window.showWarningMessage(
+          `npm: remove ${extraneous.length} extraneous package${extraneous.length === 1 ? '' : 's'} from node_modules?\n${names}`,
+          { modal: true },
+          'Prune',
+        )
+
+        if (confirmation !== 'Prune') {
+          return
+        }
+
+        try {
+          const removedCount = await vscode.window.withProgress(
+            {
+              location: vscode.ProgressLocation.Notification,
+              title: 'npm: pruning extraneous packages…',
+              cancellable: false,
+            },
+            async () => {
+              const removed: string[] = []
+
+              const count = await pruneExtraneousPackages(
+                vscode,
+                context.workspaceRootUri,
+                (name) => {
+                  removed.push(name)
+                  outputChannel.appendLine(`[npm] removed ${name}`)
+                },
+              )
+
+              outputChannel.show(true)
+              dependencyTreeProvider.refresh()
+
+              outputChannel.appendLine(
+                `[npm] Pruned ${count} package${count === 1 ? '' : 's'}: ${removed.join(', ')}.`,
+              )
+
+              return count
+            },
+          )
+
+          await vscode.window.showInformationMessage(
+            `npm: pruned ${removedCount} package${removedCount === 1 ? '' : 's'}.`,
+          )
+        } catch (error) {
+          reportFailure('prune', error)
         }
       },
     )

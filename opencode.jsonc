@@ -1,0 +1,6 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // Format files after write/edit/patch. Prettier runs when a prettier
+  // dependency exists in package.json and the extension matches.
+  "formatter": true,
+}
