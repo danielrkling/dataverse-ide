@@ -38,7 +38,7 @@ export type TailwindConfig = {
 };
 
 export const TAILWIND_DEFAULT_CONFIG: TailwindConfig = {
-  input: "src/tailwind.css",
+  input: "",
   output: "dist/tailwind.css",
   minify: false,
 };

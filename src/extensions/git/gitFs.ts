@@ -50,6 +50,16 @@ function getEncoding(options: Encoding): string | undefined {
   return options?.encoding ?? undefined
 }
 
+/*
+ * Chromium blocks direct creation/access of `.git/hooks` through the File
+ * System Access API. isomorphic-git creates this conventional directory
+ * during init but does not execute native Git hooks, so store it under a
+ * safe physical directory name instead.
+ */
+const GIT_METADATA_DIR = '.git'
+const GIT_HOOKS_DIR = 'hooks'
+const SAFE_GIT_HOOKS_DIR = '_hooks'
+
 function toPathParts(path: string): string[] {
   const parts = path
     .replaceAll('\\', '/')
@@ -63,7 +73,42 @@ function toPathParts(path: string): string[] {
     throw createFsError('EACCES', path)
   }
 
+  /*
+   * Logical Git path:
+   *   .git/hooks/pre-commit
+   *
+   * Physical browser-accessed path:
+   *   .git/_dataverse_ide_hooks/pre-commit
+   */
+  if (parts[0] === GIT_METADATA_DIR && parts[1] === GIT_HOOKS_DIR) {
+    parts[1] = SAFE_GIT_HOOKS_DIR
+  }
+
   return parts
+}
+
+function fromStorageEntryName(parentPath: string, name: string): string {
+  const parentParts = parentPath
+    .replaceAll('\\', '/')
+    .split('/')
+    .filter((part) => part.length > 0 && part !== '.')
+
+  /*
+   * Physical:
+   *   .git/_dataverse_ide_hooks
+   *
+   * Logical Git-facing view:
+   *   .git/hooks
+   */
+  if (
+    parentParts.length === 1 &&
+    parentParts[0] === GIT_METADATA_DIR &&
+    name === SAFE_GIT_HOOKS_DIR
+  ) {
+    return GIT_HOOKS_DIR
+  }
+
+  return name
 }
 
 async function getDirectoryHandle(
@@ -234,11 +279,11 @@ export function createFileSystemAccessGitFs(
       async readdir(path: string): Promise<string[]> {
         const directory = await getDirectoryHandle(root, path)
         const entries: string[] = []
-
+      
         for await (const [name] of directory.entries()) {
-          entries.push(name)
+          entries.push(fromStorageEntryName(path, name))
         }
-
+      
         return entries.sort((left, right) => left.localeCompare(right))
       },
 

@@ -20,15 +20,15 @@ export const extensionModules: Record<string, () => Promise<{ default: IdeExtens
   dataverse: () => import("./dataverse/extension.js"),
   prettier: () => import("./prettier/extension.js"),
   esbuild: () => import("./esbuild/extension.js"),
-  "node-runtime": () => import("./node-runtime/extension.js"),
+  // "node-runtime": () => import("./node-runtime/extension.js"),
   npm: () => import("./npm/extension.js"),
   gitlab: () => import("./gitlab/extension.js"),
   tailwind: () => import("./tailwind/extension.js"),
-  rolldown: () => import("./rolldown/extension.js"),
+  // rolldown: () => import("./rolldown/extension.js"),
   flatten: () => import("./flatten/extension.js"),
   template: () => import("./template/extension.js"),
   scripts: () => import("./scripts/extension.js"),
-  taggedJsx: () => import("./taggedJsx/extension.js"),
+  // taggedJsx: () => import("./taggedJsx/extension.js"), //gramer not working atm, disabling for now
 };
 
 /*

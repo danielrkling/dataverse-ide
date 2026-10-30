@@ -345,7 +345,7 @@ export type DataverseWebResource = {
       }
 
       const userResponse = await fetchWithRetry(
-        `${this.apiUrl}/systemusers(${who.UserId})?$select=fullname,internalemailaddress,windowsoverallstatus`,
+        `${this.apiUrl}/systemusers(${who.UserId})?$select=fullname,internalemailaddress`,
         {
           headers: this.requestHeaders,
         },

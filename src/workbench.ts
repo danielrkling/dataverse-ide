@@ -51,6 +51,7 @@ import { workspaceDirectoryHandle } from "./workspace/fsProvider.js";
 
 import { ensureOverlayDirsSetting } from "./workspace/opfsOverlay.js";
 import { ensureWorkspaceSwitcher } from "./workspace/workspaceSwitcher.js";
+import { getModuleWorkerBlobUrl } from "./util/moduleWorker.js";
 
 const workerUrls: Record<string, string> = {
   editorWorkerService: editorWorkerUrl,
@@ -64,6 +65,49 @@ const workerUrls: Record<string, string> = {
   LocalFileSearchWorker: localFileSearchWorkerUrl,
   OutputLinkDetectionWorker: outputLinkDetectionWorkerUrl,
 };
+
+/*
+ * The extension host runs inside a sandboxed iframe. A blob URL created by
+ * the parent document cannot be reliably imported in that iframe, so keep
+ * its entrypoint as the real same-origin deployed URL.
+ */
+const DIRECT_WORKER_LABELS = new Set([
+  "extensionHostWorkerMain",
+]);
+
+const workerBootstrapUrls = new Map<string, string>();
+
+function preloadWorkerBlobs(): void {
+  for (const [label, workerUrl] of Object.entries(workerUrls)) {
+    if (DIRECT_WORKER_LABELS.has(label)) {
+      continue;
+    }
+
+    const resolvedUrl = resolveWorkerUrl(workerUrl);
+
+    const blobUrl = getModuleWorkerBlobUrl(resolvedUrl);
+
+    workerBootstrapUrls.set(label, blobUrl);
+
+    console.info(
+      `[Dataverse IDE] Preloaded worker bootstrap "${label}" from blob URL.`,
+    );
+  }
+}
+
+function resolveConfiguredWorkerUrl(label: string): string {
+  const workerUrl = workerUrls[label];
+
+  if (workerUrl == null) {
+    throw new Error(`[Dataverse IDE] Worker "${label}" is not configured.`);
+  }
+
+  /*
+   * Extension host: direct deployed URL, required by its sandboxed iframe.
+   * Other workers: blob bootstrap importing their deployed URL.
+   */
+  return workerBootstrapUrls.get(label) ?? resolveWorkerUrl(workerUrl);
+}
 
 function resolveWorkerUrl(workerUrl: string): string {
   /*
@@ -121,18 +165,13 @@ async function verifyWorker(workerName: string, workerUrl: string): Promise<void
 
 window.MonacoEnvironment = {
   getWorkerUrl(_workerId, label) {
-    const workerUrl = workerUrls[label];
-
-    if (workerUrl == null) {
-      console.error(`[Dataverse IDE] Monaco requested an unmapped worker URL: "${label}"`);
-
-      throw new Error(`[Dataverse IDE] Worker URL for "${label}" is not configured.`);
-    }
-
-    const resolvedUrl = resolveWorkerUrl(workerUrl);
-
-    console.info(`[Dataverse IDE] Monaco requested worker URL "${label}":`, resolvedUrl);
-
+    const resolvedUrl = resolveConfiguredWorkerUrl(label);
+  
+    console.info(
+      `[Dataverse IDE] Monaco requested worker URL "${label}":`,
+      resolvedUrl,
+    );
+  
     return resolvedUrl;
   },
 
@@ -143,23 +182,18 @@ window.MonacoEnvironment = {
   },
 
   getWorker(_workerId, label) {
-    const workerUrl = workerUrls[label];
-
-    if (workerUrl == null) {
-      console.error(`[Dataverse IDE] Monaco requested an unmapped worker: "${label}"`);
-
-      throw new Error(`[Dataverse IDE] Worker "${label}" is not configured.`);
-    }
-
-    const resolvedUrl = resolveWorkerUrl(workerUrl);
-
-    console.info(`[Dataverse IDE] Monaco requested worker "${label}":`, resolvedUrl);
-
+    const resolvedUrl = resolveConfiguredWorkerUrl(label);
+  
+    console.info(
+      `[Dataverse IDE] Monaco requested worker "${label}":`,
+      resolvedUrl,
+    );
+  
     const worker = new Worker(resolvedUrl, {
       type: "module",
       name: `dataverse-ide-${label}`,
     });
-
+  
     worker.addEventListener("error", (event) => {
       console.error(`[Dataverse IDE] Worker "${label}" failed after creation.`, {
         url: resolvedUrl,
@@ -171,7 +205,7 @@ window.MonacoEnvironment = {
         event,
       });
     });
-
+  
     return worker;
   },
 };
@@ -269,19 +303,7 @@ function installDocumentAutoSave(delayMs = 1000): vscode.Disposable {
 }
 
 export async function startWorkbench(container: HTMLElement): Promise<void> {
-  console.table({
-    origin: window.location.origin,
-    crossOriginIsolated: window.crossOriginIsolated,
-    sharedArrayBufferAvailable: typeof SharedArrayBuffer !== "undefined",
-  });
-
-  // await Promise.all([
-  //   verifyWorker("editor", editorWorkerUrl),
-  //   verifyWorker("extension-host", extensionHostWorkerUrl),
-  //   verifyWorker("textmate", textMateWorkerUrl),
-  //   verifyWorker("search", localFileSearchWorkerUrl),
-  //   verifyWorker("output-link-computer", outputLinkComputerWorkerUrl),
-  // ]);
+  preloadWorkerBlobs();
 
   // Existing startWorkbench code follows...
   // Like the demo: on localhost, run the web worker extension host in a sandboxed
@@ -418,11 +440,6 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
     },
   );
 
-  console.table({
-    filesAutoSave: vscode.workspace.getConfiguration("files").get<string>("autoSave"),
-
-    filesAutoSaveDelay: vscode.workspace.getConfiguration("files").get<number>("autoSaveDelay"),
-  });
 
   /*
    * Contribute dataverseIde.overlayDirs (which top-level workspace

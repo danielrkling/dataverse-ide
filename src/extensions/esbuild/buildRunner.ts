@@ -1,16 +1,38 @@
 import type * as vscodeType from "vscode";
 
-import type { BuildOutputFile } from "./worker.js";
+import {
+  createWorkspaceReader,
+  runBuild,
+  runTransform,
+  type BuildOutputFile,
+  type BuildResponse,
+  type WorkspaceReader,
+} from "./compiler.js";
 
 /*
- * Main-thread runner for the esbuild worker (src/extensions/esbuild/
- * worker.ts). Shared by the esbuild extension (build commands) and by the
- * node-runtime extension (TS/JSX transpilation before script execution).
+ * Main-thread esbuild runner.
+ *
+ * The compiler reads real workspace files through vscode.workspace.fs.
+ * `virtualFiles` are an optional, per-build overlay for generated sources
+ * such as Tailwind's ephemeral @plugin entry module.
+ *
+ * `files` and `absentPaths` remain in the public type only for Rolldown's
+ * existing worker/lazyBuild protocol. The main-thread esbuild compiler does
+ * not use them.
  */
 
+export type { BuildOutputFile };
+
 export type BuildRequestInput = {
+  /** Workspace-relative or virtual entry point, e.g. src/app.ts. */
   entry: string;
-  files: Record<string, string>;
+
+  /*
+   * Optional generated source files for this build only. Keys are
+   * workspace-relative virtual paths and take precedence over physical files.
+   */
+  virtualFiles?: Record<string, string>;
+
   format?: "esm" | "iife" | "cjs";
   minify?: boolean;
   sourcemap?: boolean;
@@ -21,16 +43,18 @@ export type BuildRequestInput = {
   entryNames?: string;
 
   /*
-   * Tagged JSX plugin (@tagged-jsx/transform) applied to workspace source
-   * files on load by the worker: "toJsx" converts html`...` templates to
-   * JSX sources, "toTagged" converts JSX to templates. Defaults to "off".
+   * Tagged JSX transform applied to workspace source files before esbuild
+   * transpiles them.
    */
   taggedJsx?: "off" | "toJsx" | "toTagged";
 
   /*
-   * Lazy resolution: paths proven unreadable in earlier rounds, so the
-   * resolver stops requesting them.
+   * Compatibility fields used by the Rolldown worker and lazyBuild().
+   *
+   * Main-thread esbuild ignores these because it reads files directly through
+   * vscode.workspace.fs.
    */
+  files?: Record<string, string>;
   absentPaths?: string[];
 };
 
@@ -40,118 +64,133 @@ export type TransformRequestInput = {
   minify?: boolean;
 };
 
-export type BuildResponseOk = {
-  ok: true;
-  outputs: BuildOutputFile[];
-  warnings: string[];
-
-  /** Worker pipeline version (stale-bundle diagnosis). */
-  pipeline?: string;
-
-  /**
-   * Lazy resolution probe round: paths to read and retry with.
-   * Non-empty outputs/warnings are provisional when this is set.
+/*
+ * The compiler internally tracks request IDs, but callers do not need them.
+ * Keeping IDs out of the public response lets the Rolldown runner return
+ * its own synthetic failures without fabricating an esbuild request ID.
+ */
+export type BuildResponseOk = Omit<
+  Extract<BuildResponse, { ok: true }>,
+  "id"
+> & {
+  /*
+   * Rolldown's lazy worker protocol uses this. Main-thread esbuild never
+   * returns it because it resolves workspace files directly.
    */
   needFiles?: string[];
 };
 
-export type BuildResponseErr = {
-  ok: false;
-  error: string;
-};
+export type BuildResponseErr = Omit<
+  Extract<BuildResponse, { ok: false }>,
+  "id"
+>;
 
 export type BuildRunnerResponse = BuildResponseOk | BuildResponseErr;
 
-type WorkerRequest =
-  | ({ id: number; type: "build" } & BuildRequestInput)
-  | ({ id: number; type: "transform" } & TransformRequestInput);
-
-function isRunnerResponse(value: unknown): value is BuildRunnerResponse & { id: number } {
-  return typeof value === "object" && value != null && "id" in value && "ok" in value;
-}
-
 export class EsbuildBuildRunner {
-  private worker: Worker | undefined;
-
   private nextRequestId = 1;
 
-  constructor(private readonly outputChannel: vscodeType.OutputChannel) {}
+  private disposed = false;
 
-  private ensureWorker(): Worker {
-    if (this.worker != null) {
-      return this.worker;
-    }
+  private initialized = false;
 
-    this.worker = new Worker(new URL("./worker.js", import.meta.url), {
-      type: "module",
-      name: "dataverse-ide-esbuild",
-    });
+  private readonly workspaceReader: WorkspaceReader;
 
-    this.worker.onerror = (event) => {
-      this.outputChannel.appendLine(
-        `[esbuild] worker error: ${
-          event.error instanceof Error
-            ? `${event.error.message}\n${event.error.stack ?? ""}`
-            : (event.message ?? "unknown error")
-        }`,
-      );
-    };
-
-    this.worker.onmessageerror = (event) => {
-      this.outputChannel.appendLine(
-        `[esbuild] worker message error: ${JSON.stringify(event.data ?? null).slice(0, 400)}`,
-      );
-    };
-
-    return this.worker;
-  }
-
-  private request(fullRequest: WorkerRequest): Promise<BuildRunnerResponse> {
-    const worker = this.ensureWorker();
-    const id = fullRequest.id;
-
-    return new Promise((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
-        worker.removeEventListener("message", onMessage);
-
-        reject(new Error("[esbuild] request timed out after 120s."));
-      }, 120000);
-
-      const onMessage = (event: MessageEvent) => {
-        if (!isRunnerResponse(event.data) || event.data.id !== id) {
-          return;
-        }
-
-        window.clearTimeout(timeout);
-        worker.removeEventListener("message", onMessage);
-
-        if (event.data.ok === true && event.data.pipeline != null) {
-          this.outputChannel.appendLine(`[esbuild] worker pipeline ${event.data.pipeline}`);
-        }
-
-        resolve(event.data);
-      };
-
-      worker.addEventListener("message", onMessage);
-
-      worker.postMessage(fullRequest);
-    });
+  constructor(
+    private readonly vscode: typeof vscodeType,
+    private readonly workspaceRootUri: vscodeType.Uri,
+    private readonly outputChannel: vscodeType.OutputChannel,
+  ) {
+    this.workspaceReader = createWorkspaceReader(vscode, workspaceRootUri);
   }
 
   async build(input: BuildRequestInput): Promise<BuildRunnerResponse> {
     const id = this.nextRequestId++;
 
-    return this.request({ id, type: "build", ...input });
+    if (this.disposed) {
+      return {
+        ok: false,
+        error: "[esbuild] build runner has been disposed.",
+      };
+    }
+
+    try {
+      const response = await runBuild({
+        id,
+        type: "build",
+        workspace: this.workspaceReader,
+
+        /*
+         * `files` and `absentPaths` are intentionally ignored by compiler.ts.
+         * Destructure them out before passing the direct-filesystem request.
+         */
+        ...(() => {
+          const {
+            files: _files,
+            absentPaths: _absentPaths,
+            ...mainThreadInput
+          } = input;
+
+          return mainThreadInput;
+        })(),
+      });
+
+      if (!this.initialized) {
+        this.initialized = true;
+
+        this.outputChannel.appendLine(
+          "[esbuild] main-thread compiler initialized (direct workspace filesystem reads).",
+        );
+      }
+
+      return response;
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   async transform(input: TransformRequestInput): Promise<BuildRunnerResponse> {
     const id = this.nextRequestId++;
 
-    return this.request({ id, type: "transform", ...input });
+    if (this.disposed) {
+      return {
+        ok: false,
+        error: "[esbuild] build runner has been disposed.",
+      };
+    }
+
+    try {
+      const response = await runTransform({
+        id,
+        type: "transform",
+        ...input,
+      });
+
+      if (!this.initialized) {
+        this.initialized = true;
+
+        this.outputChannel.appendLine(
+          "[esbuild] main-thread compiler initialized (direct workspace filesystem reads).",
+        );
+      }
+
+      return response;
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   dispose(): void {
-    this.worker?.terminate();
-    this.worker = undefined;
+    /*
+     * esbuild-wasm is process-global and has no per-runner teardown API.
+     * Mark this facade unusable so disposed extensions cannot start new work.
+     */
+    this.disposed = true;
   }
 }

@@ -26,6 +26,9 @@ import {
 
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
+import { createModuleWorker } from "../../util/moduleWorker.js";
+import rolldownWorkerUrl from "./worker.ts?worker&url";
+
 /*
  * rolldown extension: oxc-powered WASM compilation + full bundling in a
  * worker (via @rolldown/browser).
@@ -85,8 +88,7 @@ class RolldownRunner {
 
   private async ensureWorker(): Promise<Worker> {
     if (this.worker == null) {
-      this.worker = new Worker(new URL("./worker.js", import.meta.url), {
-        type: "module",
+      this.worker = createModuleWorker(rolldownWorkerUrl, {
         name: "dataverse-ide-rolldown",
       });
 
@@ -232,7 +234,7 @@ class RolldownRunner {
 
   /** Full bundling through the worker (probe rounds via lazyBuild). */
   async build(
-    input: BuildRequestInput & { files: Record<string, string> },
+    input: BuildRequestInput,
   ): Promise<BuildRunnerResponse | undefined> {
     const worker = await this.ensureWorker();
     const id = this.nextRequestId++;
