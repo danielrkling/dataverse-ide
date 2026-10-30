@@ -207,7 +207,7 @@ export async function installDataverseUploadExtension(
 
         commands: [
           {
-            command: "dataverseIde.dataverse.uploadConfiguredFolder",
+            command: "dataverseIde.dataverse.uploadConfiguredFiles",
             title: "Dataverse: Upload Configured Web Resource Folder",
           },
           {

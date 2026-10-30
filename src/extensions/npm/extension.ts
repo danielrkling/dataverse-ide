@@ -64,7 +64,7 @@ const COMMAND_OUTDATED = 'dataverseIde.npm.outdated'
 const COMMAND_PRUNE = 'dataverseIde.npm.prune'
 
 const DEPENDENCY_ACTIONS_SUBMENU =
-  'dataverseIde.npm.dependencyActions'
+  "dataverse-ide-npm-dependency-actions";
 
 type PackageTreeElementData =
   | {

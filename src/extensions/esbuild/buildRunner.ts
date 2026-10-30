@@ -94,14 +94,12 @@ export class EsbuildBuildRunner {
 
   private initialized = false;
 
-  private readonly workspaceReader: WorkspaceReader;
 
   constructor(
     private readonly vscode: typeof vscodeType,
     private readonly workspaceRootUri: vscodeType.Uri,
     private readonly outputChannel: vscodeType.OutputChannel,
   ) {
-    this.workspaceReader = createWorkspaceReader(vscode, workspaceRootUri);
   }
 
   async build(input: BuildRequestInput): Promise<BuildRunnerResponse> {
@@ -118,7 +116,16 @@ export class EsbuildBuildRunner {
       const response = await runBuild({
         id,
         type: "build",
-        workspace: this.workspaceReader,
+        /*
+         * New reader per build:
+         *
+         * - caches duplicate reads during this build
+         * - cannot return stale content after a workspace file changes
+         */
+        workspace: createWorkspaceReader(
+          this.vscode,
+          this.workspaceRootUri,
+        ),
 
         /*
          * `files` and `absentPaths` are intentionally ignored by compiler.ts.

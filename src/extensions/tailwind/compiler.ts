@@ -48,7 +48,7 @@ const MAX_SCANNED_FILES = 4000;
 const MAX_TOKENS_PER_FILE = 20000;
 const MAX_CANDIDATE_LENGTH = 256;
 
-const CANDIDATE_SHAPE = /^[a-zA-Z0-9_![\]().,#%$@&*:+-]+$/;
+const CANDIDATE_SHAPE = /^[a-zA-Z0-9_![\]().,#%$@&*:+\/-]+$/;
 
 const BUNDLED_STYLESHEETS: Record<string, string> = {
   tailwindcss: tailwindIndexCss,

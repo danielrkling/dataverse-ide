@@ -260,9 +260,22 @@ export default {
       return selection?.uri;
     }
 
-    /** Creates the output's parent folder (e.g. a not-yet-existing dist). */
-    async function ensureParentDirectory(uri: vscodeType.Uri): Promise<void> {
-      await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, ".."));
+    async function ensureParentDirectory(
+      uri: vscodeType.Uri,
+    ): Promise<void> {
+      const separatorIndex = uri.path.lastIndexOf("/");
+    
+      if (separatorIndex <= 0) {
+        return;
+      }
+    
+      const parentUri = vscode.Uri.from({
+        scheme: uri.scheme,
+        authority: uri.authority,
+        path: uri.path.slice(0, separatorIndex),
+      });
+    
+      await vscode.workspace.fs.createDirectory(parentUri);
     }
 
     /*
