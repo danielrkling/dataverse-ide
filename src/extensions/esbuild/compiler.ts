@@ -41,6 +41,12 @@ import {
   splitPackageSpec,
 } from "../shared/packageResolver.js";
 
+import {
+  createSolidEsbuildPlugin,
+  isWorkspaceSourcePath,
+  type SolidCompilerVersion,
+} from "./solidPlugin.js";
+
 export type TaggedJsxMode = "off" | "toJsx" | "toTagged";
 
 export type BuildOutputFile = {
@@ -122,6 +128,15 @@ export type BuildRequest = {
   chunkNames?: string;
   outExtension?: Record<string, string>;
   taggedJsx?: TaggedJsxMode;
+
+  /**
+   * Solid JSX compiler backend:
+   *
+   *   "off" - leave JSX/TSX to esbuild's configured JSX mode
+   *   "v1"  - babel-preset-solid (Solid 1.x)
+   *   "v2"  - @solidjs/babel-plugin (Solid 2.x)
+   */
+  solid?: SolidCompilerVersion | "off";
 };
 
 export type TransformRequest = {
@@ -327,10 +342,6 @@ function getLoaderForPath(path: string): esbuild.Loader {
   }
 
   return "js";
-}
-
-function isWorkspaceSourcePath(path: string): boolean {
-  return !path.startsWith("node_modules/") && !path.startsWith("__");
 }
 
 function isTaggedJsxCandidate(loader: esbuild.Loader): boolean {
@@ -1092,6 +1103,41 @@ export async function runBuild(request: BuildRequest): Promise<BuildResponse> {
       ? entryPoint.slice(0, entryPoint.lastIndexOf("/"))
       : ".";
 
+    const taggedJsx = request.taggedJsx ?? "off";
+    const solid = request.solid ?? "off";
+
+    const plugins: esbuild.Plugin[] = [];
+
+    /*
+     * Solid compiles before esbuild's loaders and before the workspace-fs
+     * plugin's catch-all onLoad (esbuild tries onLoad callbacks in plugin
+     * order). It only claims workspace .jsx/.tsx files; everything else
+     * falls through to the normal loader.
+     */
+    if (solid !== "off") {
+      plugins.push(
+        createSolidEsbuildPlugin({
+          version: solid,
+          readText: (path) => reader.readText(path),
+          sourcemap: request.sourcemap != null && request.sourcemap !== false,
+          beforeTransform:
+            taggedJsx === "off"
+              ? undefined
+              : async (source) => {
+                  const transformers = await ensureTaggedJsxTransformers();
+
+                  const converted = convertTaggedJsx(source, taggedJsx, transformers);
+
+                  return { code: converted.code, errors: converted.errors };
+                },
+        }),
+      );
+    }
+
+    plugins.push(
+      createWorkspaceFsPlugin(reader, request.external ?? [], unresolvedImports, taggedJsx),
+    );
+
     const result = await esbuild.build({
       entryPoints: [entryPoint],
       bundle: request.bundle ?? true,
@@ -1126,14 +1172,7 @@ export async function runBuild(request: BuildRequest): Promise<BuildResponse> {
       chunkNames: request.chunkNames,
       outExtension: request.outExtension,
       logLevel: "silent",
-      plugins: [
-        createWorkspaceFsPlugin(
-          reader,
-          request.external ?? [],
-          unresolvedImports,
-          request.taggedJsx ?? "off",
-        ),
-      ],
+      plugins,
       /*
        * Keep the entry's own directory out of the output path, so
        * "src/app.ts" still writes "app.js" (plus sibling chunks/maps).

@@ -17,12 +17,14 @@ assert.deepEqual(defaults.entryPoints, [{ input: "index.html" }]);
 assert.equal(defaults.inlineScripts, true);
 assert.equal(defaults.inlineFonts, false);
 assert.equal(defaults.maxInlineBytes, 0);
+assert.deepEqual(defaults.external, []);
 
 const custom = v.parse(HTML_CONFIG_SCHEMA, {
   entryPoints: ["a.html", { input: "pages/b.html", output: "dist/b.html" }],
   outdir: "build",
   inlineFonts: true,
   maxInlineBytes: 1024,
+  external: ["vendor/**", "*.min.js"],
 });
 
 assert.deepEqual(custom.entryPoints, [
@@ -31,14 +33,21 @@ assert.deepEqual(custom.entryPoints, [
 ]);
 assert.equal(custom.inlineFonts, true);
 assert.equal(custom.maxInlineBytes, 1024);
+assert.deepEqual(custom.external, ["vendor/**", "*.min.js"]);
 
 const invalid = v.parse(HTML_CONFIG_SCHEMA, {
   entryPoints: ["", { input: "" }, "index.html"],
   maxInlineBytes: -1,
+  external: [" vendor/** ", "", 3, "*.min.js"],
 });
 
 assert.deepEqual(invalid.entryPoints, [{ input: "index.html" }], "empty entries are dropped");
 assert.equal(invalid.maxInlineBytes, 0, "invalid values fall back to defaults");
+assert.deepEqual(
+  invalid.external,
+  ["vendor/**", "*.min.js"],
+  "invalid external entries are dropped and values are trimmed",
+);
 
 const jsonSchema = toJsonSchema(HTML_CONFIG_SCHEMA, { errorMode: "ignore" });
 

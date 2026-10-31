@@ -75,6 +75,13 @@ export type BuildRequestInput = {
   taggedJsx?: "off" | "toJsx" | "toTagged";
 
   /*
+   * Solid JSX compiler backend: "off" (default), "v1" (babel-preset-solid),
+   * or "v2" (@solidjs/babel-plugin). Compiles workspace .jsx/.tsx before
+   * esbuild's loaders run.
+   */
+  solid?: "off" | "v1" | "v2";
+
+  /*
    * Compatibility fields used by the Rolldown worker and lazyBuild().
    *
    * Main-thread esbuild ignores these because it reads files directly through

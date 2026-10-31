@@ -25,6 +25,49 @@
 
 # Solid JS toolchain
 
+## [added 2026-10-31] Solid Babel compilers as an esbuild plugin (`solid: "v1" | "v2"`)
+
+- New `src/extensions/esbuild/solidPlugin.ts`: a real esbuild plugin (registered before the
+  workspace-fs plugin, so it owns workspace `.jsx`/`.tsx` onLoad and everything else falls
+  through) plus `compileSolidSource()` for reuse.
+  - `v2` -> `@solidjs/babel-plugin` (Solid 2.x; renamed from `babel-preset-solid`, which ended
+    at 2.0.0-rc.2). `v1` -> `babel-preset-solid@1.9.x` (Solid 1.x). Both loaded lazily;
+    `@babel/preset-typescript` strips TS for `.ts/.tsx` (the Solid 2 plugin does not do it).
+  - Pure JS: no `@solidjs/compiler-wasm32-wasi`, no WASI pools/glue patches, no worker boot,
+    and it works on the main thread (where esbuild now runs) and in any worker.
+  - Babel errors are returned as esbuild `errors` with `[solid:vN]` prefixes; `loc` is
+    forwarded when Babel provides it (syntax errors), Babel's duplicated absolute filename
+    prefix is stripped.
+  - Source maps chain: Babel's map is embedded as an inline data URL in the onLoad contents,
+    which esbuild consumes -> real `.js.map` with original TSX + `sourcesContent` (the old
+    wasm/rolldown path skipped maps).
+- Config/plumbing: `esbuild.config.json` `solid: "off" | "v1" | "v2"` (default off; written by
+  `updateEsbuildConfig`), `BuildRequest.solid` / `BuildRequestInput.solid`, quick pick
+  `esbuild: Solid Compiler…` (`dataverseIde.esbuild.configureSolid`), JSON-schema description.
+  The plugin is only added when solid !== off, so existing builds are unchanged.
+- Tagged-JSX composition: when both are enabled, the plugin's `beforeTransform` runs the
+  existing tagged-JSX transform first (`toJsx` introduces JSX for Solid to compile; `toTagged`
+  removes it first). `.ts`/`.js` tagged-JSX files still go through the workspace plugin.
+- Browser bundling: `@babel/core` needs Node's `path`; Vite aliases `^path$` ->
+  `path-browserify` (otherwise it externalizes an empty object and Babel breaks at runtime).
+  `assert`/`util`/`process` resolve to the installed browser packages. Lazy Babel chunks:
+  @babel/core ~954 KB, @solidjs/babel-plugin ~278 KB, assert ~310 KB (minified, before gzip).
+  `optimizeDeps.include` lists the four Babel packages so the dev optimizer does not reload
+  mid-first-build.
+- Deps added: `@babel/core`, `@babel/preset-typescript`, `@solidjs/babel-plugin@2.0.0-rc.20`,
+  `babel-preset-solid@1.9.16`, `path-browserify`, `assert`, `process`; dev: `@types/babel__core`,
+  `esbuild` (sanity harness). Ambient typings in `src/types/solidCompiler.d.ts`.
+- Verified: `tsc` + `npm run build` pass; `npx vite optimize --force` prebundles all four;
+  `tests/esbuildSolid.sanity.mts` (real esbuild + real Babel) passes v2, v1, source-map chaining,
+  and v2 error attribution.
+- Open: manual in-browser build of a Solid workspace (v1 + v2) through `esbuild: Build Current
+File`; `.tsrx` is intentionally not routed (needs `@tsrx/core` + Node >=22.12); the v2 path
+  does not yet run `@solidjs/compiler`'s primitive `sourceNames` pass (JSX-level names still
+  come from Babel's `dev` option, currently off); rolldown/rollup/node-runtime still use their
+  own paths (the plugin factory is reusable there next). Keep the pinned
+  `@solidjs/babel-plugin` rc aligned with the Solid 2 rc a workspace installs - compiled output
+  targets the matching `@solidjs/web` helpers.
+
 ## [reverted 2026-10-29] in-worker integration rolled back
 
 - The esbuild-worker Solid integration (loader transform, config key, auto-detection, vite glue
@@ -135,6 +178,23 @@ produced no output.` when the file map lacks node_modules contents (overlay-FS w
   - rolldown-browser variant of the pipeline (prototype test4.mjs) kept for later
   - sourcemap chaining (solid compiler map -> esbuild map) currently only passed through when sourcemap enabled, not merged
   - 1.9 support via babel-preset-solid
+
+# Node runtime v2 (direct workspace fs)
+
+- [added 2026-10-31] `src/extensions/node-runtime-v2/`: own async loader + sync
+  `require` cache over `vscode.workspace.fs`; almostnode shims for builtins; no
+  workspace-wide VFS sync. Sanity harness:
+  `tests/nodeRuntimeV2.sanity.mts` (build command in the file header).
+- design tradeoff: CJS `require()` is synchronous, so static imports are
+  prefetched and dynamic requires / uncached sync fs reads use a
+  throw → hydrate → retry loop. Retries re-run module side effects (logged via
+  `onRetry`).
+- follow-ups:
+  - outbound permission gate (currently user code sees the page's `fetch`,
+    XHR and WebSocket directly)
+  - `.js` config files with custom plugins for esbuild/rolldown (not started)
+  - worker realm option for terminability / real CSP-based request isolation
+  - `crypto.createHash`, `child_process`, and native `.node` addons are stubs
 
 # Tagged JSX extension
 

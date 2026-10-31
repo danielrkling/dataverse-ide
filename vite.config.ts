@@ -271,6 +271,17 @@ export default defineConfig({
         replacement: path.resolve(import.meta.dirname, "src/stubs/almostnodeRuntimeWorker.ts"),
       },
       {
+        /*
+         * The Solid Babel compiler path (@babel/core) imports Node's `path`.
+         * Vite externalizes builtins to an empty stub in the browser, which
+         * breaks Babel's config/cwd handling at runtime. path-browserify is
+         * the standard drop-in for the APIs Babel uses (resolve, sep,
+         * relative, dirname, ...).
+         */
+        find: /^path$/,
+        replacement: "path-browserify",
+      },
+      {
         // Optional xterm addon (dynamically imported by the terminal service
         // override) - its node builtin imports break the browser bundle, and
         // font-ligature shaping is irrelevant here
@@ -315,6 +326,17 @@ export default defineConfig({
     webResourceWasmInline,
   ],
   optimizeDeps: {
+    /*
+     * Solid's Babel compilers are lazily imported by the esbuild extension.
+     * Vite only discovers dynamic imports at runtime, so pre-bundle them to
+     * avoid a dep-optimizer reload in the middle of the first Solid build.
+     */
+    include: [
+      "@babel/core",
+      "@babel/preset-typescript",
+      "@solidjs/babel-plugin",
+      "babel-preset-solid",
+    ],
     // brotli-wasm's wasm URL reference breaks the dev pre-bundler's
     // import.meta.resolve; excluded so vite serves/patches it directly
     exclude: [

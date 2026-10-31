@@ -7,7 +7,12 @@ import {
   configRelativePath,
   type ConfigPathOptions,
 } from "../shared/configPath.js";
-import { parseConfig, withDefault, workspacePathSchema } from "../shared/configSchema.js";
+import {
+  parseConfig,
+  stringListSchema,
+  withDefault,
+  workspacePathSchema,
+} from "../shared/configSchema.js";
 
 /*
  * html.config.json - source of truth for the HTML bundler.
@@ -30,12 +35,17 @@ import { parseConfig, withDefault, workspacePathSchema } from "../shared/configS
  *     "inlineCssUrls": true,
  *     "maxInlineBytes": 0,
  *     "minify": false,
- *     "removeComments": false
+ *     "removeComments": false,
+ *     "external": ["vendor/**"]
  *   }
  *
  * `entryPoints` accepts either a workspace-relative string or an object with
  * an explicit `output`. When `output` is omitted the file is written to
  * `<outdir>/<entry file name>`.
+ *
+ * `external` is a list of glob patterns for local sources that should keep
+ * their original reference instead of being inlined. Patterns without a slash
+ * match the file name; `*`, `**` and `?` are supported.
  */
 
 const CONFIG_FILE_NAME = "html.config.json";
@@ -84,6 +94,12 @@ export const HTML_CONFIG_SCHEMA = v.object({
 
   minify: withDefault(v.boolean(), false),
   removeComments: withDefault(v.boolean(), false),
+
+  /**
+   * Glob patterns of workspace paths or original references to leave
+   * un-inlined. Patterns without a slash match the file name.
+   */
+  external: withDefault(stringListSchema, []),
 });
 
 export type HtmlConfig = v.InferOutput<typeof HTML_CONFIG_SCHEMA>;
@@ -162,6 +178,7 @@ export async function updateHtmlConfig(
     maxInlineBytes: merged.maxInlineBytes,
     minify: merged.minify,
     removeComments: merged.removeComments,
+    external: merged.external,
   };
 
   await vscode.workspace.fs.writeFile(

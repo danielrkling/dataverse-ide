@@ -9,7 +9,6 @@ import { HTML_CONFIG_SCHEMA } from "../html/config.js";
 import { ROLLDOWN_CONFIG_SCHEMA } from "../rolldown/config.js";
 import { ROLLUP_CONFIG_SCHEMA } from "../rollup/config.js";
 import { TAILWIND_CONFIG_SCHEMA } from "../tailwind/config.js";
-import { TEMPLATE_CONFIG_SCHEMA } from "../template/config.js";
 import { defineRecordSchema } from "./configSchema.js";
 
 /*
@@ -201,6 +200,8 @@ export const CONFIG_JSON_SCHEMAS: ConfigJsonSchemaEntry[] = [
       external: "Packages or paths to leave external.",
       define: "Build-time global identifier replacements.",
       taggedJsx: "Tagged-JSX transform applied before esbuild loaders.",
+      solid:
+        'Solid JSX compiler: "v1" (babel-preset-solid) or "v2" (@solidjs/babel-plugin); "off" leaves JSX to esbuild.',
     },
   ),
 
@@ -217,6 +218,8 @@ export const CONFIG_JSON_SCHEMAS: ConfigJsonSchemaEntry[] = [
     maxInlineBytes: "Skip binary assets larger than this many bytes (0 = no limit).",
     minify: "Collapse HTML whitespace while preserving script/style/pre/textarea content.",
     removeComments: "Remove non-conditional HTML comments.",
+    external:
+      "Glob patterns of workspace paths or original references to leave un-inlined (for example vendor/**, *.min.js). Patterns without a slash match the file name.",
   }),
 
   schemaEntry(
@@ -253,15 +256,6 @@ export const CONFIG_JSON_SCHEMAS: ConfigJsonSchemaEntry[] = [
       input: 'Workspace CSS entry. Empty uses the default @import "tailwindcss"; entry.',
       output: "Workspace-relative compiled CSS output path.",
       minify: "Minify the compiled CSS.",
-    },
-  ),
-
-  schemaEntry(
-    "template.config.json",
-    ["template.config.json"],
-    jsonSchemaFor(TEMPLATE_CONFIG_SCHEMA),
-    {
-      templates: "Template input/output pairs built and watched by the template extension.",
     },
   ),
 ];

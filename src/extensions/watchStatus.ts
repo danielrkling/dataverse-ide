@@ -3,10 +3,10 @@ import type * as vscodeType from 'vscode'
 /*
  * Shared watch status plumbing.
  *
- * Every watch-style extension (esbuild, tailwind, template, dataverse
+ * Every watch-style extension (esbuild, tailwind, html, dataverse
  * upload) shows a status bar item that stays visible whether its watch is
  * running or stopped, and opens a quick-pick menu on click. This module
- * owns the display/state/menu logic so the four extensions cannot drift
+ * owns the display/state/menu logic so the extensions cannot drift
  * apart again; each extension only supplies its own lifecycle callbacks.
  */
 

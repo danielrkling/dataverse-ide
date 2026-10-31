@@ -26,9 +26,9 @@ import type { ExtensionContext, IdeExtension } from "../api.js";
  * stylesheets and their @imports/url()s, SVG and image assets, media
  * posters), and writes the self-contained document under `outdir`.
  *
- * Watch mode follows the template extension's pair model: each bundle records
- * the workspace files it touched, and saving any of them rebuilds that entry.
- * Saving the config file reloads it and rebuilds every known entry.
+ * Watch mode uses a pair model: each bundle records the workspace files it
+ * touched, and saving any of them rebuilds that entry. Saving the config file
+ * reloads it and rebuilds every known entry.
  */
 
 const CONFIG_SECTION = "dataverseIde.html";
@@ -371,6 +371,7 @@ export default {
             maxInlineBytes: currentConfig.maxInlineBytes,
             minify: currentConfig.minify,
             removeComments: currentConfig.removeComments,
+            external: currentConfig.external,
           },
           readText: readWorkspaceText,
           readBytes: readWorkspaceBytes,

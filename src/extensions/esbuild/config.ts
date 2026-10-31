@@ -44,7 +44,8 @@ import type * as vscodeType from "vscode";
  *     "splitting": false,
  *     "external": [],
  *     "define": {},
- *     "taggedJsx": "off"
+ *     "taggedJsx": "off",
+ *     "solid": "off"
  *   }
  */
 
@@ -81,6 +82,7 @@ const LEGAL_COMMENTS = ["none", "inline", "eof", "linked", "external"] as const;
 const JSX_MODES = ["transform", "preserve", "automatic"] as const;
 const DROP_ITEMS = ["console", "debugger"] as const;
 const TAGGED_JSX_TRANSFORMS = ["off", "toJsx", "toTagged"] as const;
+const SOLID_COMPILERS = ["off", "v1", "v2"] as const;
 
 const outputTextSchema = v.object({
   js: optionalStringSchema,
@@ -127,6 +129,7 @@ export const ESBUILD_CONFIG_SCHEMA = v.object({
   external: withDefault(stringListSchema, []),
   define: withDefault(defineSchema, {}),
   taggedJsx: withDefault(v.picklist(TAGGED_JSX_TRANSFORMS), "off"),
+  solid: withDefault(v.picklist(SOLID_COMPILERS), "off"),
 });
 
 export type EsbuildConfig = v.InferOutput<typeof ESBUILD_CONFIG_SCHEMA>;
@@ -250,6 +253,7 @@ export async function updateEsbuildConfig(
     external: merged.external,
     define: merged.define,
     taggedJsx: merged.taggedJsx,
+    solid: merged.solid,
   };
 
   await vscode.workspace.fs.writeFile(

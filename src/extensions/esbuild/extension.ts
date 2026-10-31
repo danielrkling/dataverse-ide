@@ -170,6 +170,10 @@ export default {
           title: "esbuild: Tagged JSX Transform…",
         },
         {
+          command: "dataverseIde.esbuild.configureSolid",
+          title: "esbuild: Solid Compiler…",
+        },
+        {
           command: "dataverseIde.esbuild.showOutput",
           title: "esbuild: Show Output",
         },
@@ -337,6 +341,7 @@ export default {
           chunkNames: currentConfig.chunkNames,
           outExtension: currentConfig.outExtension,
           taggedJsx: currentConfig.taggedJsx,
+          solid: currentConfig.solid,
         });
 
         if (!response.ok) {
@@ -638,6 +643,52 @@ export default {
       },
     );
 
+    const configureSolidCommand = vscode.commands.registerCommand(
+      "dataverseIde.esbuild.configureSolid",
+      async () => {
+        const modes: {
+          value: EsbuildConfig["solid"];
+          label: string;
+          description: string;
+        }[] = [
+          {
+            value: "off",
+            label: "off",
+            description: "leave JSX/TSX to esbuild's configured JSX mode",
+          },
+          {
+            value: "v1",
+            label: "v1",
+            description: "compile with babel-preset-solid (Solid 1.x)",
+          },
+          {
+            value: "v2",
+            label: "v2",
+            description: "compile with @solidjs/babel-plugin (Solid 2.x)",
+          },
+        ];
+
+        const picked = await vscode.window.showQuickPick(modes, {
+          title: "esbuild: Solid JSX compiler",
+          placeHolder: `Current: ${currentConfig.solid}`,
+        });
+
+        if (picked == null || picked.value === currentConfig.solid) {
+          return;
+        }
+
+        const merged = await updateEsbuildConfig(vscode, context.workspaceRootUri, {
+          solid: picked.value,
+        });
+
+        currentConfig = merged;
+
+        await vscode.window.showInformationMessage(
+          `esbuild: solid set to "${picked.value}" in esbuild.config.json.`,
+        );
+      },
+    );
+
     const reloadConfigCommand = vscode.commands.registerCommand(
       "dataverseIde.esbuild.reloadConfig",
       async () => {
@@ -666,6 +717,7 @@ export default {
 
         openConfigCommand.dispose();
         configureTaggedJsxCommand.dispose();
+        configureSolidCommand.dispose();
         outputChannelCommand.dispose();
         reloadConfigCommand.dispose();
 

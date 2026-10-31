@@ -11,6 +11,8 @@
     "postinstall": "node scripts/unify-rolldown.cjs"
   },
   "dependencies": {
+    "@babel/core": "^7.29.7",
+    "@babel/preset-typescript": "^7.29.7",
     "@codingame/monaco-vscode-api": "^38.0.4",
     "@codingame/monaco-vscode-bulk-edit-service-override": "^38.0.4",
     "@codingame/monaco-vscode-configuration-editing-default-extension": "^38.0.4",
@@ -75,6 +77,7 @@
     "@rolldown/binding-wasm32-wasi": "^1.2.15",
     "@rolldown/browser": "^1.2.15",
     "@rollup/browser": "^4.67.2",
+    "@solidjs/babel-plugin": "^2.0.0-rc.20",
     "@solidjs/compiler-wasm32-wasi": "^2.0.0-rc.19",
     "@tagged-jsx/parse": "^1.4.0",
     "@tagged-jsx/transform": "^2.0.0",
@@ -82,11 +85,15 @@
     "@types/wicg-file-system-access": "^2023.10.7",
     "@valibot/to-json-schema": "^1.8.0",
     "almostnode": "^0.2.14",
+    "assert": "^2.1.0",
+    "babel-preset-solid": "^1.9.16",
     "buffer": "^6.0.3",
     "esbuild-wasm": "^0.25.12",
     "isomorphic-git": "^1.44.4",
     "monaco-editor": "npm:@codingame/monaco-vscode-editor-api@^38.0.4",
     "parse5": "^8.0.1",
+    "path-browserify": "^1.0.1",
+    "process": "^0.11.10",
     "rolldown": "^1.2.15",
     "semver": "^7.8.5",
     "tailwindcss": "^4.3.3",
@@ -96,8 +103,10 @@
   "devDependencies": {
     "@codingame/esbuild-import-meta-url-plugin": "^1.0.3",
     "@tagged-jsx/prettier-plugin": "^1.2.0",
+    "@types/babel__core": "^7.20.5",
     "@types/semver": "^7.8.0",
     "@types/vscode": "^1.102.0",
+    "esbuild": "^0.28.2",
     "prettier": "^3.9.10",
     "typescript": "^5.6.0",
     "vite": "^6.0.0"

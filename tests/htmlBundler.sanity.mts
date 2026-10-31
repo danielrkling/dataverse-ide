@@ -20,6 +20,7 @@ const textFiles: Record<string, string> = {
     <link rel="stylesheet" href="css/app.css" media="screen">
     <link rel="icon" href="img/logo.svg">
     <script src="js/app.js" defer></script>
+    <script src="js/vendor.js"></script>
     <script src="https://cdn.example.com/remote.js"></script>
     <style>.inline { background: url("./img/logo.svg"); }</style>
   </head>
@@ -27,9 +28,10 @@ const textFiles: Record<string, string> = {
     <img src="img/logo.svg" alt="logo">
     <img src="img/photo.png" srcset="img/photo.png 1x, img/photo@2x.png 2x">
     <img src="img/missing.png" alt="missing">
+    <img src="img/kept.png" alt="kept">
   </body>
 </html>`,
-  "css/app.css": `@import "./base.css";\nbody { background: url("../img/photo.png"); }`,
+  "css/app.css": `@import "./base.css";\n@import "./external.css";\nbody { background: url("../img/photo.png"); }\n.kept { background: url("../img/kept.png"); }`,
   "css/base.css": `.base { color: red; }`,
   "js/app.js": `console.log("</script>");`,
   "img/logo.svg": `<svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></svg>`,
@@ -50,6 +52,7 @@ const options: HtmlInlineOptions = {
   maxInlineBytes: 0,
   minify: false,
   removeComments: true,
+  external: ["**/vendor.js", "external.css", "**/kept.png"],
 };
 
 const touched: string[] = [];
@@ -105,6 +108,21 @@ assert.ok(
   result.html.includes('<style>.inline { background: url("data:image/svg+xml;base64,'),
   "inline style blocks have their url() assets inlined",
 );
+
+assert.ok(
+  result.html.includes('<script src="js/vendor.js"></script>'),
+  "external script src is preserved",
+);
+assert.ok(result.html.includes('@import "./external.css";'), "external @import is preserved");
+assert.ok(result.html.includes('url("../img/kept.png")'), "external CSS url() is preserved");
+assert.ok(result.html.includes('src="img/kept.png"'), "external img src is preserved");
+
+for (const external of ["js/vendor.js", "css/external.css", "img/kept.png"]) {
+  assert.ok(
+    !result.dependencies.includes(external),
+    `external ${external} was not read or recorded as a dependency`,
+  );
+}
 
 for (const dependency of [
   "css/app.css",

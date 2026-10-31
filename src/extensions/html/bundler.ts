@@ -37,6 +37,11 @@ export type HtmlInlineOptions = {
   maxInlineBytes: number;
   minify: boolean;
   removeComments: boolean;
+  /**
+   * Glob patterns of workspace paths or original references that should stay
+   * external (not inlined). Patterns without a slash match the file name.
+   */
+  external: string[];
 };
 
 export type HtmlBundlerInput = {
@@ -198,6 +203,116 @@ export function resolveWorkspaceReference(fromPath: string, reference: string): 
   }
 
   return resolved;
+}
+
+type ExternalMatcher = {
+  regex: RegExp;
+  basename: boolean;
+};
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeExternalPattern(pattern: string): string {
+  const normalized = pattern.trim().replaceAll("\\", "/").replace(/^\.\//, "").replace(/^\/+/, "");
+
+  if (normalized.length === 0) {
+    return "";
+  }
+
+  // "vendor/" is a convenient directory pattern.
+  return normalized.endsWith("/") ? `${normalized}**` : normalized;
+}
+
+/**
+ * Minimal glob support for external patterns:
+ *   *   matches within one path segment
+ *   **  matches across segments
+ *   ?   matches one non-slash character
+ * Patterns are case-insensitive; patterns without a slash match the file name.
+ */
+function globToRegExp(pattern: string): RegExp {
+  let source = "^";
+
+  for (let index = 0; index < pattern.length; index++) {
+    const character = pattern[index];
+
+    if (character === "*") {
+      if (pattern[index + 1] === "*") {
+        index++;
+
+        if (pattern[index + 1] === "/") {
+          index++;
+          source += "(?:.*/)?";
+        } else {
+          source += ".*";
+        }
+      } else {
+        source += "[^/]*";
+      }
+
+      continue;
+    }
+
+    if (character === "?") {
+      source += "[^/]";
+      continue;
+    }
+
+    source += escapeRegExp(character);
+  }
+
+  return new RegExp(`${source}$`, "i");
+}
+
+function createExternalMatchers(patterns: string[]): ExternalMatcher[] {
+  const matchers: ExternalMatcher[] = [];
+
+  for (const pattern of patterns) {
+    const normalized = normalizeExternalPattern(pattern);
+
+    if (normalized.length === 0) {
+      continue;
+    }
+
+    matchers.push({
+      regex: globToRegExp(normalized),
+      basename: !normalized.includes("/"),
+    });
+  }
+
+  return matchers;
+}
+
+function matchesExternal(
+  matchers: ExternalMatcher[],
+  reference: string,
+  resolved: string,
+): boolean {
+  if (matchers.length === 0) {
+    return false;
+  }
+
+  const referencePath = reference.trim().replaceAll("\\", "/").replace(/^\.\//, "");
+  const referenceWithoutQuery = referencePath.split(/[?#]/, 1)[0] ?? referencePath;
+  const basename = resolved.split("/").pop() ?? resolved;
+  const referenceBasename = referenceWithoutQuery.split("/").pop() ?? referenceWithoutQuery;
+
+  for (const matcher of matchers) {
+    if (matcher.regex.test(resolved) || matcher.regex.test(referencePath)) {
+      return true;
+    }
+
+    if (
+      matcher.basename &&
+      (matcher.regex.test(basename) || matcher.regex.test(referenceBasename))
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function isElementNode(node: ChildNode): node is Element {
@@ -394,6 +509,11 @@ export async function bundleHtml(input: HtmlBundlerInput): Promise<HtmlBundlerRe
   const dependencies = new Set<string>();
   const warnings: string[] = [];
 
+  const externalMatchers = createExternalMatchers(options.external);
+
+  const isExternal = (reference: string, resolved: string): boolean =>
+    matchesExternal(externalMatchers, reference, resolved);
+
   const addDependency = (path: string): void => {
     dependencies.add(path);
     input.onDependency?.(path);
@@ -480,6 +600,10 @@ export async function bundleHtml(input: HtmlBundlerInput): Promise<HtmlBundlerRe
       return false;
     }
 
+    if (isExternal(value, resolved)) {
+      return false;
+    }
+
     if (kinds != null) {
       const extension = extensionOf(resolved);
 
@@ -526,6 +650,10 @@ export async function bundleHtml(input: HtmlBundlerInput): Promise<HtmlBundlerRe
       const resolved = resolveWorkspaceReference(fromPath, entry.url);
 
       if (resolved == null) {
+        continue;
+      }
+
+      if (isExternal(entry.url, resolved)) {
         continue;
       }
 
@@ -590,6 +718,11 @@ export async function bundleHtml(input: HtmlBundlerInput): Promise<HtmlBundlerRe
         continue;
       }
 
+      if (isExternal(specifier, resolved)) {
+        withImports += importText;
+        continue;
+      }
+
       if (stack.has(resolved)) {
         warnings.push(`@import cycle detected at "${resolved}" (in "${cssPath}"); skipping.`);
 
@@ -635,7 +768,7 @@ export async function bundleHtml(input: HtmlBundlerInput): Promise<HtmlBundlerRe
 
       const resolved = resolveWorkspaceReference(cssPath, specifier);
 
-      if (resolved == null) {
+      if (resolved == null || isExternal(specifier, resolved)) {
         result += urlText;
         continue;
       }
@@ -663,7 +796,7 @@ export async function bundleHtml(input: HtmlBundlerInput): Promise<HtmlBundlerRe
 
     const resolved = resolveWorkspaceReference(input.path, source);
 
-    if (resolved == null) {
+    if (resolved == null || isExternal(source, resolved)) {
       return;
     }
 
@@ -725,6 +858,10 @@ export async function bundleHtml(input: HtmlBundlerInput): Promise<HtmlBundlerRe
       if (resolved == null) {
         warnings.push(`Stylesheet "${href}" escapes the workspace; leaving it unchanged.`);
 
+        return;
+      }
+
+      if (isExternal(href, resolved)) {
         return;
       }
 
