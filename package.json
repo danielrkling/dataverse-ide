@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "serve:dataverse": "node tools/serve-dataverse-like.mjs",
     "postinstall": "node scripts/unify-rolldown.cjs"
   },
   "dependencies": {
@@ -73,19 +74,23 @@
     "@codingame/monaco-vscode-yaml-default-extension": "^38.0.4",
     "@rolldown/binding-wasm32-wasi": "^1.2.15",
     "@rolldown/browser": "^1.2.15",
+    "@rollup/browser": "^4.67.2",
     "@solidjs/compiler-wasm32-wasi": "^2.0.0-rc.19",
     "@tagged-jsx/parse": "^1.4.0",
     "@tagged-jsx/transform": "^2.0.0",
     "@tailwindcss/browser": "^4.3.3",
     "@types/wicg-file-system-access": "^2023.10.7",
+    "@valibot/to-json-schema": "^1.8.0",
     "almostnode": "^0.2.14",
     "buffer": "^6.0.3",
     "esbuild-wasm": "^0.25.12",
     "isomorphic-git": "^1.44.4",
     "monaco-editor": "npm:@codingame/monaco-vscode-editor-api@^38.0.4",
+    "parse5": "^8.0.1",
     "rolldown": "^1.2.15",
     "semver": "^7.8.5",
     "tailwindcss": "^4.3.3",
+    "valibot": "^1.5.0",
     "vscode": "npm:@codingame/monaco-vscode-extension-api@^38.0.4"
   },
   "devDependencies": {

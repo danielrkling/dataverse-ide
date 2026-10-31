@@ -1,9 +1,6 @@
 import type * as vscodeType from "vscode";
 
-import {
-  EsbuildBuildRunner,
-  type BuildOutputFile,
-} from "./buildRunner.js";
+import { EsbuildBuildRunner, type BuildOutputFile } from "./buildRunner.js";
 
 import { contributeExtensionManifest } from "../api.js";
 
@@ -45,34 +42,45 @@ function getAutoStartWatchSetting(vscode: typeof vscodeType): boolean {
     .get<boolean>("autoStartWatch", false);
 }
 
+function outputPathSegments(outputPath: string): string[] {
+  const normalized = outputPath.replaceAll("\\", "/");
+
+  /*
+   * esbuild is called with outdir "out"; keep everything after it so source
+   * maps, legal-comment files, CSS output, and code-split chunks all land
+   * beside the JavaScript instead of overwriting each other.
+   */
+  const relative = normalized.startsWith("out/")
+    ? normalized.slice("out/".length)
+    : (normalized.split("/").pop() ?? normalized);
+
+  return relative
+    .split("/")
+    .filter((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
+
 async function writeOutputs(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
   outDir: string,
-  entryPath: string,
   outputs: BuildOutputFile[],
 ): Promise<vscodeType.Uri[]> {
   const written: vscodeType.Uri[] = [];
 
   for (const output of outputs) {
-    const baseName =
-      entryPath
-        .split("/")
-        .pop()
-        ?.replace(/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i, "") ?? "bundle";
+    const segments = outputPathSegments(output.path);
 
-    const suffix = output.path.endsWith(".css") ? ".css" : ".js";
+    if (segments.length === 0) {
+      continue;
+    }
 
-    const outFile = vscode.Uri.joinPath(rootUri, outDir, `${baseName}${suffix}`);
+    const outFile = vscode.Uri.joinPath(rootUri, outDir, ...segments);
 
-    const parent = vscode.Uri.joinPath(rootUri, outDir);
+    const parent = vscode.Uri.joinPath(rootUri, outDir, ...segments.slice(0, -1));
 
     await vscode.workspace.fs.createDirectory(parent);
 
-    await vscode.workspace.fs.writeFile(
-      outFile,
-      new TextEncoder().encode(output.text),
-    );
+    await vscode.workspace.fs.writeFile(outFile, new TextEncoder().encode(output.text));
 
     written.push(outFile);
   }
@@ -205,11 +213,7 @@ export default {
       },
     });
 
-    const runner = new EsbuildBuildRunner(
-      vscode,
-      context.workspaceRootUri,
-      outputChannel,
-    );
+    const runner = new EsbuildBuildRunner(vscode, context.workspaceRootUri, outputChannel);
 
     outputChannel.appendLine(
       "[esbuild] extension activated (main-thread compiler, direct workspace filesystem reads).",
@@ -239,9 +243,7 @@ export default {
         {
           label: "$(zap) Build configured entry",
           run: () => {
-            void vscode.commands.executeCommand(
-              "dataverseIde.esbuild.buildConfigured",
-            );
+            void vscode.commands.executeCommand("dataverseIde.esbuild.buildConfigured");
           },
         },
       ],
@@ -259,18 +261,13 @@ export default {
 
     setWatchRuntimeEnabled(getAutoStartWatchSetting(vscode));
 
-    const watchSettingListener = vscode.workspace.onDidChangeConfiguration(
-      (event) => {
-        if (
-          event.affectsConfiguration(
-            "dataverseIde.esbuild.autoStartWatch",
-            context.workspaceRootUri,
-          )
-        ) {
-          void setWatchEnabled(getAutoStartWatchSetting(vscode));
-        }
-      },
-    );
+    const watchSettingListener = vscode.workspace.onDidChangeConfiguration((event) => {
+      if (
+        event.affectsConfiguration("dataverseIde.esbuild.autoStartWatch", context.workspaceRootUri)
+      ) {
+        void setWatchEnabled(getAutoStartWatchSetting(vscode));
+      }
+    });
 
     async function runBuild(
       requestedEntryPath: string,
@@ -280,9 +277,7 @@ export default {
     ): Promise<boolean> {
       const started = Date.now();
 
-      const entryPath = requestedEntryPath
-        .replaceAll("\\", "/")
-        .replace(/^(?:\.{1,2}\/)+/, "");
+      const entryPath = requestedEntryPath.replaceAll("\\", "/").replace(/^(?:\.{1,2}\/)+/, "");
 
       try {
         await reloadConfigFromDisk();
@@ -302,13 +297,7 @@ export default {
          * early so users receive a useful configuration error rather than
          * a lower-level esbuild resolution error.
          */
-        if (
-          !(await workspaceFileExists(
-            vscode,
-            context.workspaceRootUri,
-            entryPath,
-          ))
-        ) {
+        if (!(await workspaceFileExists(vscode, context.workspaceRootUri, entryPath))) {
           throw new Error(
             `Entry "${entryPath}" was not found in the workspace. ` +
               "Check the entry setting in esbuild.config.json.",
@@ -318,12 +307,35 @@ export default {
         const response = await runner.build({
           entry: entryPath,
           format: currentConfig.format,
+          platform: currentConfig.platform,
+          charset: currentConfig.charset,
+          globalName: currentConfig.globalName,
           minify: currentConfig.minify,
           sourcemap: currentConfig.sourcemap,
+          sourceRoot: currentConfig.sourceRoot,
+          sourcesContent: currentConfig.sourcesContent,
           target: currentConfig.target,
+          treeShaking: currentConfig.treeShaking,
+          keepNames: currentConfig.keepNames,
+          legalComments: currentConfig.legalComments,
+          lineLimit: currentConfig.lineLimit,
+          drop: currentConfig.drop,
+          banner: currentConfig.banner,
+          footer: currentConfig.footer,
+          pure: currentConfig.pure,
+          jsx: currentConfig.jsx,
+          jsxFactory: currentConfig.jsxFactory,
+          jsxFragment: currentConfig.jsxFragment,
+          jsxImportSource: currentConfig.jsxImportSource,
+          jsxDev: currentConfig.jsxDev,
+          jsxSideEffects: currentConfig.jsxSideEffects,
           bundle: currentConfig.bundle,
+          splitting: currentConfig.splitting,
           external: currentConfig.external,
           define: currentConfig.define,
+          entryNames: currentConfig.entryNames,
+          chunkNames: currentConfig.chunkNames,
+          outExtension: currentConfig.outExtension,
           taggedJsx: currentConfig.taggedJsx,
         });
 
@@ -355,8 +367,7 @@ export default {
         const writtenUris = await writeOutputs(
           vscode,
           context.workspaceRootUri,
-          currentConfig.outDir,
-          entryPath,
+          currentConfig.outdir,
           response.outputs,
         );
 
@@ -364,9 +375,7 @@ export default {
 
         const summary =
           `Built ${entryPath} in ${elapsed}ms → ` +
-          writtenUris
-            .map((uri) => vscode.workspace.asRelativePath(uri, false))
-            .join(", ");
+          writtenUris.map((uri) => vscode.workspace.asRelativePath(uri, false)).join(", ");
 
         outputChannel.appendLine(`[esbuild] ${summary}`);
 
@@ -405,10 +414,9 @@ export default {
       }
 
       watcher = new EsbuildWatcher(vscode, context.workspaceRootUri, {
-        outDir: () => currentConfig.outDir,
-        entry: () => currentConfig.entry,
-        configPath: () =>
-          configRelativePathFor(vscode, context.workspaceRootUri),
+        outDir: () => currentConfig.outdir,
+        entry: () => currentConfig.entryPoints[0],
+        configPath: () => configRelativePathFor(vscode, context.workspaceRootUri),
         build: async (entry) => {
           await runBuild(entry, {
             silent: true,
@@ -433,7 +441,7 @@ export default {
          * Initial watch build ensures output exists even before the first
          * saved editor change.
          */
-        void runBuild(currentConfig.entry, {
+        void runBuild(currentConfig.entryPoints[0], {
           silent: true,
         });
       } else {
@@ -467,9 +475,7 @@ export default {
           }
 
           if (activeEditor.document.uri.scheme !== "file") {
-            await vscode.window.showWarningMessage(
-              "[esbuild] Only workspace files can be built.",
-            );
+            await vscode.window.showWarningMessage("[esbuild] Only workspace files can be built.");
 
             return;
           }
@@ -498,9 +504,8 @@ export default {
       () => setWatchEnabled(true),
     );
 
-    const stopWatchCommand = vscode.commands.registerCommand(
-      "dataverseIde.esbuild.stopWatch",
-      () => setWatchEnabled(false),
+    const stopWatchCommand = vscode.commands.registerCommand("dataverseIde.esbuild.stopWatch", () =>
+      setWatchEnabled(false),
     );
 
     const toggleWatchCommand = vscode.commands.registerCommand(
@@ -511,14 +516,11 @@ export default {
     const buildConfiguredEntryCommand = vscode.commands.registerCommand(
       "dataverseIde.esbuild.buildConfigured",
       async () => {
-        const { config } = await readEsbuildConfig(
-          vscode,
-          context.workspaceRootUri,
-        );
+        const { config } = await readEsbuildConfig(vscode, context.workspaceRootUri);
 
         currentConfig = config;
 
-        await runBuild(config.entry);
+        await runBuild(config.entryPoints[0]);
       },
     );
 
@@ -542,11 +544,7 @@ export default {
         }
 
         const items = uris
-          .map((uri) =>
-            vscode.workspace
-              .asRelativePath(uri, false)
-              .replaceAll("\\", "/"),
-          )
+          .map((uri) => vscode.workspace.asRelativePath(uri, false).replaceAll("\\", "/"))
           .sort((left, right) => left.localeCompare(right));
 
         if (lastWorkspaceEntry != null) {
@@ -621,13 +619,9 @@ export default {
           return;
         }
 
-        const merged = await updateEsbuildConfig(
-          vscode,
-          context.workspaceRootUri,
-          {
-            taggedJsx: picked.value,
-          },
-        );
+        const merged = await updateEsbuildConfig(vscode, context.workspaceRootUri, {
+          taggedJsx: picked.value,
+        });
 
         currentConfig = merged;
 
@@ -649,9 +643,7 @@ export default {
       async () => {
         await reloadConfigFromDisk();
 
-        await vscode.window.showInformationMessage(
-          "esbuild configuration reloaded.",
-        );
+        await vscode.window.showInformationMessage("esbuild configuration reloaded.");
       },
     );
 

@@ -46,6 +46,7 @@ import outputLinkComputerWorkerUrl from "@codingame/monaco-vscode-output-service
 import outputLinkDetectionWorkerUrl from "@codingame/monaco-vscode-output-service-override/worker?worker&url";
 
 import { activateExtensions } from "./extensions/registry.js";
+import { registerConfigJsonSchemas } from "./extensions/shared/configJsonSchemas.js";
 
 import { workspaceDirectoryHandle } from "./workspace/fsProvider.js";
 
@@ -71,9 +72,7 @@ const workerUrls: Record<string, string> = {
  * the parent document cannot be reliably imported in that iframe, so keep
  * its entrypoint as the real same-origin deployed URL.
  */
-const DIRECT_WORKER_LABELS = new Set([
-  "extensionHostWorkerMain",
-]);
+const DIRECT_WORKER_LABELS = new Set(["extensionHostWorkerMain"]);
 
 const workerBootstrapUrls = new Map<string, string>();
 
@@ -89,9 +88,7 @@ function preloadWorkerBlobs(): void {
 
     workerBootstrapUrls.set(label, blobUrl);
 
-    console.info(
-      `[Dataverse IDE] Preloaded worker bootstrap "${label}" from blob URL.`,
-    );
+    console.info(`[Dataverse IDE] Preloaded worker bootstrap "${label}" from blob URL.`);
   }
 }
 
@@ -166,12 +163,9 @@ async function verifyWorker(workerName: string, workerUrl: string): Promise<void
 window.MonacoEnvironment = {
   getWorkerUrl(_workerId, label) {
     const resolvedUrl = resolveConfiguredWorkerUrl(label);
-  
-    console.info(
-      `[Dataverse IDE] Monaco requested worker URL "${label}":`,
-      resolvedUrl,
-    );
-  
+
+    console.info(`[Dataverse IDE] Monaco requested worker URL "${label}":`, resolvedUrl);
+
     return resolvedUrl;
   },
 
@@ -183,17 +177,14 @@ window.MonacoEnvironment = {
 
   getWorker(_workerId, label) {
     const resolvedUrl = resolveConfiguredWorkerUrl(label);
-  
-    console.info(
-      `[Dataverse IDE] Monaco requested worker "${label}":`,
-      resolvedUrl,
-    );
-  
+
+    console.info(`[Dataverse IDE] Monaco requested worker "${label}":`, resolvedUrl);
+
     const worker = new Worker(resolvedUrl, {
       type: "module",
       name: `dataverse-ide-${label}`,
     });
-  
+
     worker.addEventListener("error", (event) => {
       console.error(`[Dataverse IDE] Worker "${label}" failed after creation.`, {
         url: resolvedUrl,
@@ -205,7 +196,7 @@ window.MonacoEnvironment = {
         event,
       });
     });
-  
+
     return worker;
   },
 };
@@ -440,6 +431,11 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
     },
   );
 
+  /*
+   * Register the generated JSON Schemas as a virtual extension contribution
+   * so the built-in JSON language features validate/complete the config files.
+   */
+  const configSchemasDisposable = registerConfigJsonSchemas();
 
   /*
    * Contribute dataverseIde.overlayDirs (which top-level workspace
@@ -464,6 +460,7 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
     "beforeunload",
     () => {
       autoSaveDisposable.dispose();
+      configSchemasDisposable.dispose();
       extensionsDisposable.dispose();
     },
     { once: true },

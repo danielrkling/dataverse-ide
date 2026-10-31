@@ -1,3 +1,5 @@
+import * as v from "valibot";
+
 import type * as vscodeType from "vscode";
 
 import {
@@ -5,6 +7,12 @@ import {
   configRelativePath,
   type ConfigPathOptions,
 } from "../shared/configPath.js";
+import {
+  parseConfig,
+  withDefault,
+  workspacePathAllowEmptySchema,
+  workspacePathSchema,
+} from "../shared/configSchema.js";
 
 /*
  * template.config.json - the source of truth for which templates are built
@@ -25,27 +33,49 @@ import {
  * dataverseIde.template.configPath extension setting.
  */
 
-const DEFAULT_CONFIG_PATH = "template.config.json";
+const CONFIG_FILE_NAME = "template.config.json";
 
 export const CONFIG_PATH_OPTIONS: ConfigPathOptions = {
   section: "dataverseIde.template",
-  defaultPath: DEFAULT_CONFIG_PATH,
+  defaultPath: CONFIG_FILE_NAME,
 };
 
-export type TemplateEntry = {
-  /** Workspace-relative template file. */
-  input: string;
-  /** Workspace-relative output path; the <outputDir>/<name> default when omitted. */
-  output?: string;
-};
+const optionalOutputPathSchema = v.pipe(
+  workspacePathAllowEmptySchema,
+  v.transform((value) => (value.length > 0 ? value : undefined)),
+);
 
-export type TemplateConfig = {
-  templates: TemplateEntry[];
-};
+/** Valibot schema for one template entry. */
+export const TEMPLATE_ENTRY_SCHEMA = v.pipe(
+  v.object({
+    /** Workspace-relative template file. */
+    input: workspacePathSchema,
+    /** Workspace-relative output path; the <outputDir>/<name> default when omitted. */
+    output: v.optional(v.fallback(optionalOutputPathSchema, undefined)),
+  }),
+  v.transform((entry) => (entry.output == null ? { input: entry.input } : entry)),
+);
 
-export const TEMPLATE_DEFAULT_CONFIG: TemplateConfig = {
-  templates: [],
-};
+/** Valibot schema for template.config.json. */
+export const TEMPLATE_CONFIG_SCHEMA = v.object({
+  templates: withDefault(
+    v.pipe(
+      /*
+       * Invalid entries are replaced by an empty marker and then dropped,
+       * matching the previous reader: one bad template must not discard the
+       * whole list.
+       */
+      v.array(v.fallback(TEMPLATE_ENTRY_SCHEMA, { input: "" })),
+      v.transform((entries) => entries.filter((entry) => entry.input.length > 0)),
+    ),
+    [],
+  ),
+});
+
+export type TemplateEntry = v.InferOutput<typeof TEMPLATE_ENTRY_SCHEMA>;
+export type TemplateConfig = v.InferOutput<typeof TEMPLATE_CONFIG_SCHEMA>;
+
+export const TEMPLATE_DEFAULT_CONFIG: TemplateConfig = v.parse(TEMPLATE_CONFIG_SCHEMA, {});
 
 export function configFilePath(vscode: typeof vscodeType, rootUri: vscodeType.Uri): vscodeType.Uri {
   return configFilePathFor(vscode, rootUri, CONFIG_PATH_OPTIONS);
@@ -65,8 +95,6 @@ export async function readTemplateConfig(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
 ): Promise<{ text: string | null; config: TemplateConfig }> {
-  const defaults = { ...TEMPLATE_DEFAULT_CONFIG, templates: [] };
-
   let text: string | null = null;
 
   try {
@@ -74,55 +102,13 @@ export async function readTemplateConfig(
 
     text = new TextDecoder().decode(bytes);
   } catch {
-    return { text: null, config: defaults };
+    return { text: null, config: { ...TEMPLATE_DEFAULT_CONFIG, templates: [] } };
   }
 
-  let parsed: Record<string, unknown>;
-
-  try {
-    parsed = JSON.parse(text) as Record<string, unknown>;
-  } catch {
-    return { text, config: defaults };
-  }
-
-  const templates: TemplateEntry[] = [];
-
-  if (Array.isArray(parsed.templates)) {
-    for (const raw of parsed.templates) {
-      if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
-        continue;
-      }
-
-      const entry: Record<string, unknown> = raw;
-
-      const input =
-        typeof entry.input === "string"
-          ? entry.input
-              .trim()
-              .replaceAll("\\", "/")
-              .replace(/^\.\//, "")
-              .replace(/^\/+/, "")
-              .replace(/\/+$/, "")
-          : "";
-
-      if (input.length === 0) {
-        continue;
-      }
-
-      const outputRaw = typeof entry.output === "string" ? (entry.output as string).trim() : "";
-
-      templates.push(
-        outputRaw.length > 0
-          ? {
-              input,
-              output: outputRaw.replaceAll("\\", "/").replace(/^\.\//, "").replace(/^\/+/, ""),
-            }
-          : { input },
-      );
-    }
-  }
-
-  return { text, config: { templates } };
+  return {
+    text,
+    config: parseConfig(text, TEMPLATE_CONFIG_SCHEMA, TEMPLATE_DEFAULT_CONFIG),
+  };
 }
 
 /*

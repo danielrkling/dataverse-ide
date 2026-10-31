@@ -1,6 +1,14 @@
+import * as v from "valibot";
+
 import type * as vscodeType from "vscode";
 
 import { configFilePathFor, type ConfigPathOptions } from "../shared/configPath.js";
+import {
+  parseConfig,
+  stringListSchema,
+  withDefault,
+  workspaceRootSchema,
+} from "../shared/configSchema.js";
 
 /*
  * dataverse.config.json - the source of truth for web resource upload
@@ -22,32 +30,53 @@ import { configFilePathFor, type ConfigPathOptions } from "../shared/configPath.
  * file: watchDebounceMs and configPath.
  */
 
-const DEFAULT_CONFIG_PATH = "dataverse.config.json";
+const CONFIG_FILE_NAME = "dataverse.config.json";
 
-const CONFIG_PATH_OPTIONS: ConfigPathOptions = {
+export const CONFIG_PATH_OPTIONS: ConfigPathOptions = {
   section: "dataverseIde.dataverse",
-  defaultPath: DEFAULT_CONFIG_PATH,
+  defaultPath: CONFIG_FILE_NAME,
 };
 
-export type DataverseConfig = {
-  prefix: string;
-  solution?: string;
-  uploadRoot: string;
-  files: string[];
-  exclude: string[];
-  publishAfterUpload: boolean;
-  apiBaseUrl?: string;
-};
+const optionalTrimmedStringSchema = v.optional(
+  v.fallback(
+    v.pipe(
+      v.string(),
+      v.transform((value) => {
+        const trimmed = value.trim();
 
-export const DATAVERSE_DEFAULT_CONFIG: DataverseConfig = {
-  prefix: "",
-  solution: undefined,
-  uploadRoot: "",
-  files: ["**/*"],
-  exclude: [],
-  publishAfterUpload: true,
-  apiBaseUrl: undefined,
-};
+        return trimmed.length > 0 ? trimmed : undefined;
+      }),
+    ),
+    undefined,
+  ),
+);
+
+/** Valibot schema for dataverse.config.json. */
+export const DATAVERSE_CONFIG_SCHEMA = v.object({
+  prefix: withDefault(
+    v.pipe(
+      v.string(),
+      v.transform((value) => value.trim().replace(/\/+$/, "")),
+    ),
+    "",
+  ),
+  solution: optionalTrimmedStringSchema,
+  uploadRoot: withDefault(workspaceRootSchema, ""),
+  files: withDefault(
+    v.pipe(
+      stringListSchema,
+      v.check((files) => files.length > 0, "Expected at least one file pattern."),
+    ),
+    ["**/*"],
+  ),
+  exclude: withDefault(stringListSchema, []),
+  publishAfterUpload: withDefault(v.boolean(), true),
+  apiBaseUrl: optionalTrimmedStringSchema,
+});
+
+export type DataverseConfig = v.InferOutput<typeof DATAVERSE_CONFIG_SCHEMA>;
+
+export const DATAVERSE_DEFAULT_CONFIG: DataverseConfig = v.parse(DATAVERSE_CONFIG_SCHEMA, {});
 
 /*
  * Resolve the config file location against the dataverseIde.dataverse.configPath
@@ -67,8 +96,6 @@ export async function readDataverseConfig(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
 ): Promise<{ text: string | null; config: DataverseConfig }> {
-  const defaults = { ...DATAVERSE_DEFAULT_CONFIG };
-
   let text: string | null = null;
 
   try {
@@ -76,64 +103,13 @@ export async function readDataverseConfig(
 
     text = new TextDecoder().decode(bytes);
   } catch {
-    return { text: null, config: defaults };
+    return { text: null, config: { ...DATAVERSE_DEFAULT_CONFIG } };
   }
 
-  let parsed: Record<string, unknown>;
-
-  try {
-    parsed = JSON.parse(text) as Record<string, unknown>;
-  } catch {
-    return { text, config: defaults };
-  }
-
-  const config: DataverseConfig = { ...defaults };
-
-  if (typeof parsed.prefix === "string") {
-    config.prefix = parsed.prefix.trim().replace(/\/+$/, "");
-  }
-
-  if (typeof parsed.uploadRoot === "string") {
-    config.uploadRoot = parsed.uploadRoot
-      .trim()
-      .replaceAll("\\", "/")
-      .replace(/^\/+/, "")
-      .replace(/\/+$/, "");
-  }
-
-  if (typeof parsed.solution === "string") {
-    const solution = parsed.solution.trim();
-
-    config.solution = solution.length > 0 ? solution : undefined;
-  }
-
-  if (Array.isArray(parsed.files)) {
-    const files = (parsed.files as unknown[]).filter(
-      (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
-    );
-
-    if (files.length > 0) {
-      config.files = files.map((entry) => entry.trim());
-    }
-  }
-
-  if (Array.isArray(parsed.exclude)) {
-    config.exclude = (parsed.exclude as unknown[]).filter(
-      (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
-    );
-  }
-
-  if (typeof parsed.publishAfterUpload === "boolean") {
-    config.publishAfterUpload = parsed.publishAfterUpload;
-  }
-
-  if (typeof parsed.apiBaseUrl === "string") {
-    const apiBaseUrl = parsed.apiBaseUrl.trim();
-
-    config.apiBaseUrl = apiBaseUrl.length > 0 ? apiBaseUrl : undefined;
-  }
-
-  return { text, config };
+  return {
+    text,
+    config: parseConfig(text, DATAVERSE_CONFIG_SCHEMA, DATAVERSE_DEFAULT_CONFIG),
+  };
 }
 
 /*

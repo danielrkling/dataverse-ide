@@ -34,13 +34,39 @@ export type BuildRequestInput = {
   virtualFiles?: Record<string, string>;
 
   format?: "esm" | "iife" | "cjs";
+  platform?: "browser" | "node" | "neutral";
+  charset?: "ascii" | "utf8";
+  globalName?: string;
+
   minify?: boolean;
-  sourcemap?: boolean;
-  target?: string;
+  sourcemap?: boolean | "linked" | "inline" | "external" | "both";
+  sourceRoot?: string;
+  sourcesContent?: boolean;
+
+  target?: string | string[];
+  treeShaking?: boolean;
+  keepNames?: boolean;
+  legalComments?: "none" | "inline" | "eof" | "linked" | "external";
+  lineLimit?: number;
+  drop?: ("console" | "debugger")[];
+  banner?: { js?: string; css?: string };
+  footer?: { js?: string; css?: string };
+  pure?: string[];
+
+  jsx?: "transform" | "preserve" | "automatic";
+  jsxFactory?: string;
+  jsxFragment?: string;
+  jsxImportSource?: string;
+  jsxDev?: boolean;
+  jsxSideEffects?: boolean;
+
   bundle?: boolean;
+  splitting?: boolean;
   external?: string[];
   define?: Record<string, string>;
   entryNames?: string;
+  chunkNames?: string;
+  outExtension?: Record<string, string>;
 
   /*
    * Tagged JSX transform applied to workspace source files before esbuild
@@ -69,10 +95,7 @@ export type TransformRequestInput = {
  * Keeping IDs out of the public response lets the Rolldown runner return
  * its own synthetic failures without fabricating an esbuild request ID.
  */
-export type BuildResponseOk = Omit<
-  Extract<BuildResponse, { ok: true }>,
-  "id"
-> & {
+export type BuildResponseOk = Omit<Extract<BuildResponse, { ok: true }>, "id"> & {
   /*
    * Rolldown's lazy worker protocol uses this. Main-thread esbuild never
    * returns it because it resolves workspace files directly.
@@ -80,10 +103,7 @@ export type BuildResponseOk = Omit<
   needFiles?: string[];
 };
 
-export type BuildResponseErr = Omit<
-  Extract<BuildResponse, { ok: false }>,
-  "id"
->;
+export type BuildResponseErr = Omit<Extract<BuildResponse, { ok: false }>, "id">;
 
 export type BuildRunnerResponse = BuildResponseOk | BuildResponseErr;
 
@@ -94,13 +114,11 @@ export class EsbuildBuildRunner {
 
   private initialized = false;
 
-
   constructor(
     private readonly vscode: typeof vscodeType,
     private readonly workspaceRootUri: vscodeType.Uri,
     private readonly outputChannel: vscodeType.OutputChannel,
-  ) {
-  }
+  ) {}
 
   async build(input: BuildRequestInput): Promise<BuildRunnerResponse> {
     const id = this.nextRequestId++;
@@ -122,21 +140,14 @@ export class EsbuildBuildRunner {
          * - caches duplicate reads during this build
          * - cannot return stale content after a workspace file changes
          */
-        workspace: createWorkspaceReader(
-          this.vscode,
-          this.workspaceRootUri,
-        ),
+        workspace: createWorkspaceReader(this.vscode, this.workspaceRootUri),
 
         /*
          * `files` and `absentPaths` are intentionally ignored by compiler.ts.
          * Destructure them out before passing the direct-filesystem request.
          */
         ...(() => {
-          const {
-            files: _files,
-            absentPaths: _absentPaths,
-            ...mainThreadInput
-          } = input;
+          const { files: _files, absentPaths: _absentPaths, ...mainThreadInput } = input;
 
           return mainThreadInput;
         })(),

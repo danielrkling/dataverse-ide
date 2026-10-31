@@ -1,21 +1,50 @@
+import * as v from "valibot";
+
 import type * as vscodeType from "vscode";
 
 /*
  * esbuild.config.json - the source of truth for workspace builds.
  *
- * Same file shape as dataverse-dev-tools so project folders work in both
- * tools. When the file is absent, these defaults apply:
+ * Option names and types follow the esbuild build API
+ * (https://esbuild.github.io/api/). Options that need a real filesystem, a
+ * native binary, or esbuild's own tsconfig/package resolver are intentionally
+ * omitted: this build runs esbuild-wasm against the workspace VFS and the
+ * shared resolver owns import resolution.
+ *
+ * The legacy "entry" (string) and "outDir" (string) keys are still read and
+ * are migrated to "entryPoints" / "outdir" the next time the file is written.
+ *
+ * When the file is absent, these defaults apply:
  *
  *   {
- *     "entry": "src/index.ts",
- *     "outDir": "dist",
+ *     "entryPoints": ["src/app.ts"],
+ *     "outdir": "dist",
+ *     "entryNames": undefined,
+ *     "chunkNames": undefined,
+ *     "outExtension": {},
  *     "format": "esm",
+ *     "platform": "browser",
+ *     "charset": "ascii",
  *     "minify": false,
  *     "sourcemap": false,
- *     "target": "es2022",
+ *     "target": "esnext",
+ *     "treeShaking": true,
+ *     "keepNames": false,
+ *     "legalComments": "eof",
+ *     "lineLimit": 0,
+ *     "jsx": "transform",
+ *     "jsxDev": false,
+ *     "jsxSideEffects": false,
+ *     "sourcesContent": true,
+ *     "drop": [],
+ *     "banner": {},
+ *     "footer": {},
+ *     "pure": [],
  *     "bundle": true,
+ *     "splitting": false,
  *     "external": [],
- *     "define": {}
+ *     "define": {},
+ *     "taggedJsx": "off"
  *   }
  */
 
@@ -24,6 +53,20 @@ import {
   configRelativePath,
   type ConfigPathOptions,
 } from "../shared/configPath.js";
+import {
+  BUILD_FORMATS,
+  SOURCEMAP_MODES,
+  buildTargetSchema,
+  defineSchema,
+  optionalStringSchema,
+  parseConfig,
+  stringListSchema,
+  stringRecordSchema,
+  withDefault,
+  workspacePathListSchema,
+  workspacePathSchema,
+  type SourcemapOption,
+} from "../shared/configSchema.js";
 
 const CONFIG_FILE_NAME = "esbuild.config.json";
 
@@ -32,43 +75,65 @@ export const CONFIG_PATH_OPTIONS: ConfigPathOptions = {
   defaultPath: CONFIG_FILE_NAME,
 };
 
-export type EsbuildConfig = {
-  entry: string;
-  outDir: string;
-  format: "esm" | "iife" | "cjs";
-  minify: boolean;
-  sourcemap: boolean;
-  target: string;
-  bundle: boolean;
-  external: string[];
-  define: Record<string, string>;
+const PLATFORMS = ["browser", "node", "neutral"] as const;
+const CHARSETS = ["ascii", "utf8"] as const;
+const LEGAL_COMMENTS = ["none", "inline", "eof", "linked", "external"] as const;
+const JSX_MODES = ["transform", "preserve", "automatic"] as const;
+const DROP_ITEMS = ["console", "debugger"] as const;
+const TAGGED_JSX_TRANSFORMS = ["off", "toJsx", "toTagged"] as const;
 
-  /*
-   * Tagged JSX transform applied to workspace source files before the
-   * esbuild loaders see them (@tagged-jsx/transform):
-   *   - "off"      no conversion (default)
-   *   - "toJsx"    tagged templates (html`...`) -> JSX source, transpiled normally
-   *   - "toTagged" JSX source -> tagged templates (html`...`), so you can write
-   *                JSX and ship the no-build-step runtime
-   */
-  taggedJsx: "off" | "toJsx" | "toTagged";
-};
+const outputTextSchema = v.object({
+  js: optionalStringSchema,
+  css: optionalStringSchema,
+});
 
-export const ESBUILD_DEFAULT_CONFIG: EsbuildConfig = {
-  entry: "src/app.ts",
-  outDir: "dist",
-  format: "esm",
-  minify: false,
-  sourcemap: false,
-  target: "esnext",
-  bundle: true,
-  external: [],
-  define: {},
-  taggedJsx: "off",
-};
+/** Valibot schema for esbuild.config.json. */
+export const ESBUILD_CONFIG_SCHEMA = v.object({
+  entryPoints: withDefault(workspacePathListSchema, ["src/app.ts"]),
+  outdir: withDefault(workspacePathSchema, "dist"),
+  entryNames: optionalStringSchema,
+  chunkNames: optionalStringSchema,
+  outExtension: withDefault(stringRecordSchema, {}),
 
-const FORMATS = new Set(["esm", "iife", "cjs"]);
-const TAGGED_JSX_TRANSFORMS = new Set(["off", "toJsx", "toTagged"]);
+  format: withDefault(v.picklist(BUILD_FORMATS), "esm"),
+  platform: withDefault(v.picklist(PLATFORMS), "browser"),
+  charset: withDefault(v.picklist(CHARSETS), "ascii"),
+  globalName: optionalStringSchema,
+
+  minify: withDefault(v.boolean(), false),
+  sourcemap: withDefault(v.union([v.boolean(), v.picklist(SOURCEMAP_MODES)]), false),
+  sourceRoot: optionalStringSchema,
+  sourcesContent: withDefault(v.boolean(), true),
+
+  target: withDefault(buildTargetSchema, "esnext"),
+  treeShaking: withDefault(v.boolean(), true),
+  keepNames: withDefault(v.boolean(), false),
+  legalComments: withDefault(v.picklist(LEGAL_COMMENTS), "eof"),
+  lineLimit: withDefault(v.pipe(v.number(), v.integer(), v.minValue(0)), 0),
+  drop: withDefault(v.array(v.picklist(DROP_ITEMS)), []),
+  banner: withDefault(outputTextSchema, {}),
+  footer: withDefault(outputTextSchema, {}),
+  pure: withDefault(stringListSchema, []),
+
+  jsx: withDefault(v.picklist(JSX_MODES), "transform"),
+  jsxFactory: optionalStringSchema,
+  jsxFragment: optionalStringSchema,
+  jsxImportSource: optionalStringSchema,
+  jsxDev: withDefault(v.boolean(), false),
+  jsxSideEffects: withDefault(v.boolean(), false),
+
+  bundle: withDefault(v.boolean(), true),
+  splitting: withDefault(v.boolean(), false),
+  external: withDefault(stringListSchema, []),
+  define: withDefault(defineSchema, {}),
+  taggedJsx: withDefault(v.picklist(TAGGED_JSX_TRANSFORMS), "off"),
+});
+
+export type EsbuildConfig = v.InferOutput<typeof ESBUILD_CONFIG_SCHEMA>;
+
+export const ESBUILD_DEFAULT_CONFIG: EsbuildConfig = v.parse(ESBUILD_CONFIG_SCHEMA, {});
+
+export type EsbuildSourcemapOption = SourcemapOption;
 
 export function configFilePath(vscode: typeof vscodeType, rootUri: vscodeType.Uri): vscodeType.Uri {
   return configFilePathFor(vscode, rootUri, CONFIG_PATH_OPTIONS);
@@ -77,6 +142,21 @@ export function configFilePath(vscode: typeof vscodeType, rootUri: vscodeType.Ur
 /** Workspace-relative config path (honors dataverseIde.esbuild.configPath). */
 export function configRelativePathFor(vscode: typeof vscodeType, rootUri: vscodeType.Uri): string {
   return configRelativePath(vscode, rootUri, CONFIG_PATH_OPTIONS);
+}
+
+/** Map the legacy "entry"/"outDir" keys onto their esbuild API names. */
+function normalizeLegacyKeys(value: unknown): unknown {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+
+  const record = value as Record<string, unknown>;
+
+  return {
+    ...record,
+    entryPoints: record.entryPoints ?? record.entry,
+    outdir: record.outdir ?? record.outDir,
+  };
 }
 
 /*
@@ -89,8 +169,6 @@ export async function readEsbuildConfig(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
 ): Promise<{ text: string | null; config: EsbuildConfig }> {
-  const defaults = { ...ESBUILD_DEFAULT_CONFIG };
-
   let text: string | null = null;
 
   try {
@@ -98,92 +176,13 @@ export async function readEsbuildConfig(
 
     text = new TextDecoder().decode(bytes);
   } catch {
-    return { text: null, config: defaults };
+    return { text: null, config: { ...ESBUILD_DEFAULT_CONFIG } };
   }
 
-  let parsed: Record<string, unknown>;
-
-  try {
-    parsed = JSON.parse(text) as Record<string, unknown>;
-  } catch {
-    return { text, config: defaults };
-  }
-
-  const config: EsbuildConfig = { ...defaults };
-
-  if (typeof parsed.entry === "string" && parsed.entry.trim().length > 0) {
-    /*
-     * Canonicalize: workspace paths are stored slash-normalized without a
-     * leading './' (the collected files map keys carry no './' prefix), so
-     * "entry": "./src/index.ts" must become "src/index.ts" or lookup fails.
-     */
-    config.entry = parsed.entry
-      .trim()
-      .replaceAll("\\", "/")
-      .replace(/^(?:\.{1,2}\/)+/, "");
-  }
-
-  if (typeof parsed.outDir === "string" && parsed.outDir.trim().length > 0) {
-    config.outDir = parsed.outDir.trim().replaceAll("\\", "/");
-  }
-
-  if (typeof parsed.format === "string" && FORMATS.has(parsed.format)) {
-    config.format = parsed.format as EsbuildConfig["format"];
-  }
-
-  if (typeof parsed.taggedJsx === "string" && TAGGED_JSX_TRANSFORMS.has(parsed.taggedJsx)) {
-    config.taggedJsx = parsed.taggedJsx as EsbuildConfig["taggedJsx"];
-  }
-
-  if (typeof parsed.minify === "boolean") {
-    config.minify = parsed.minify;
-  }
-
-  if (typeof parsed.sourcemap === "boolean") {
-    config.sourcemap = parsed.sourcemap;
-  }
-
-  if (typeof parsed.target === "string" && parsed.target.trim().length > 0) {
-    config.target = parsed.target.trim();
-  }
-
-  if (typeof parsed.bundle === "boolean") {
-    config.bundle = parsed.bundle;
-  }
-
-  if (Array.isArray(parsed.external)) {
-    const externals = parsed.external.filter(
-      (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
-    );
-
-    config.external = externals.map((entry) => entry.trim());
-  }
-
-  if (parsed.define != null && typeof parsed.define === "object" && !Array.isArray(parsed.define)) {
-    const define: Record<string, string> = {};
-
-    for (const [key, value] of Object.entries(parsed.define as Record<string, unknown>)) {
-      if (typeof value === "string") {
-        define[key] = value;
-      } else if (typeof value === "number" || typeof value === "boolean") {
-        /*
-         * esbuild define values must be code snippets; serialize primitives
-         * so {"PORT": 3000} becomes PORT=3000 (number literal).
-         */
-        define[key] = JSON.stringify(value);
-      }
-    }
-
-    config.define = define;
-  }
-
-  /*
-   * A legacy "watch" key in the file is deliberately ignored (and preserved
-   * as an unknown user key when rewriting): watch is controlled by the VS
-   * Code setting dataverseIde.esbuild.autoStartWatch, not by the config file.
-   */
-
-  return { text, config };
+  return {
+    text,
+    config: parseConfig(text, ESBUILD_CONFIG_SCHEMA, ESBUILD_DEFAULT_CONFIG, normalizeLegacyKeys),
+  };
 }
 
 /*
@@ -211,17 +210,43 @@ export async function updateEsbuildConfig(
 
   /*
    * Only write the managed keys; anything else the user keeps in the file
-   * (e.g. comments-as-keys, extra tooling fields) survives untouched.
+   * (e.g. comments-as-keys, extra tooling fields) survives untouched. Legacy
+   * names are dropped so the file converges on the esbuild API shape.
    */
+  const { entry: _entry, outDir: _outDir, ...rest } = document;
+
   const nextDocument: Record<string, unknown> = {
-    ...document,
-    entry: merged.entry,
-    outDir: merged.outDir,
+    ...rest,
+    entryPoints: merged.entryPoints,
+    outdir: merged.outdir,
+    entryNames: merged.entryNames,
+    chunkNames: merged.chunkNames,
+    outExtension: merged.outExtension,
     format: merged.format,
+    platform: merged.platform,
+    charset: merged.charset,
+    globalName: merged.globalName,
     minify: merged.minify,
     sourcemap: merged.sourcemap,
+    sourceRoot: merged.sourceRoot,
+    sourcesContent: merged.sourcesContent,
     target: merged.target,
+    treeShaking: merged.treeShaking,
+    keepNames: merged.keepNames,
+    legalComments: merged.legalComments,
+    lineLimit: merged.lineLimit,
+    drop: merged.drop,
+    banner: merged.banner,
+    footer: merged.footer,
+    pure: merged.pure,
+    jsx: merged.jsx,
+    jsxFactory: merged.jsxFactory,
+    jsxFragment: merged.jsxFragment,
+    jsxImportSource: merged.jsxImportSource,
+    jsxDev: merged.jsxDev,
+    jsxSideEffects: merged.jsxSideEffects,
     bundle: merged.bundle,
+    splitting: merged.splitting,
     external: merged.external,
     define: merged.define,
     taggedJsx: merged.taggedJsx,

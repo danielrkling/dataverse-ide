@@ -291,13 +291,16 @@ export default defineConfig({
     //  - hash-free names break the bundled webWorkerExtensionHostIframe.html
     //    (relative module specifiers stop resolving)
     // The web resources don't support the `.wasm` type:
-    // inline all binary assets (onig.wasm 466KB, diff_wasm_bg.wasm 118KB,
-    // codicon.ttf 153KB) as base64 data URLs into the JS chunks instead.
+    // inline every wasm asset regardless of size (onig.wasm 466KB,
+    // diff_wasm_bg.wasm 118KB, @rollup/browser's parser wasm ~588KB), and
+    // other binary assets under 1MB (codicon.ttf 153KB) as base64 data URLs
+    // into the JS chunks instead. Returning false for larger non-wasm
+    // assets keeps tsserver's multi-MB JS out of the main chunk (a global
+    // numeric raise would inline it and produce a >100MB chunk).
     // (esbuild.wasm + the rolldown wasm + its wasi worker are force-inlined
-    // separately through the virtual modules in webResourceWasmInline;
-    // raising this limit globally would also inline tsserver's large JS
-    // assets and produce a >100MB chunk.)
-    assetsInlineLimit: 1000000,
+    // separately through the virtual modules in webResourceWasmInline.)
+    assetsInlineLimit: (filePath, content) =>
+      filePath.endsWith(".wasm") || content.length < 1000000,
   },
   worker: {
     format: "es",
@@ -324,6 +327,11 @@ export default defineConfig({
       "@rolldown/browser",
       "@rolldown/binding-wasm32-wasi",
       "@solidjs/compiler-wasm32-wasi",
+      // Rollup's browser build references its parser wasm through
+      // new URL('bindings_wasm_bg.wasm', import.meta.url); the dep optimizer
+      // would rewrite that reference, so serve it through the transform
+      // pipeline where Vite can inline the asset for Dataverse deploys.
+      "@rollup/browser",
     ],
     esbuildOptions: {
       plugins: [importMetaUrlPlugin],

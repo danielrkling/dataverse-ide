@@ -193,7 +193,7 @@ produced no output.` when the file map lacks node_modules contents (overlay-FS w
   extension's feature set):
   - `rolldown: Build Current File` / `Build Workspace…` / `Build Configured Entry` +
     Start/Stop/Toggle Watch in src/extensions/rolldown/extension.ts; settings live in
-    `rolldown.config.json` (src/extensions/rolldown/config.ts; entry, outDir, format
+    `rolldown.config.json` (src/extensions/rolldown/config.ts; entryPoints, outdir, format
     esm/iife/cjs/umd, minify, sourcemap (inline), external, define).
   - bundling core: src/extensions/rolldown/bundleCore.ts — virtual-fs JS plugin over the files map
     (entry claim in resolveId per the prototype gotcha), lazy needFiles probe rounds identical to
@@ -293,6 +293,54 @@ produced no output.` when the file map lacks node_modules contents (overlay-FS w
 - still open (carry-over from the rolled-back attempt): sourcemap chaining (solid map -> rolldown
   map) - currently not forwarded (map skipped); 1.9 support via babel-preset-solid; node-runtime
   engine does not use this path.
+
+# Rollup
+
+- [added 2026-10-30] `@rollup/browser` bundling extension with the same command surface as
+  rolldown (`src/extensions/rollup/`): Build Current File / Build Workspace… / Build Configured
+  Entry, Transform TS/JSX→JS, Minify, Start/Stop/Toggle Watch, Open/Reload config.
+  Settings live in `rollup.config.json` (entryPoints, outdir, format esm/iife/cjs/umd, minify,
+  sourcemap (inline), external, define; path via `dataverseIde.rollup.configPath`).
+- [main-thread rewrite] Rollup now runs on the main thread like the esbuild extension. The
+  worker, workspace-wide collection, node_modules manifest scan and lazy `needFiles` loop are
+  gone. `workspaceResolver.ts` reads through `vscode.workspace.fs` and resolves only files the
+  dependency graph actually reaches; a fresh cached reader is created per build.
+- `bundleCore.ts`: virtual-fs Rollup plugin over the direct reader. TypeScript/JSX lowering,
+  `define` substitution and minification reuse the main-thread `esbuild-wasm` transformer from
+  `esbuild/compiler.ts` (`transformForBundler`, initialized once per page):
+  - module transform plugin (loader by extension, ESM output, automatic JSX)
+  - `renderChunk` minify plugin, so esbuild's map chains through Rollup's sourcemap pipeline
+  - JSON modules are turned into ESM (default + identifier-safe named exports)
+  - CSS imports are collected and emitted as a single `bundle.css` asset
+- Note: the first main-thread attempt used the oxc WASI binding directly. The IDE page already
+  has a Node-like `process` polyfill (`process.versions.node`), so `@emnapi/wasi-threads`
+  selected its Node path and crashed on `worker.once is not a function`. esbuild-wasm avoids
+  that environment-detection path entirely and is already proven on the main thread.
+- No SolidJS support in rollup.config.json/bundleCore yet (deliberately deferred; the config key
+  and compiler plugin were removed).
+- Output writing preserves bundler-provided file names (chunk names, `bundle.css`) instead of
+  forcing every output through the entry base name.
+- `@rollup/browser` is imported on first build (activation stays light) and is in
+  `optimizeDeps.exclude`; every `.wasm` asset is inlined by Vite in production builds, so no
+  separate `.wasm` web resource is emitted.
+- Sanity harness: `tests/rollupBundle.sanity.mts` (direct reader → ESM bundle, define,
+  externals, JSON, CSS extraction, minify + inline sourcemap). The node run aliases
+  `esbuild-wasm`/`virtual:esbuild-wasm-binary` to the native esbuild binary and real wasm
+  (`tests/esbuildNativeShim.mjs`, `tests/esbuildWasmBinaryMock.mjs`) - see the run command in
+  the test header.
+- Follow-ups:
+  - main-thread Rollup blocks the UI while bundling large graphs; a worker can be reintroduced
+    later if needed (the earlier worker implementation lives in git history)
+  - `rollup/workspaceResolver.ts` duplicates the esbuild compiler's direct-read package resolver;
+    extract a shared async resolver once both settle
+  - SolidJS transform support is not wired into this extension yet
+  - no CommonJS-to-ESM conversion plugin: Rollup core expects ESM/package `module`/`exports`
+    entry points. CJS-only packages can leave `require()` calls in the output (rolldown's
+    built-in CJS handling does not apply here)
+  - CSS `@import` resolution and minification are not implemented; the asset is a plain
+    concatenation of loaded stylesheets
+  - `@rollup/browser` has no watch integration of its own; watch remains the shared
+    save-driven rebuild engine (like rolldown/esbuild)
 
 # Prettier
 

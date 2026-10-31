@@ -88,13 +88,39 @@ export type BuildRequest = {
   virtualFiles?: Record<string, string>;
 
   format?: "esm" | "iife" | "cjs";
+  platform?: "browser" | "node" | "neutral";
+  charset?: "ascii" | "utf8";
+  globalName?: string;
+
   minify?: boolean;
-  sourcemap?: boolean;
-  target?: string;
+  sourcemap?: boolean | "linked" | "inline" | "external" | "both";
+  sourceRoot?: string;
+  sourcesContent?: boolean;
+
+  target?: string | string[];
+  treeShaking?: boolean;
+  keepNames?: boolean;
+  legalComments?: "none" | "inline" | "eof" | "linked" | "external";
+  lineLimit?: number;
+  drop?: ("console" | "debugger")[];
+  banner?: { js?: string; css?: string };
+  footer?: { js?: string; css?: string };
+  pure?: string[];
+
+  jsx?: "transform" | "preserve" | "automatic";
+  jsxFactory?: string;
+  jsxFragment?: string;
+  jsxImportSource?: string;
+  jsxDev?: boolean;
+  jsxSideEffects?: boolean;
+
   bundle?: boolean;
+  splitting?: boolean;
   external?: string[];
   define?: Record<string, string>;
   entryNames?: string;
+  chunkNames?: string;
+  outExtension?: Record<string, string>;
   taggedJsx?: TaggedJsxMode;
 };
 
@@ -234,9 +260,7 @@ function withVirtualFiles(
 async function ensureInitialized(): Promise<void> {
   if (initialization == null) {
     initialization = (async () => {
-      const bytes = Uint8Array.from(atob(wasmBase64), (character) =>
-        character.charCodeAt(0),
-      );
+      const bytes = Uint8Array.from(atob(wasmBase64), (character) => character.charCodeAt(0));
 
       /*
        * Chrome rejects synchronous new WebAssembly.Module(...) compilation
@@ -542,12 +566,9 @@ function createPackageResolver(reader: WorkspaceReader): PackageResolver {
 
     const map = exportsField as Record<string, unknown>;
 
-    const requestedSubpath =
-      subpath.length === 0 ? "." : `./${subpath.replace(/^\.\//, "")}`;
+    const requestedSubpath = subpath.length === 0 ? "." : `./${subpath.replace(/^\.\//, "")}`;
 
-    const hasSubpathEntries = Object.keys(map).some(
-      (key) => key === "." || key.startsWith("./"),
-    );
+    const hasSubpathEntries = Object.keys(map).some((key) => key === "." || key.startsWith("./"));
 
     if (hasSubpathEntries) {
       const directTarget = map[requestedSubpath];
@@ -579,19 +600,13 @@ function createPackageResolver(reader: WorkspaceReader): PackageResolver {
         );
 
         if (typeof target === "string") {
-          return resolveExportTarget(
-            packageDirectory,
-            target.replaceAll("*", wildcard),
-          );
+          return resolveExportTarget(packageDirectory, target.replaceAll("*", wildcard));
         }
 
         const conditionalTarget = resolveConditionalTarget(target);
 
         if (conditionalTarget != null) {
-          return resolveExportTarget(
-            packageDirectory,
-            conditionalTarget.replaceAll("*", wildcard),
-          );
+          return resolveExportTarget(packageDirectory, conditionalTarget.replaceAll("*", wildcard));
         }
       }
 
@@ -617,8 +632,7 @@ function createPackageResolver(reader: WorkspaceReader): PackageResolver {
     for (let index = segments.length; index >= 0; index -= 1) {
       const directory = segments.slice(0, index).join("/");
 
-      const packageJsonPath =
-        directory.length > 0 ? `${directory}/package.json` : "package.json";
+      const packageJsonPath = directory.length > 0 ? `${directory}/package.json` : "package.json";
 
       if ((await reader.readText(packageJsonPath)) != null) {
         return directory;
@@ -676,10 +690,7 @@ function createPackageResolver(reader: WorkspaceReader): PackageResolver {
           continue;
         }
 
-        wildcard = specifier.slice(
-          prefix.length,
-          specifier.length - suffix.length,
-        );
+        wildcard = specifier.slice(prefix.length, specifier.length - suffix.length);
 
         target = candidate;
         break;
@@ -712,15 +723,12 @@ function createPackageResolver(reader: WorkspaceReader): PackageResolver {
 
   async function resolveBareImport(specifier: string): Promise<string | undefined> {
     const { packageDir, subpath } = splitPackageSpec(specifier);
-  
+
     const manifestPath = `${packageDir}/package.json`;
-  
+
     const manifestText = await reader.readText(manifestPath);
-    const packageJson =
-      manifestText != null
-        ? parseJsonSafe(manifestText)
-        : undefined;
-  
+    const packageJson = manifestText != null ? parseJsonSafe(manifestText) : undefined;
+
     console.info("[esbuild] resolving package import", {
       specifier,
       packageDir,
@@ -760,9 +768,7 @@ function createPackageResolver(reader: WorkspaceReader): PackageResolver {
       }
     }
 
-    return subpath.length > 0
-      ? lookup(`${packageDir}/${subpath}`)
-      : lookup(packageDir);
+    return subpath.length > 0 ? lookup(`${packageDir}/${subpath}`) : lookup(packageDir);
   }
 
   return {
@@ -867,9 +873,7 @@ function createWorkspaceFsPlugin(
             };
           }
 
-          const resolved = await packageResolver.resolveBareImport(
-            normalizePath(args.path),
-          );
+          const resolved = await packageResolver.resolveBareImport(normalizePath(args.path));
 
           if (resolved != null) {
             return {
@@ -878,9 +882,7 @@ function createWorkspaceFsPlugin(
             };
           }
 
-          unresolvedImports.add(
-            `${args.path} imported by ${args.importer || "<entry point>"}`,
-          );
+          unresolvedImports.add(`${args.path} imported by ${args.importer || "<entry point>"}`);
 
           return {
             path: args.path,
@@ -947,11 +949,7 @@ function createWorkspaceFsPlugin(
             try {
               const transformers = await ensureTaggedJsxTransformers();
 
-              const converted = convertTaggedJsx(
-                contents,
-                taggedJsxRequest,
-                transformers,
-              );
+              const converted = convertTaggedJsx(contents, taggedJsxRequest, transformers);
 
               if (converted.code !== contents) {
                 contents = converted.code;
@@ -992,9 +990,7 @@ function createWorkspaceFsPlugin(
   };
 }
 
-export async function runTransform(
-  request: TransformRequest,
-): Promise<BuildResponse> {
+export async function runTransform(request: TransformRequest): Promise<BuildResponse> {
   try {
     await ensureInitialized();
 
@@ -1039,30 +1035,96 @@ export async function runTransform(
   }
 }
 
-export async function runBuild(
-  request: BuildRequest,
-): Promise<BuildResponse> {
+export type BundlerTransformOptions = {
+  filename: string;
+  source: string;
+  define?: Record<string, string>;
+  minify?: boolean;
+  sourcemap?: boolean;
+  format?: "esm" | "iife" | "cjs";
+};
+
+/*
+ * Shared esbuild-wasm transform for non-esbuild bundlers.
+ *
+ * Rollup uses this for TS/JSX lowering, define substitution and minification
+ * on the main thread. Reusing compiler.ts means esbuild-wasm is initialized
+ * exactly once per page (the esbuild extension normally initializes it
+ * first), and the Dataverse wasm-binary virtual module stays in one place.
+ */
+export async function transformForBundler(
+  options: BundlerTransformOptions,
+): Promise<{ code: string; map: unknown }> {
+  await ensureInitialized();
+
+  const result = await esbuild.transform(options.source, {
+    loader: getLoaderForPath(options.filename),
+    ...(options.format != null ? { format: options.format } : {}),
+    target: "es2022",
+    define: options.define,
+    minify: options.minify ?? false,
+    sourcemap: options.sourcemap === true,
+    /*
+     * Rollup does not run esbuild's JSX loader itself; automatic matches the
+     * modern jsx-runtime convention used by the rest of the toolchain.
+     */
+    jsx: "automatic",
+    logLevel: "silent",
+  });
+
+  return {
+    code: result.code,
+    map:
+      result.map != null && result.map.length > 0 ? (JSON.parse(result.map) as unknown) : undefined,
+  };
+}
+
+export async function runBuild(request: BuildRequest): Promise<BuildResponse> {
   try {
     await ensureInitialized();
 
     const unresolvedImports = new Set<string>();
 
-    const reader = withVirtualFiles(
-      request.workspace,
-      request.virtualFiles,
-    );
+    const reader = withVirtualFiles(request.workspace, request.virtualFiles);
+
+    const entryPoint = normalizePath(request.entry);
+    const entryDirectory = entryPoint.includes("/")
+      ? entryPoint.slice(0, entryPoint.lastIndexOf("/"))
+      : ".";
 
     const result = await esbuild.build({
-      entryPoints: [normalizePath(request.entry)],
+      entryPoints: [entryPoint],
       bundle: request.bundle ?? true,
       write: false,
       format: request.format ?? "esm",
+      platform: request.platform,
+      charset: request.charset,
+      globalName: request.globalName,
       minify: request.minify ?? false,
       sourcemap: request.sourcemap ?? false,
+      sourceRoot: request.sourceRoot,
+      sourcesContent: request.sourcesContent,
       target: request.target ?? "es2022",
+      treeShaking: request.treeShaking,
+      keepNames: request.keepNames,
+      legalComments: request.legalComments,
+      lineLimit: request.lineLimit != null && request.lineLimit > 0 ? request.lineLimit : undefined,
+      drop: request.drop,
+      banner: request.banner,
+      footer: request.footer,
+      pure: request.pure,
+      jsx: request.jsx,
+      jsxFactory: request.jsxFactory,
+      jsxFragment: request.jsxFragment,
+      jsxImportSource: request.jsxImportSource,
+      jsxDev: request.jsxDev,
+      jsxSideEffects: request.jsxSideEffects,
       external: request.external,
       define: request.define,
+      splitting: request.splitting,
       entryNames: request.entryNames,
+      chunkNames: request.chunkNames,
+      outExtension: request.outExtension,
       logLevel: "silent",
       plugins: [
         createWorkspaceFsPlugin(
@@ -1072,7 +1134,11 @@ export async function runBuild(
           request.taggedJsx ?? "off",
         ),
       ],
-      outbase: ".",
+      /*
+       * Keep the entry's own directory out of the output path, so
+       * "src/app.ts" still writes "app.js" (plus sibling chunks/maps).
+       */
+      outbase: entryDirectory,
       outdir: "out",
     });
 
@@ -1080,9 +1146,7 @@ export async function runBuild(
       ...result.warnings.map(
         (warning) =>
           `${warning.text}${
-            warning.location != null
-              ? ` (${formatLocation(warning.location)})`
-              : ""
+            warning.location != null ? ` (${formatLocation(warning.location)})` : ""
           }`,
       ),
 
@@ -1115,10 +1179,6 @@ export async function runBuild(
   }
 }
 
-function formatLocation(location: {
-  file?: string;
-  line?: number;
-  column?: number;
-}): string {
+function formatLocation(location: { file?: string; line?: number; column?: number }): string {
   return `${location.file ?? ""}:${location.line ?? 0}:${location.column ?? 0}`;
 }

@@ -45,7 +45,7 @@ type Response =
       error: string;
     };
 
-import "./processShim.js";
+import "../shared/processShim.js";
 
 /*
  * Forward wasm-runtime diagnostic console.error output (notably the
