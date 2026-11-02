@@ -16,7 +16,7 @@ import type { Process } from "almostnode";
 import { Buffer } from "buffer";
 
 import { hasFileExtension, parseJsonSafe } from "../shared/packageResolver.js";
-import { createPackageResolver } from "../rollup/workspaceResolver.js";
+import { createPackageResolver } from "../shared/workspaceResolver.js";
 
 import { createBuiltins, type Builtins, type RequireFunction } from "./builtins.js";
 import { MissingPathError, type RuntimeFs } from "./fsShim.js";

@@ -1,5 +1,5 @@
 /*
- * Direct workspace filesystem access for the node-runtime-v2 extension.
+ * Direct workspace filesystem access for the node-runtime extension.
  *
  * Everything goes through vscode.workspace.fs, so reads and writes use the
  * mounted workspace provider (local folder, browser workspace and the OPFS
@@ -75,9 +75,34 @@ export function toUri(
   return vscode.Uri.joinPath(rootUri, ...normalized.split("/"));
 }
 
-export function createWorkspaceFs(vscode: typeof vscodeType, rootUri: vscodeType.Uri): WorkspaceFs {
+function permissionDenied(path: string, syscall: string): Error {
+  const error = new Error(
+    `EACCES: permission denied, ${syscall} '${path}'`,
+  ) as Error & { code: string; errno: number; syscall: string; path: string };
+
+  error.code = "EACCES";
+  error.errno = -13;
+  error.syscall = syscall;
+  error.path = path;
+
+  return error;
+}
+
+export function createWorkspaceFs(
+  vscode: typeof vscodeType,
+  rootUri: vscodeType.Uri,
+  options: { writable?: boolean } = {},
+): WorkspaceFs {
+  const writable = options.writable ?? true;
+
   function uri(path: string): vscodeType.Uri {
     return toUri(vscode, rootUri, path);
+  }
+
+  function assertWritable(path: string, syscall: string): void {
+    if (!writable) {
+      throw permissionDenied(path, syscall);
+    }
   }
 
   async function readBytes(path: string): Promise<Uint8Array | undefined> {
@@ -114,6 +139,7 @@ export function createWorkspaceFs(vscode: typeof vscodeType, rootUri: vscodeType
     },
 
     async writeFile(path: string, content: Uint8Array): Promise<void> {
+      assertWritable(path, "open");
       const parent = dirname(path);
 
       if (parent.length > 0) {
@@ -124,6 +150,7 @@ export function createWorkspaceFs(vscode: typeof vscodeType, rootUri: vscodeType
     },
 
     async createDirectory(path: string): Promise<void> {
+      assertWritable(path, "mkdir");
       if (normalizePath(path).length === 0) {
         return;
       }
@@ -132,6 +159,7 @@ export function createWorkspaceFs(vscode: typeof vscodeType, rootUri: vscodeType
     },
 
     async deletePath(path: string, recursive: boolean): Promise<void> {
+      assertWritable(path, "delete");
       await vscode.workspace.fs.delete(uri(path), {
         recursive,
         useTrash: false,
@@ -139,6 +167,7 @@ export function createWorkspaceFs(vscode: typeof vscodeType, rootUri: vscodeType
     },
 
     async rename(from: string, to: string): Promise<void> {
+      assertWritable(to, "rename");
       const parent = dirname(to);
 
       if (parent.length > 0) {
@@ -151,6 +180,7 @@ export function createWorkspaceFs(vscode: typeof vscodeType, rootUri: vscodeType
     },
 
     async copy(from: string, to: string): Promise<void> {
+      assertWritable(to, "copyfile");
       const parent = dirname(to);
 
       if (parent.length > 0) {

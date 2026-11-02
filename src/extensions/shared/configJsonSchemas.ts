@@ -6,8 +6,6 @@ import type { BaseIssue, BaseSchema } from "valibot";
 import { DATAVERSE_CONFIG_SCHEMA } from "../dataverse/config.js";
 import { ESBUILD_CONFIG_SCHEMA } from "../esbuild/config.js";
 import { HTML_CONFIG_SCHEMA } from "../html/config.js";
-import { ROLLDOWN_CONFIG_SCHEMA } from "../rolldown/config.js";
-import { ROLLUP_CONFIG_SCHEMA } from "../rollup/config.js";
 import { TAILWIND_CONFIG_SCHEMA } from "../tailwind/config.js";
 import { defineRecordSchema } from "./configSchema.js";
 
@@ -220,32 +218,6 @@ export const CONFIG_JSON_SCHEMAS: ConfigJsonSchemaEntry[] = [
     removeComments: "Remove non-conditional HTML comments.",
     external:
       "Glob patterns of workspace paths or original references to leave un-inlined (for example vendor/**, *.min.js). Patterns without a slash match the file name.",
-  }),
-
-  schemaEntry(
-    "rolldown.config.json",
-    ["rolldown.config.json"],
-    jsonSchemaFor(ROLLDOWN_CONFIG_SCHEMA),
-    {
-      entryPoints: "Workspace-relative entry files.",
-      outdir: "Workspace-relative output directory.",
-      format: "Output module format (esm, iife, cjs, or umd).",
-      minify: "Minify the generated JavaScript.",
-      sourcemap: "Emit an inline source map.",
-      external: "Packages or paths to leave external.",
-      define: "Build-time global identifier replacements.",
-      solid: "Solid 2.x toolchain selection (auto, v2, or off).",
-    },
-  ),
-
-  schemaEntry("rollup.config.json", ["rollup.config.json"], jsonSchemaFor(ROLLUP_CONFIG_SCHEMA), {
-    entryPoints: "Workspace-relative entry files.",
-    outdir: "Workspace-relative output directory.",
-    format: "Output module format (esm, iife, cjs, or umd).",
-    minify: "Minify the generated JavaScript.",
-    sourcemap: "Emit source maps through Rollup's output pipeline.",
-    external: "Packages or paths to leave external.",
-    define: "Build-time global identifier replacements.",
   }),
 
   schemaEntry(

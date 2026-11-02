@@ -2,7 +2,6 @@ import type * as vscodeType from "vscode";
 
 import { contributeExtensionManifest } from "../api.js";
 import { createWatchStatus } from "../watchStatus.js";
-import { createPanelIcon, PANEL_GLYPHS, registerExtensionPanel } from "../panels.js";
 import {
   captureDirtyDocuments,
   dirtyDocumentText,
@@ -752,55 +751,6 @@ export default {
       scheduleWatch();
     });
 
-    const htmlPanel = registerExtensionPanel(vscode, {
-      extensionId: "html",
-      title: "HTML",
-      icon: createPanelIcon(PANEL_GLYPHS.code),
-      description:
-        "Inline local scripts, stylesheets, SVGs and assets into self-contained HTML under dist. Entries and inline options live in html.config.json.",
-      workspaceRootUri: context.workspaceRootUri,
-      settings: [
-        {
-          type: "boolean",
-          key: AUTO_START_WATCH_KEY,
-          label: "Auto-start watch",
-          default: false,
-          description: "Start HTML bundler watch automatically when the workspace opens.",
-        },
-      ],
-      actions: [
-        {
-          label: "Bundle Configured",
-          command: COMMAND_BUNDLE_CONFIGURED,
-          primary: true,
-        },
-        {
-          label: "Bundle Current File",
-          command: COMMAND_BUNDLE,
-        },
-        {
-          label: "Bundle Workspace…",
-          command: COMMAND_BUNDLE_WORKSPACE,
-        },
-        {
-          label: "Start Watch",
-          command: COMMAND_START_WATCH,
-        },
-        {
-          label: "Stop Watch",
-          command: COMMAND_STOP_WATCH,
-        },
-        {
-          label: "Open Config",
-          command: COMMAND_OPEN_CONFIG,
-        },
-        {
-          label: "Show Output",
-          command: COMMAND_SHOW_OUTPUT,
-        },
-      ],
-    });
-
     await reloadConfigFromDisk();
 
     setWatchEnabled(getAutoStartWatchSetting(vscode, context.workspaceRootUri));
@@ -830,7 +780,6 @@ export default {
         saveWatcher.dispose();
         watchStatus.dispose();
         watchSettingListener.dispose();
-        htmlPanel.dispose();
 
         bundleCommand.dispose();
         bundleWorkspaceCommand.dispose();

@@ -54,7 +54,7 @@ async function getSettings(
 
   if (prefix.length < 3 || prefix.indexOf("_") < 2 || prefix.endsWith("/")) {
     throw new Error(
-      '"prefix" in dataverse.config.json must contain an underscore somewhere after its first two characters. Example: dv_/ide.',
+      '"prefix" in dataverse.config.json must contain an underscore somewhere after its first two characters. Example: dv_ide.',
     );
   }
 

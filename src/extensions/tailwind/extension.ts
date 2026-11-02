@@ -1,6 +1,6 @@
 import type * as vscodeType from "vscode";
 
-import { compileTailwindCss } from "./compiler.js";
+import { compileTailwindCss, createBundledStylesheetLoader } from "./compiler.js";
 
 import { EsbuildBuildRunner } from "../esbuild/buildRunner.js";
 
@@ -15,11 +15,7 @@ import {
   TAILWIND_DEFAULT_CONFIG,
 } from "./config.js";
 
-import {
-  generateCandidates,
-  generateVariantCandidates,
-  getTailwindHoverInfo,
-} from "./theme.js";
+import { loadTailwindClassIndex, type TailwindClassIndex } from "./theme.js";
 
 import { contributeCommandManifest } from "../api.js";
 
@@ -32,7 +28,7 @@ import type { ExtensionContext, IdeExtension } from "../api.js";
 /*
  * Tailwind extension:
  *
- * - IntelliSense from Tailwind v4 default-theme data
+ * - IntelliSense from Tailwind's design-system class list
  * - workspace CSS compilation via Tailwind compile()
  * - @plugin/@config module loading through the main-thread esbuild compiler
  * - watch mode through the shared EsbuildWatcher
@@ -69,9 +65,7 @@ function isInsideClassStringContext(
   const lineText = document.lineAt(position).text;
   const prefix = lineText.slice(0, position.character);
 
-  const openingMatch = /(?:\bclass(?:Name)?\s*=\s*)(["'`])([^"'`\\]*)$/.exec(
-    prefix,
-  );
+  const openingMatch = /(?:\bclass(?:Name)?\s*=\s*)(["'`])([^"'`\\]*)$/.exec(prefix);
 
   if (openingMatch == null) {
     return false;
@@ -101,16 +95,10 @@ function computeReplacementRange(
 
   const startCharacter = position.character - (match?.[0].length ?? 0);
 
-  return new vscode.Range(
-    new vscode.Position(position.line, startCharacter),
-    position,
-  );
+  return new vscode.Range(new vscode.Position(position.line, startCharacter), position);
 }
 
-function getAutoStartWatchSetting(
-  vscode: typeof vscodeType,
-  rootUri: vscodeType.Uri,
-): boolean {
+function getAutoStartWatchSetting(vscode: typeof vscodeType, rootUri: vscodeType.Uri): boolean {
   return vscode.workspace
     .getConfiguration(CONFIG_SECTION, rootUri)
     .get<boolean>(AUTO_START_WATCH_KEY, false);
@@ -126,112 +114,136 @@ export default {
      * Main-thread esbuild compiler. It reads @plugin modules directly through
      * the mounted workspace filesystem, including the node_modules overlay.
      */
-    const pluginRunner = new EsbuildBuildRunner(
-      vscode,
-      context.workspaceRootUri,
-      outputChannel,
-    );
+    const pluginRunner = new EsbuildBuildRunner(vscode, context.workspaceRootUri, outputChannel);
 
-    const candidateData = generateCandidates();
+    /*
+     * Enumerate the classes from Tailwind's own design system. This is the
+     * parity source of truth: no hand-maintained utility table can fall
+     * behind a Tailwind upgrade.
+     *
+     * Loading is deferred until the first completion/hover request: the full
+     * list is ~23k entries, so it should not delay workbench activation.
+     */
+    let classIndexPromise: Promise<TailwindClassIndex | undefined> | undefined;
+    let candidateItems: vscodeType.CompletionItem[] | undefined;
+    let variantItems: vscodeType.CompletionItem[] | undefined;
 
-    const candidateItems: vscodeType.CompletionItem[] = candidateData.map(
-      (candidate) => {
+    function getClassIndex(): Promise<TailwindClassIndex | undefined> {
+      classIndexPromise ??= loadTailwindClassIndex({
+        loadStylesheet: createBundledStylesheetLoader(),
+      })
+        .then((index) => {
+          outputChannel.appendLine(
+            `[tailwind] ${index.candidates.length} utility candidates and ` +
+              `${index.variants.length} variants from the Tailwind design system.`,
+          );
+
+          return index;
+        })
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+
+          outputChannel.appendLine(
+            `[tailwind] Could not load the Tailwind class index: ${message}`,
+          );
+
+          return undefined;
+        });
+
+      return classIndexPromise;
+    }
+
+    function getCandidateItems(index: TailwindClassIndex): vscodeType.CompletionItem[] {
+      candidateItems ??= index.candidates.map((candidate) => {
         const item = new vscode.CompletionItem(
           candidate.className,
           vscode.CompletionItemKind.EnumMember,
         );
 
         item.detail = `Tailwind v4 · ${candidate.className}`;
-
-        if (candidate.documentation != null) {
-          item.documentation = new vscode.MarkdownString(
-            `\`${candidate.className}\`\n\n\`${candidate.documentation}\``,
-          );
-        }
-
         item.sortText = `0${candidate.className}`;
 
         return item;
-      },
-    );
+      });
 
-    const variants = generateVariantCandidates().map((variant) => {
-      const item = new vscode.CompletionItem(
-        variant.prefix,
-        vscode.CompletionItemKind.Keyword,
-      );
+      return candidateItems;
+    }
 
-      item.detail = "Tailwind v4 variant";
+    function getVariantItems(index: TailwindClassIndex): vscodeType.CompletionItem[] {
+      variantItems ??= index.variants.map((variant) => {
+        const item = new vscode.CompletionItem(variant.prefix, vscode.CompletionItemKind.Keyword);
 
-      item.command = {
-        command: "editor.action.triggerSuggest",
-        title: "Suggest Tailwind utilities",
-      };
+        item.detail = "Tailwind v4 variant";
 
-      item.sortText = "1";
+        item.command = {
+          command: "editor.action.triggerSuggest",
+          title: "Suggest Tailwind utilities",
+        };
 
-      return item;
-    });
+        item.sortText = "1";
 
-    outputChannel.appendLine(
-      `[tailwind] ${candidateData.length} utility candidates from default theme.`,
-    );
+        return item;
+      });
 
-    const completionProviderDisposable =
-      vscode.languages.registerCompletionItemProvider(
-        SUPPORTED_LANGUAGES,
-        {
-          provideCompletionItems(document, position) {
-            if (!isInsideClassStringContext(document, position)) {
-              return undefined;
-            }
+      return variantItems;
+    }
 
-            const wordRange = computeReplacementRange(vscode, document, position);
-            const word = document.getText(wordRange);
-
-            const alreadyHasVariant = word.includes(":");
-
-            const items: vscodeType.CompletionItem[] = [
-              ...candidateItems,
-            ];
-
-            if (!alreadyHasVariant) {
-              items.push(...variants);
-            }
-
-            return new vscode.CompletionList(items, false);
-          },
-        },
-        ...COMPLETION_TRIGGER_CHARACTERS,
-      );
-
-    const hoverProviderDisposable = vscode.languages.registerHoverProvider(
+    const completionProviderDisposable = vscode.languages.registerCompletionItemProvider(
       SUPPORTED_LANGUAGES,
       {
-        provideHover(document, position) {
-          const wordRange = document.getWordRangeAtPosition(
-            position,
-            /[A-Za-z0-9_:./[\]<>()%#-]+/,
-          );
-
-          if (wordRange == null) {
+        async provideCompletionItems(document, position) {
+          if (!isInsideClassStringContext(document, position)) {
             return undefined;
           }
 
-          const className = document.getText(wordRange);
-          const markdown = getTailwindHoverInfo(className);
+          const index = await getClassIndex();
 
-          if (markdown == null) {
+          if (index == null) {
             return undefined;
           }
 
-          return new vscode.Hover(
-            new vscode.MarkdownString(`**${className}**\n\n${markdown}`),
-            wordRange,
-          );
+          const wordRange = computeReplacementRange(vscode, document, position);
+          const word = document.getText(wordRange);
+
+          const alreadyHasVariant = word.includes(":");
+
+          const items: vscodeType.CompletionItem[] = [...getCandidateItems(index)];
+
+          if (!alreadyHasVariant) {
+            items.push(...getVariantItems(index));
+          }
+
+          return new vscode.CompletionList(items, false);
         },
       },
+      ...COMPLETION_TRIGGER_CHARACTERS,
     );
+
+    const hoverProviderDisposable = vscode.languages.registerHoverProvider(SUPPORTED_LANGUAGES, {
+      async provideHover(document, position) {
+        const wordRange = document.getWordRangeAtPosition(
+          position,
+          /[A-Za-z0-9_![\]().,#%$@&*:+/'"\\-]+/,
+        );
+
+        if (wordRange == null) {
+          return undefined;
+        }
+
+        const className = document.getText(wordRange);
+        const index = await getClassIndex();
+        const markdown = index?.hoverInfo(className);
+
+        if (markdown == null) {
+          return undefined;
+        }
+
+        return new vscode.Hover(
+          new vscode.MarkdownString(`**${className}**\n\n${markdown}`),
+          wordRange,
+        );
+      },
+    });
 
     outputChannel.appendLine("[tailwind] providers registered.");
 
@@ -279,8 +291,7 @@ export default {
           "dataverseIde.tailwind.autoStartWatch": {
             type: "boolean",
             default: false,
-            markdownDescription:
-              "Start Tailwind watch automatically when the workspace opens.",
+            markdownDescription: "Start Tailwind watch automatically when the workspace opens.",
           },
         },
       },
@@ -323,9 +334,7 @@ export default {
         {
           label: "$(zap) Compile CSS",
           run: () => {
-            void vscode.commands.executeCommand(
-              "dataverseIde.tailwind.compileCss",
-            );
+            void vscode.commands.executeCommand("dataverseIde.tailwind.compileCss");
           },
         },
       ],
@@ -334,8 +343,7 @@ export default {
     const diagnostics = vscode.languages.createDiagnosticCollection("tailwind");
 
     const configIntellisenseDisposable = registerConfigIntellisense(vscode, {
-      getConfigPath: () =>
-        configRelativePathFor(vscode, context.workspaceRootUri),
+      getConfigPath: () => configRelativePathFor(vscode, context.workspaceRootUri),
     });
 
     function firstLine(text: string): string {
@@ -347,21 +355,14 @@ export default {
     }
 
     async function reloadConfigFromDisk(): Promise<void> {
-      const loaded = await readTailwindConfig(
-        vscode,
-        context.workspaceRootUri,
-      );
+      const loaded = await readTailwindConfig(vscode, context.workspaceRootUri);
 
       currentConfig = loaded.config;
 
       notifyStatus();
     }
 
-    async function runCompile(
-      options?: {
-        silent?: boolean;
-      },
-    ): Promise<boolean> {
+    async function runCompile(options?: { silent?: boolean }): Promise<boolean> {
       const started = Date.now();
 
       try {
@@ -376,20 +377,15 @@ export default {
         }
 
         outputChannel.appendLine(
-          `[tailwind] Compiling ${currentConfig.input || 'default input (@import "tailwindcss")'
-          }…`,
+          `[tailwind] Compiling ${currentConfig.input || 'default input (@import "tailwindcss")'}…`,
         );
 
-        const result = await compileTailwindCss(
-          vscode,
-          context.workspaceRootUri,
-          {
-            input: currentConfig.input,
-            pluginRunner,
-            minify: currentConfig.minify,
-            outputChannel,
-          },
-        );
+        const result = await compileTailwindCss(vscode, context.workspaceRootUri, {
+          input: currentConfig.input,
+          pluginRunner,
+          minify: currentConfig.minify,
+          outputChannel,
+        });
 
         if (result.signature === lastSignature) {
           const elapsed = Date.now() - started;
@@ -412,10 +408,7 @@ export default {
           .split("/")
           .filter((part) => part.length > 0);
 
-        const outputUri = vscode.Uri.joinPath(
-          context.workspaceRootUri,
-          ...outputParts,
-        );
+        const outputUri = vscode.Uri.joinPath(context.workspaceRootUri, ...outputParts);
 
         const parentParts = outputParts.slice(0, -1);
 
@@ -425,10 +418,7 @@ export default {
             : context.workspaceRootUri,
         );
 
-        await vscode.workspace.fs.writeFile(
-          outputUri,
-          new TextEncoder().encode(result.css),
-        );
+        await vscode.workspace.fs.writeFile(outputUri, new TextEncoder().encode(result.css));
 
         lastSignature = result.signature;
         diagnostics.clear();
@@ -482,9 +472,7 @@ export default {
         notifyStatus();
 
         if (options?.silent !== true) {
-          await vscode.window.showErrorMessage(
-            `[tailwind] Compile failed: ${message}`,
-          );
+          await vscode.window.showErrorMessage(`[tailwind] Compile failed: ${message}`);
         }
 
         return false;
@@ -504,8 +492,7 @@ export default {
       }
 
       watcher = new EsbuildWatcher(vscode, context.workspaceRootUri, {
-        configPath: () =>
-          configRelativePathFor(vscode, context.workspaceRootUri),
+        configPath: () => configRelativePathFor(vscode, context.workspaceRootUri),
 
         outDir: () => {
           const output = currentConfig.output.replaceAll("\\", "/");
@@ -558,24 +545,18 @@ export default {
       setWatchRuntimeEnabled(enabled);
     }
 
-    setWatchRuntimeEnabled(
-      getAutoStartWatchSetting(vscode, context.workspaceRootUri),
-    );
+    setWatchRuntimeEnabled(getAutoStartWatchSetting(vscode, context.workspaceRootUri));
 
-    const watchSettingListener = vscode.workspace.onDidChangeConfiguration(
-      (event) => {
-        if (
-          event.affectsConfiguration(
-            `${CONFIG_SECTION}.${AUTO_START_WATCH_KEY}`,
-            context.workspaceRootUri,
-          )
-        ) {
-          setWatchRuntimeEnabled(
-            getAutoStartWatchSetting(vscode, context.workspaceRootUri),
-          );
-        }
-      },
-    );
+    const watchSettingListener = vscode.workspace.onDidChangeConfiguration((event) => {
+      if (
+        event.affectsConfiguration(
+          `${CONFIG_SECTION}.${AUTO_START_WATCH_KEY}`,
+          context.workspaceRootUri,
+        )
+      ) {
+        setWatchRuntimeEnabled(getAutoStartWatchSetting(vscode, context.workspaceRootUri));
+      }
+    });
 
     const startWatchCommand = vscode.commands.registerCommand(
       "dataverseIde.tailwind.startWatch",
@@ -600,17 +581,13 @@ export default {
         try {
           await vscode.workspace.fs.stat(uri);
         } catch {
-          await updateTailwindConfig(
-            vscode,
-            context.workspaceRootUri,
-            {
-              /*
-               * The runtime default is blank, but a newly scaffolded config should
-               * point users toward the conventional editable stylesheet.
-               */
-              input: "src/tailwind.css",
-            },
-          );
+          await updateTailwindConfig(vscode, context.workspaceRootUri, {
+            /*
+             * The runtime default is blank, but a newly scaffolded config should
+             * point users toward the conventional editable stylesheet.
+             */
+            input: "src/tailwind.css",
+          });
         }
 
         await vscode.window.showTextDocument(uri);

@@ -1,16 +1,14 @@
 /*
  * Dependency tree resolver for the npm extension.
  *
- * almostnode's built-in `resolveDependencies` fails on partial ranges such as
- * `seroval@^1.0` (its `satisfies` requires a full x.y.z core). This module is
- * a drop-in replacement for that resolution step, delegating semver range
- * matching to the `semver` package and reusing almostnode's `Registry` for
- * fetching/caching manifests. The resolved map is handed to almostnode's
- * PackageManager for downloading and extracting tarballs.
+ * Delegates semver range matching to the `semver` package and uses the local
+ * registry client for fetching/caching manifests. The resolved map is handed
+ * to the direct installer for downloading and extracting tarballs.
  */
 
-import type { npm } from 'almostnode'
 import { maxSatisfying } from 'semver'
+
+import type { PackageManifest, Registry, ResolvedPackage } from './registry'
 
 /*
  * Semver range matching delegates to the `semver` npm package (the same
@@ -18,9 +16,9 @@ import { maxSatisfying } from 'semver'
  * prerelease ordering, x-ranges, and operator desugaring per spec.
  */
 
-type RegistryType = npm.Registry
-type PackageManifestType = npm.PackageManifest
-type ResolvedPackageType = npm.ResolvedPackage
+type RegistryType = Registry
+type PackageManifestType = PackageManifest
+type ResolvedPackageType = ResolvedPackage
 
 export type ResolveTreeOptions = {
   onProgress?: (message: string) => void
@@ -36,8 +34,7 @@ type IdempotencyContext = {
 
 /*
  * Resolve a package and its full dependency closure (flat node_modules: one
- * version per package name). The shape matches almostnode's own resolver so
- * PackageManager internals can consume the result unchanged.
+ * version per package name).
  */
 export async function resolveTree(
   packageName: string,

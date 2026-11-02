@@ -9,7 +9,6 @@ import { WorkspaceFileSystemProvider } from "./workspaceFileSystemProvider.js";
 
 export let provider: HTMLFileSystemProvider;
 export let opfsOverlayProvider: OpfsOverlayProvider;
-export let workspaceFileSystemProvider: WorkspaceFileSystemProvider;
 export let rootUri: vscode.Uri;
 
 /*
@@ -55,8 +54,6 @@ export async function openWorkspaceDirectory(
   opfsOverlayProvider = new OpfsOverlayProvider(dirHandle, rootUri.path);
 
   const workspaceFs = new WorkspaceFileSystemProvider(rootUri.path, realFs, opfsOverlayProvider);
-
-  workspaceFileSystemProvider = workspaceFs;
 
   registerCustomProvider("file", workspaceFs);
 

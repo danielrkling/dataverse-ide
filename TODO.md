@@ -1,5 +1,12 @@
 # Overall
 
+- [removed 2026-11-02] Dropped the `rolldown` and `rollup` extensions (and the old
+  old almostnode-engine runtime extension). esbuild is the only bundler; the direct
+  `node-runtime` engine is the only Node runtime. Removed deps: `rolldown`,
+  `@rolldown/browser`, `@rolldown/binding-wasm32-wasi`, `@rollup/browser`,
+  `@solidjs/compiler-wasm32-wasi`; removed `scripts/unify-rolldown.cjs` and the
+  rolldown/vite glue patch plugins. `almostnode` remains only for its browser builtin
+  shims; npm now uses a local registry client (`npm/registry.ts`).
 - Able to persist node_modules differently due to onedrive flagging .js files?
 - can we persist node_modules differently?
 
@@ -63,8 +70,7 @@
 - Open: manual in-browser build of a Solid workspace (v1 + v2) through `esbuild: Build Current
 File`; `.tsrx` is intentionally not routed (needs `@tsrx/core` + Node >=22.12); the v2 path
   does not yet run `@solidjs/compiler`'s primitive `sourceNames` pass (JSX-level names still
-  come from Babel's `dev` option, currently off); rolldown/rollup/node-runtime still use their
-  own paths (the plugin factory is reusable there next). Keep the pinned
+  come from Babel's `dev` option, currently off). Keep the pinned
   `@solidjs/babel-plugin` rc aligned with the Solid 2 rc a workspace installs - compiled output
   targets the matching `@solidjs/web` helpers.
 
@@ -181,18 +187,22 @@ produced no output.` when the file map lacks node_modules contents (overlay-FS w
 
 # Node runtime v2 (direct workspace fs)
 
-- [added 2026-10-31] `src/extensions/node-runtime-v2/`: own async loader + sync
+- [added 2026-10-31] `src/extensions/node-runtime/`: own async loader + sync
   `require` cache over `vscode.workspace.fs`; almostnode shims for builtins; no
   workspace-wide VFS sync. Sanity harness:
-  `tests/nodeRuntimeV2.sanity.mts` (build command in the file header).
+  `tests/nodeRuntime.sanity.mts` (build command in the file header).
 - design tradeoff: CJS `require()` is synchronous, so static imports are
   prefetched and dynamic requires / uncached sync fs reads use a
   throw → hydrate → retry loop. Retries re-run module side effects (logged via
   `onRetry`).
+- [added 2026-11-02] permission levels: `dataverseIde.nodeRuntime.permissions`
+  (`read-only` / `workspace` / `trusted`) plus per-run `Node: Run File with
+  Permissions…` / `Node: Run Active File with Permissions…` commands. FS writes
+  are denied in the workspace reader + fs shim; network blocking is best-effort
+  (global fetch/XHR/WebSocket/EventSource/sendBeacon wrappers), not a security
+  boundary.
 - follow-ups:
-  - outbound permission gate (currently user code sees the page's `fetch`,
-    XHR and WebSocket directly)
-  - `.js` config files with custom plugins for esbuild/rolldown (not started)
+  - `.js` config files with custom plugins for esbuild (not started)
   - worker realm option for terminability / real CSP-based request isolation
   - `crypto.createHash`, `child_process`, and native `.node` addons are stubs
 

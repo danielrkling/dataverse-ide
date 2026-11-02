@@ -1,322 +1,152 @@
 /*
- * node-runtime extension: run JavaScript in the workspace like `node`.
+ * node-runtime engine: direct workspace fs.
  *
- * Engine: almostnode's main-thread, same-origin mode. This shares the page
- * auth context with the Dataverse origin.
- *
- * TypeScript/TSX/JSX files are transpiled through the main-thread esbuild
- * compiler before being copied into almostnode's VirtualFS.
+ * The runtime does not mirror the workspace into a virtual filesystem. A
+ * per-run loader reads and resolves only the modules the entry actually
+ * reaches through vscode.workspace.fs, and the fs shim's writes are flushed
+ * back to the workspace when the run finishes. almostnode supplies the
+ * browser builtin shims (path, events, stream, ...); the loader, transpiler
+ * and fs layer are local.
  */
-
-import { createRuntime } from "almostnode";
-import type { IRuntime } from "almostnode";
 
 import type * as vscodeType from "vscode";
 
-import { getSharedVfs } from "../sharedVfs.js";
-import { EsbuildBuildRunner } from "../esbuild/buildRunner.js";
+import {
+  describePermissions,
+  permissionsForLevel,
+  type NodePermissionLevel,
+} from "./permissions.js";
+import { blockNetworkAccess } from "./networkGate.js";
 
-export type NodeRuntimeEngine = {
-  runFile: (path: string) => Promise<number>;
+export type DirectNodeEngine = {
+  runFile: (path: string, level?: NodePermissionLevel) => Promise<number>;
   dispose: () => void;
 };
 
-const RUNTIME_ROOT = "/";
+function formatArgument(argument: unknown): string {
+  if (typeof argument === "string") {
+    return argument;
+  }
 
-const IGNORED_DIRECTORIES = [
-  "node_modules",
-  ".git",
-  ".ide-build",
-];
+  try {
+    return JSON.stringify(argument);
+  } catch {
+    return String(argument);
+  }
+}
 
-export function createAlmostnodeEngine(
+export function createDirectNodeEngine(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
   outputChannel: vscodeType.OutputChannel,
-): NodeRuntimeEngine {
-  let runtime: IRuntime | undefined;
-
-  /*
-   * esbuild now runs in the main thread and reads workspace files directly
-   * through vscode.workspace.fs. For transform() calls we still provide the
-   * source text explicitly, so this is primarily used as a TS/JSX compiler.
-   */
-  const buildRunner = new EsbuildBuildRunner(
-    vscode,
-    rootUri,
-    outputChannel,
-  );
-
-  /*
-   * Source files whose content changed between runs are re-transpiled and
-   * cached. The previous length-only key could incorrectly reuse output when
-   * two revisions had the same character count, so cache by full source text.
-   */
-  const transpileCache = new Map<
-    string,
-    | {
-      source: string;
-      contents: string;
-    }
-    | {
-      invalid: true;
-    }
-  >();
-
-  async function transpileForRuntime(
-    relativePath: string,
-    contents: string,
-  ): Promise<string> {
-    if (!/\.(ts|tsx|jsx|mts|cts)$/i.test(relativePath)) {
-      return contents;
-    }
-
-    const cached = transpileCache.get(relativePath);
-
-    if (
-      cached != null &&
-      "source" in cached &&
-      cached.source === contents
-    ) {
-      return cached.contents;
-    }
-
-    const response = await buildRunner.transform({
-      filename: relativePath,
-      source: contents,
-    });
-
-    if (!response.ok) {
-      transpileCache.set(relativePath, {
-        invalid: true,
-      });
-
-      throw new Error(
-        `[node-runtime] Transpiling ${relativePath} failed: ${response.error}`,
-      );
-    }
-
-    const output = response.outputs[0];
-
-    if (output == null) {
-      transpileCache.set(relativePath, {
-        invalid: true,
-      });
-
-      throw new Error(
-        `[node-runtime] Transpiling ${relativePath} produced no output.`,
-      );
-    }
-
-    transpileCache.set(relativePath, {
-      source: contents,
-      contents: output.text,
-    });
-
-    return output.text;
-  }
-
-  async function ensureRuntime(): Promise<IRuntime> {
-    if (runtime != null) {
-      return runtime;
-    }
-
-    const vfs = getSharedVfs();
-
-    runtime = await createRuntime(vfs, {
-      /*
-       * Trusted-code mode: required for main-thread same-origin execution.
-       */
-      dangerouslyAllowSameOrigin: true,
-
-      cwd: RUNTIME_ROOT,
-
-      env: {
-        NODE_ENV: "development",
-      },
-
-      onConsole: (method, args) => {
-        const message = args
-          .map((argument) => {
-            if (typeof argument === "string") {
-              return argument;
-            }
-
-            try {
-              return JSON.stringify(argument);
-            } catch {
-              return String(argument);
-            }
-          })
-          .join(" ");
-
-        outputChannel.appendLine(`[node:${method}] ${message}`);
-      },
-    });
-
-    return runtime;
-  }
-
-  async function syncWorkspaceIntoVfs(runtimeInstance: IRuntime): Promise<void> {
-    const vfs = runtimeInstance.getVFS?.();
-
-    if (vfs == null) {
-      throw new Error(
-        "The active node runtime does not expose its virtual filesystem.",
-      );
-    }
-
-/*
- * The shared VFS may contain an empty or incomplete node_modules directory
- * after a reload or a partial install. Its mere existence does not prove
- * that workspace dependencies are available, so synchronize node_modules
- * from the mounted workspace for every run.
- */
-const syncNodeModules = true;
-
-    const uris = await vscode.workspace.findFiles(
-      "**/*",
-      "{**/.git/**,**/.ide-build/**}",
-      20000,
-    );
-
-    for (const uri of uris) {
-      const relativePath = vscode.workspace
-        .asRelativePath(uri, false)
-        .replaceAll("\\", "/");
-
-      if (relativePath.length === 0) {
-        continue;
-      }
-
-      const segments = relativePath.split("/");
-
-      if (
-        segments.some(
-          (segment) =>
-            segment === ".git"
-        )
-      ) {
-        continue;
-      } 
-
-      if (segments.includes("node_modules") && !syncNodeModules) {
-        continue;
-      }
-
-      const isTextFile =
-        /\.(ts|tsx|js|jsx|mjs|cjs|json|txt|css|html|md|ya?ml)$/i.test(
-          relativePath,
-        );
-
-      if (!isTextFile) {
-        continue;
-      }
-
-      try {
-        const bytes = await vscode.workspace.fs.readFile(uri);
-        const contents = new TextDecoder().decode(bytes);
-
-        const directorySegments = segments.slice(0, -1);
-
-        if (directorySegments.length > 0) {
-          vfs.mkdirSync(`/${directorySegments.join("/")}`, {
-            recursive: true,
-          });
-        }
-
-        /*
-         * almostnode resolves JS/JSON-style CommonJS paths. Store TS-family
-         * source files as .js after transpilation.
-         */
-        let fileName = segments.at(-1) ?? "";
-
-        fileName = fileName.replace(
-          /\.(ts|tsx|jsx|mts|cts)$/i,
-          ".js",
-        );
-
-        const targetPath =
-          directorySegments.length > 0
-            ? `/${directorySegments.join("/")}/${fileName}`
-            : `/${fileName}`;
-
-        try {
-          const transformed = await transpileForRuntime(
-            relativePath,
-            contents,
-          );
-
-          vfs.writeFileSync(targetPath, transformed);
-        } catch (error) {
-          outputChannel.appendLine(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-      } catch {
-        /*
-         * Ignore unreadable or binary files. Runtime dependency resolution
-         * will report a meaningful error if one is actually required.
-         */
-      }
-    }
-  }
-
+): DirectNodeEngine {
   return {
-    async runFile(entryPath: string): Promise<number> {
-      const normalizedEntry = entryPath
-        .replaceAll("\\", "/")
-        .replace(/^\/+/, "");
+    async runFile(
+      entryPath: string,
+      level: NodePermissionLevel = "trusted",
+    ): Promise<number> {
+      const permissions = permissionsForLevel(level);
+      /*
+       * Imported on first run so extension activation does not pull the
+       * almostnode shims or esbuild-wasm into the boot chunk.
+       */
+      const [
+        { createProcess },
+        { createRuntimeFs },
+        { createModuleLoader },
+        { createWorkspaceFs, normalizePath },
+      ] = await Promise.all([
+        import("almostnode"),
+        import("./fsShim.js"),
+        import("./loader.js"),
+        import("./workspace.js"),
+      ]);
 
-      const runtimeEntry = normalizedEntry.replace(
-        /\.(ts|tsx|jsx|mts|cts)$/i,
-        ".js",
-      );
-
-      outputChannel.appendLine(`[node] Running ${normalizedEntry}…`);
-
+      const normalized = normalizePath(entryPath.replace(/^\/+/, ""));
       const started = Date.now();
 
-      const runtimeInstance = await ensureRuntime();
-
-      /*
-       * Fresh module graph per run; shared VFS content persists, including
-       * npm packages synchronized by the npm extension.
-       */
-      runtimeInstance.clearCache();
-
-      await syncWorkspaceIntoVfs(runtimeInstance);
-
-      try {
-        await runtimeInstance.runFile(`/${runtimeEntry}`);
-      } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : String(error);
-
-        outputChannel.appendLine(`[node] Uncaught: ${message}`);
-        outputChannel.show(true);
-
-        return 1;
-      }
-
       outputChannel.appendLine(
-        `[node] Finished in ${Date.now() - started}ms.`,
+        `[node] Running ${normalized} (${level}: ${describePermissions(permissions)})…`,
       );
 
-      return 0;
+      const reader = createWorkspaceFs(vscode, rootUri, {
+        writable: permissions.filesystem === "read-write",
+      });
+      const runtimeFs = createRuntimeFs({
+        reader,
+        cwd: "/",
+        writable: permissions.filesystem === "read-write",
+      });
+      const runtimeProcess = createProcess({
+        cwd: "/",
+        env: {
+          NODE_ENV: "development",
+        },
+        onStdout: (data: string) => outputChannel.append(data),
+        onStderr: (data: string) => outputChannel.append(data),
+      });
+
+      const loader = createModuleLoader({
+        reader,
+        runtimeFs,
+        process: runtimeProcess,
+        onConsole: (method, args) => {
+          outputChannel.appendLine(`[node:${method}] ${args.map(formatArgument).join(" ")}`);
+        },
+        onRetry: (message) => {
+          outputChannel.appendLine(`[node] ${message} (retrying run)…`);
+        },
+      });
+
+      const networkGuard =
+        permissions.network === "blocked" ? blockNetworkAccess() : undefined;
+
+      let exitCode = 0;
+
+      try {
+        await loader.run(normalized);
+        outputChannel.appendLine(`[node] Finished in ${Date.now() - started}ms.`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const exit = /^Process exited with code (\d+)/.exec(message);
+
+        if (exit != null) {
+          exitCode = Number(exit[1]);
+          outputChannel.appendLine(`[node] Exited with code ${exitCode}.`);
+        } else {
+          exitCode = 1;
+          outputChannel.appendLine(`[node] Uncaught: ${message}`);
+          outputChannel.show(true);
+        }
+      } finally {
+        networkGuard?.restore();
+
+        /*
+         * Keep the loader alive for pending dynamic imports and timers; it is
+         * unreachable once this run ends, so its caches follow it.
+         */
+        try {
+          const flushed = await runtimeFs.flush();
+
+          if (flushed.applied > 0) {
+            outputChannel.appendLine(
+              `[node] Wrote ${flushed.applied} filesystem change(s) to the workspace.`,
+            );
+          }
+
+          for (const failure of flushed.errors) {
+            outputChannel.appendLine(`[node] fs flush failed: ${failure}`);
+          }
+        } catch (error) {
+          outputChannel.appendLine(
+            `[node] fs flush failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      return exitCode;
     },
 
-    dispose() {
-      runtime?.terminate?.();
-      buildRunner.dispose();
-      runtime = undefined;
-      transpileCache.clear();
-    },
+    dispose() {},
   };
 }
-
-export {
-  IGNORED_DIRECTORIES as NODE_RUNTIME_IGNORED_DIRECTORIES,
-};

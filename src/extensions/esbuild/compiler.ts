@@ -7,7 +7,6 @@
  * - no workspace-wide source collection
  * - no node_modules manifest scan
  * - no lazy probe/rebuild rounds
- * - no needFiles / absentPaths protocol
  * - no Worker postMessage copies of workspace content
  *
  * The resolver supports:
@@ -555,7 +554,7 @@ async function readDirectoryListing(
  * async rejection, so a 500-module app spent most of a build in resolution.
  *
  * Falls back to the original probe strategy when a reader cannot list
- * directories (the Rolldown/worker readers, or an unreadable directory).
+ * directories (for example an unreadable directory).
  */
 async function resolveWithListing(
   reader: WorkspaceReader,

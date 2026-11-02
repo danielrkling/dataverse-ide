@@ -68,6 +68,7 @@ function pathError(code: string, syscall: string, path: string): Error {
     EISDIR: -21,
     EEXIST: -17,
     ENOTEMPTY: -39,
+    EACCES: -13,
   };
 
   const description: Record<string, string> = {
@@ -76,6 +77,7 @@ function pathError(code: string, syscall: string, path: string): Error {
     EISDIR: "is a directory",
     EEXIST: "file already exists",
     ENOTEMPTY: "directory not empty",
+    EACCES: "permission denied",
   };
 
   const error = new Error(
@@ -255,9 +257,14 @@ type FileDescriptor = {
   content: Uint8Array;
 };
 
-export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }): RuntimeFs {
+export function createRuntimeFs(options: {
+  reader: WorkspaceFs;
+  cwd?: string;
+  writable?: boolean;
+}): RuntimeFs {
   const { reader } = options;
   const cwd = options.cwd ?? "/";
+  const writable = options.writable ?? true;
 
   const files = new Map<string, Uint8Array>();
   const stats = new Map<string, FileStat>();
@@ -279,6 +286,12 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
 
   function resolvePath(pathLike: PathLike): string {
     return toPath(pathLike, cwd);
+  }
+
+  function assertWritable(path: string, syscall: string): void {
+    if (!writable) {
+      throw pathError("EACCES", syscall, path);
+    }
   }
 
   function ensureDirectory(path: string): void {
@@ -504,6 +517,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
     options?: string | { encoding?: string | null } | null,
   ): void {
     const path = resolvePath(pathLike);
+    assertWritable(path, "open");
     const encoding = encodingOf(options);
     const bytes = encodeData(data, encoding);
 
@@ -531,6 +545,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
     options?: { recursive?: boolean; mode?: number } | number,
   ): void {
     const path = resolvePath(pathLike);
+    assertWritable(path, "mkdir");
     const recursive = typeof options === "object" && options?.recursive === true;
 
     if (files.has(path)) {
@@ -591,6 +606,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
 
   function unlinkSync(pathLike: PathLike): void {
     const path = resolvePath(pathLike);
+    assertWritable(path, "unlink");
 
     if (directories.has(path)) {
       throw pathError("EISDIR", "unlink", path);
@@ -613,6 +629,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
 
   function rmdirSync(pathLike: PathLike): void {
     const path = resolvePath(pathLike);
+    assertWritable(path, "rmdir");
 
     if (!directories.has(path)) {
       if (absent.has(path) || deleted.has(path)) {
@@ -635,6 +652,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
 
   function rmSync(pathLike: PathLike, options?: { recursive?: boolean; force?: boolean }): void {
     const path = resolvePath(pathLike);
+    assertWritable(path, "rm");
 
     if (files.has(path)) {
       unlinkSync(path);
@@ -670,6 +688,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
   function renameSync(fromLike: PathLike, toLike: PathLike): void {
     const from = resolvePath(fromLike);
     const to = resolvePath(toLike);
+    assertWritable(to, "rename");
     const bytes = files.get(from);
 
     if (bytes != null) {
@@ -699,6 +718,8 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
 
   function copyFileSync(fromLike: PathLike, toLike: PathLike): void {
     const from = resolvePath(fromLike);
+    const to = resolvePath(toLike);
+    assertWritable(to, "copyfile");
     const bytes = files.get(from);
 
     if (bytes == null) {
@@ -709,7 +730,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
       throw new MissingPathError(from, "read");
     }
 
-    writeFileSync(resolvePath(toLike), new Uint8Array(bytes));
+    writeFileSync(to, new Uint8Array(bytes));
   }
 
   function realpathSync(pathLike: PathLike): string {
@@ -726,8 +747,12 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
     return path;
   }
 
-  function accessSync(pathLike: PathLike): void {
+  function accessSync(pathLike: PathLike, mode = constants.F_OK): void {
     const path = resolvePath(pathLike);
+
+    if (!writable && (mode & (constants.W_OK | constants.X_OK)) !== 0) {
+      throw pathError("EACCES", "access", path);
+    }
 
     if (files.has(path) || directories.has(path)) {
       return;
@@ -744,6 +769,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
     const prefix = resolvePath(prefixLike);
     const suffix = Math.random().toString(36).slice(2, 8);
     const path = `${prefix}${suffix}`;
+    assertWritable(path, "mkdtemp");
 
     ensureDirectory(path);
     overlay.push({ kind: "mkdir", path });
@@ -754,8 +780,13 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
   function openSync(pathLike: PathLike, flags: string | number, _mode?: number): number {
     const path = resolvePath(pathLike);
     const flag = typeof flags === "number" ? "r" : flags;
-    const writing = /[wa]/.test(flag);
+    const writing = /[wa]/.test(flag) || flag.includes("+");
     const appending = flag.includes("a");
+
+    if (writing) {
+      assertWritable(path, "open");
+    }
+
     const exists = files.has(path) || directories.has(path);
 
     if (!exists && !writing) {
@@ -839,6 +870,8 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
       throw new Error("EBADF: bad file descriptor, write");
     }
 
+    assertWritable(entry.path, "write");
+
     const data = typeof buffer === "string" ? encodeData(buffer) : buffer;
     const start = typeof buffer === "string" ? 0 : (offset ?? 0);
     const count = typeof buffer === "string" ? data.length : (length ?? data.length - start);
@@ -866,6 +899,8 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
     if (entry == null) {
       throw new Error("EBADF: bad file descriptor, ftruncate");
     }
+
+    assertWritable(entry.path, "ftruncate");
 
     const next = new Uint8Array(length);
     next.set(entry.content.subarray(0, Math.min(length, entry.content.length)));
@@ -927,6 +962,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
 
   function createWriteStream(pathLike: PathLike): unknown {
     const path = resolvePath(pathLike);
+    assertWritable(path, "open");
     const chunks: Uint8Array[] = [];
 
     const stream = {
@@ -985,6 +1021,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
       options?: string | { encoding?: string | null } | null,
     ): Promise<void> {
       const path = resolvePath(pathLike);
+      assertWritable(path, "open");
       const bytes = encodeData(data, encodingOf(options));
 
       discardOverlayFor(path);
@@ -998,6 +1035,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
       options?: string | { encoding?: string | null } | null,
     ): Promise<void> {
       const path = resolvePath(pathLike);
+      assertWritable(path, "open");
       const existing = files.get(path) ?? (await reader.readBytes(path));
       const next = encodeData(data, encodingOf(options));
 
@@ -1067,6 +1105,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
 
     async mkdir(pathLike: PathLike, options?: { recursive?: boolean } | number): Promise<void> {
       const path = resolvePath(pathLike);
+      assertWritable(path, "mkdir");
 
       discardOverlayFor(path);
       await reader.createDirectory(path);
@@ -1076,6 +1115,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
 
     async unlink(pathLike: PathLike): Promise<void> {
       const path = resolvePath(pathLike);
+      assertWritable(path, "unlink");
 
       discardOverlayFor(path);
       await reader.deletePath(path, false);
@@ -1086,6 +1126,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
 
     async rmdir(pathLike: PathLike): Promise<void> {
       const path = resolvePath(pathLike);
+      assertWritable(path, "rmdir");
 
       discardOverlayFor(path);
       await reader.deletePath(path, false);
@@ -1097,6 +1138,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
       options?: { recursive?: boolean; force?: boolean },
     ): Promise<void> {
       const path = resolvePath(pathLike);
+      assertWritable(path, "rm");
 
       discardOverlayFor(path);
 
@@ -1114,6 +1156,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
     async rename(fromLike: PathLike, toLike: PathLike): Promise<void> {
       const from = resolvePath(fromLike);
       const to = resolvePath(toLike);
+      assertWritable(to, "rename");
       const cached = files.get(from);
 
       /*
@@ -1137,6 +1180,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
     async copyFile(fromLike: PathLike, toLike: PathLike): Promise<void> {
       const from = resolvePath(fromLike);
       const to = resolvePath(toLike);
+      assertWritable(to, "copyfile");
       const cached = files.get(from);
 
       if (cached != null) {
@@ -1156,8 +1200,12 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
       }
     },
 
-    async access(pathLike: PathLike): Promise<void> {
+    async access(pathLike: PathLike, mode = constants.F_OK): Promise<void> {
       const path = resolvePath(pathLike);
+
+      if (!writable && (mode & (constants.W_OK | constants.X_OK)) !== 0) {
+        throw pathError("EACCES", "access", path);
+      }
 
       if (files.has(path) || directories.has(path)) {
         return;
@@ -1340,7 +1388,7 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
 
       callback(
         promises.access,
-        [pathLike],
+        [pathLike, typeof modeOrCallback === "number" ? modeOrCallback : constants.F_OK],
         callbackFn as (error: Error | null, result?: unknown) => void,
       );
     },
@@ -1374,6 +1422,12 @@ export function createRuntimeFs(options: { reader: WorkspaceFs; cwd?: string }):
   };
 
   async function flush(): Promise<FlushResult> {
+    if (!writable) {
+      overlay.length = 0;
+
+      return { applied: 0, errors: [] };
+    }
+
     const errors: string[] = [];
     let applied = 0;
 

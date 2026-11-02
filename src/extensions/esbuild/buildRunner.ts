@@ -21,10 +21,6 @@ import { captureDirtyDocuments, dirtyDocumentText } from "../shared/liveDocument
  * Dirty editor buffers are layered over the filesystem. Without this, a build
  * triggered while typing silently compiled the last *saved* content, which
  * made esbuild (and watch mode) look one save behind the editor.
- *
- * `files` and `absentPaths` remain in the public type only for Rolldown's
- * existing worker/lazyBuild protocol. The main-thread esbuild compiler does
- * not use them.
  */
 
 /*
@@ -133,15 +129,6 @@ export type BuildRequestInput = {
    * esbuild's loaders run.
    */
   solid?: "off" | "v1" | "v2";
-
-  /*
-   * Compatibility fields used by the Rolldown worker and lazyBuild().
-   *
-   * Main-thread esbuild ignores these because it reads files directly through
-   * vscode.workspace.fs.
-   */
-  files?: Record<string, string>;
-  absentPaths?: string[];
 };
 
 export type TransformRequestInput = {
@@ -152,16 +139,10 @@ export type TransformRequestInput = {
 
 /*
  * The compiler internally tracks request IDs, but callers do not need them.
- * Keeping IDs out of the public response lets the Rolldown runner return
- * its own synthetic failures without fabricating an esbuild request ID.
+ * Keeping IDs out of the public response keeps the runner API independent of
+ * the compiler's request bookkeeping.
  */
-export type BuildResponseOk = Omit<Extract<BuildResponse, { ok: true }>, "id"> & {
-  /*
-   * Rolldown's lazy worker protocol uses this. Main-thread esbuild never
-   * returns it because it resolves workspace files directly.
-   */
-  needFiles?: string[];
-};
+export type BuildResponseOk = Omit<Extract<BuildResponse, { ok: true }>, "id">;
 
 export type BuildResponseErr = Omit<Extract<BuildResponse, { ok: false }>, "id">;
 
@@ -204,16 +185,7 @@ export class EsbuildBuildRunner {
          * - cannot return stale content after a workspace file changes
          */
         workspace,
-
-        /*
-         * `files` and `absentPaths` are intentionally ignored by compiler.ts.
-         * Destructure them out before passing the direct-filesystem request.
-         */
-        ...(() => {
-          const { files: _files, absentPaths: _absentPaths, ...mainThreadInput } = input;
-
-          return mainThreadInput;
-        })(),
+        ...input,
       });
 
       const elapsed = Math.round(performance.now() - started);

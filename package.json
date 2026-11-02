@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "serve:dataverse": "node tools/serve-dataverse-like.mjs",
-    "postinstall": "node scripts/unify-rolldown.cjs"
+    "package:solution": "node tools/package-solution.mjs",
+    "test:tailwind": "node --experimental-strip-types tests/tailwindCandidates.sanity.mts"
   },
   "dependencies": {
     "@babel/core": "^7.29.7",
@@ -25,6 +26,7 @@
     "@codingame/monaco-vscode-emmet-service-override": "^38.0.4",
     "@codingame/monaco-vscode-environment-service-override": "^38.0.4",
     "@codingame/monaco-vscode-explorer-service-override": "^38.0.4",
+    "@codingame/monaco-vscode-extension-gallery-service-override": "38.0.4",
     "@codingame/monaco-vscode-extensions-service-override": "^38.0.4",
     "@codingame/monaco-vscode-files-service-override": "^38.0.4",
     "@codingame/monaco-vscode-git-base-default-extension": "^38.0.4",
@@ -74,11 +76,7 @@
     "@codingame/monaco-vscode-workspace-trust-service-override": "^38.0.4",
     "@codingame/monaco-vscode-xml-default-extension": "^38.0.4",
     "@codingame/monaco-vscode-yaml-default-extension": "^38.0.4",
-    "@rolldown/binding-wasm32-wasi": "^1.2.15",
-    "@rolldown/browser": "^1.2.15",
-    "@rollup/browser": "^4.67.2",
     "@solidjs/babel-plugin": "^2.0.0-rc.20",
-    "@solidjs/compiler-wasm32-wasi": "^2.0.0-rc.19",
     "@tagged-jsx/parse": "^1.4.0",
     "@tagged-jsx/transform": "^2.0.0",
     "@tailwindcss/browser": "^4.3.3",
@@ -94,7 +92,6 @@
     "parse5": "^8.0.1",
     "path-browserify": "^1.0.1",
     "process": "^0.11.10",
-    "rolldown": "^1.2.15",
     "semver": "^7.8.5",
     "tailwindcss": "^4.3.3",
     "valibot": "^1.5.0",
@@ -103,6 +100,7 @@
   "devDependencies": {
     "@codingame/esbuild-import-meta-url-plugin": "^1.0.3",
     "@tagged-jsx/prettier-plugin": "^1.2.0",
+    "@tailwindcss/oxide": "^4.3.3",
     "@types/babel__core": "^7.20.5",
     "@types/semver": "^7.8.0",
     "@types/vscode": "^1.102.0",

@@ -2,7 +2,7 @@
  * Live check: resolve the closure of @solidjs/web@latest with the own
  * resolver (the case that previously died on seroval@^1.0).
  */
-import { Registry } from 'almostnode'
+import { Registry } from '../src/extensions/npm/registry.ts'
 
 import { resolveTree } from '../src/extensions/npm/resolver.ts'
 

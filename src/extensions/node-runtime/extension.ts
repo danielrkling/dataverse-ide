@@ -1,138 +1,212 @@
-import type * as vscodeType from 'vscode'
+import type * as vscodeType from "vscode";
 
+import { contributeExtensionManifest } from "../api.js";
+
+import type { ExtensionContext, IdeExtension } from "../api.js";
+
+import { createDirectNodeEngine } from "./engine.js";
 import {
-  contributeCommandManifest,
-} from '../api.js'
+  DEFAULT_NODE_PERMISSION_LEVEL,
+  getDefaultNodePermissionLevel,
+  NODE_PERMISSION_LEVELS,
+  type NodePermissionLevel,
+} from "./permissions.js";
 
-import type {
-  ExtensionContext,
-  IdeExtension,
-} from '../api.js'
+const COMMAND_RUN_FILE = "dataverseIde.nodeRuntime.runFile";
+const COMMAND_RUN_FILE_WITH_PERMISSIONS = "dataverseIde.nodeRuntime.runFileWithPermissions";
+const COMMAND_RUN_ENTRY = "dataverseIde.nodeRuntime.runEntry";
+const COMMAND_RUN_ENTRY_WITH_PERMISSIONS = "dataverseIde.nodeRuntime.runEntryWithPermissions";
 
-import { createAlmostnodeEngine } from './engine.js'
+const RUNNABLE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs)$/i;
 
-const COMMAND_RUN_FILE = 'dataverseIde.nodeRuntime.runFile'
-const COMMAND_RUN_ENTRY = 'dataverseIde.nodeRuntime.runEntry'
+type PermissionQuickPick = vscodeType.QuickPickItem & { level: NodePermissionLevel };
+
+const PERMISSION_DESCRIPTIONS: Record<NodePermissionLevel, string> = {
+  "read-only": "Read workspace files; block writes and network access.",
+  workspace: "Read and write workspace files; block network access.",
+  trusted: "Read and write workspace files and allow same-origin network access.",
+};
 
 export default {
-  id: 'node-runtime',
+  id: "node-runtime",
 
-  async activate(
-    context: ExtensionContext,
-  ): Promise<vscodeType.Disposable | void> {
-    const { vscode, outputChannel } = context
+  async activate(context: ExtensionContext): Promise<vscodeType.Disposable | void> {
+    const { vscode, outputChannel } = context;
 
-    await contributeCommandManifest({
-      id: 'node-runtime',
-      displayName: 'Dataverse IDE Node Runtime',
-      description: 'Run JavaScript files in the workspace with Node semantics.',
+    await contributeExtensionManifest({
+      id: "node-runtime",
+      displayName: "Dataverse IDE Node Runtime",
+      description: "Run JavaScript/TypeScript files against the workspace filesystem directly.",
       commands: [
         {
-          command: 'dataverseIde.nodeRuntime.runFile',
-          title: 'Node: Run File',
+          command: COMMAND_RUN_FILE,
+          title: "Node: Run File",
         },
         {
-          command: 'dataverseIde.nodeRuntime.runEntry',
-          title: 'Node: Run Active File',
+          command: COMMAND_RUN_FILE_WITH_PERMISSIONS,
+          title: "Node: Run File with Permissions…",
+        },
+        {
+          command: COMMAND_RUN_ENTRY,
+          title: "Node: Run Active File",
+        },
+        {
+          command: COMMAND_RUN_ENTRY_WITH_PERMISSIONS,
+          title: "Node: Run Active File with Permissions…",
         },
       ],
-    })
+      configuration: {
+        title: "Node Runtime",
+        properties: {
+          "dataverseIde.nodeRuntime.permissions": {
+            type: "string",
+            enum: [...NODE_PERMISSION_LEVELS],
+            enumDescriptions: NODE_PERMISSION_LEVELS.map((level) => PERMISSION_DESCRIPTIONS[level]),
+            default: DEFAULT_NODE_PERMISSION_LEVEL,
+            scope: "window",
+            description:
+              "Default permission level for Node: Run File and Node: Run Active File. The per-run commands let you override it.",
+          },
+        },
+      },
+    });
 
-    const engine = createAlmostnodeEngine(
-      vscode,
-      context.workspaceRootUri,
-      outputChannel,
-    )
+    const engine = createDirectNodeEngine(vscode, context.workspaceRootUri, outputChannel);
+
+    function defaultPermissionLevel(): NodePermissionLevel {
+      return getDefaultNodePermissionLevel(vscode, context.workspaceRootUri);
+    }
+
+    async function pickPermissionLevel(
+      defaultLevel: NodePermissionLevel,
+    ): Promise<NodePermissionLevel | undefined> {
+      const items: PermissionQuickPick[] = NODE_PERMISSION_LEVELS.map((level) => ({
+        label:
+          level === "read-only" ? "Read only" : level === "workspace" ? "Workspace" : "Trusted",
+        description:
+          level === defaultLevel
+            ? `${PERMISSION_DESCRIPTIONS[level]} Current default.`
+            : PERMISSION_DESCRIPTIONS[level],
+        level,
+      }));
+
+      const picked = await vscode.window.showQuickPick(items, {
+        title: "Node: Run with Permissions",
+        placeHolder: `Select a permission level (default: ${defaultLevel}).`,
+        ignoreFocusOut: true,
+      });
+
+      return picked?.level;
+    }
 
     async function resolveEntry(): Promise<string | undefined> {
-      const activeEditor = vscode.window.activeTextEditor
+      const activeEditor = vscode.window.activeTextEditor;
 
-      if (activeEditor != null && activeEditor.document.uri.scheme === 'file') {
+      if (activeEditor != null && activeEditor.document.uri.scheme === "file") {
         const relative = vscode.workspace
           .asRelativePath(activeEditor.document.uri, false)
-          .replaceAll('\\', '/')
+          .replaceAll("\\", "/");
 
-        if (/\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(relative)) {
-          return relative
+        if (RUNNABLE_FILE.test(relative)) {
+          return relative;
         }
       }
 
       const quick = await vscode.window.showQuickPick(
-        (await vscode.workspace.findFiles(
-          '{*,src/*,scripts/*}',
-          '{node_modules,.git,.ide-build}/**',
-          500,
-        )).filter((uri) => /\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(uri.path))
+        (
+          await vscode.workspace.findFiles(
+            "{*,src/*,scripts/*}",
+            "{node_modules,.git,.ide-build,dist}/**",
+            500,
+          )
+        )
+          .filter((uri) => RUNNABLE_FILE.test(uri.path))
           .map((uri) => ({
             label: vscode.workspace.asRelativePath(uri, false),
-            path: vscode.workspace
-              .asRelativePath(uri, false)
-              .replaceAll('\\', '/'),
+            path: vscode.workspace.asRelativePath(uri, false).replaceAll("\\", "/"),
           })),
         {
-          title: 'Node: Run File',
-          placeHolder: 'Select an entry file to run.',
+          title: "Node: Run File",
+          placeHolder: "Select an entry file to run.",
           ignoreFocusOut: true,
         },
-      )
+      );
 
-      return quick?.path
+      return quick?.path;
     }
 
-    const runFileCommand = vscode.commands.registerCommand(
-      COMMAND_RUN_FILE,
-      async (argument?: string) => {
-        const entry =
-          typeof argument === 'string'
-            ? argument.replaceAll('\\', '/')
-            : await resolveEntry()
+    async function execute(entry: string, level: NodePermissionLevel): Promise<void> {
+      outputChannel.show(true);
 
-        if (entry == null) {
-          await vscode.window.showWarningMessage(
-            'No file selected to run.',
-          )
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `[node] Running ${entry} (${level})…`,
+          cancellable: false,
+        },
+        async () => {
+          const exitCode = await engine.runFile(entry, level);
 
-          return
-        }
+          if (exitCode !== 0) {
+            await vscode.window.showErrorMessage(`[node] ${entry} exited with code ${exitCode}.`);
+          }
+        },
+      );
+    }
 
-        outputChannel.show(true)
+    async function runFile(argument: unknown, choosePermissions: boolean): Promise<void> {
+      const entry =
+        typeof argument === "string" ? argument.replaceAll("\\", "/") : await resolveEntry();
 
-        await vscode.window.withProgress(
-          {
-            location: vscode.ProgressLocation.Notification,
-            title: `[node] Running ${entry}…`,
-            cancellable: false,
-          },
-          async () => {
-            const exitCode = await engine.runFile(entry)
+      if (entry == null) {
+        await vscode.window.showWarningMessage("No file selected to run.");
 
-            if (exitCode !== 0) {
-              await vscode.window.showErrorMessage(
-                `[node] ${entry} exited with code ${exitCode}.`,
-              )
-            }
-          },
-        )
-      },
-    )
+        return;
+      }
 
-    const runEntryCommand = vscode.commands.registerCommand(
-      COMMAND_RUN_ENTRY,
+      const level = choosePermissions
+        ? await pickPermissionLevel(defaultPermissionLevel())
+        : defaultPermissionLevel();
+
+      if (level == null) {
+        return;
+      }
+
+      await execute(entry, level);
+    }
+
+    const runFileCommand = vscode.commands.registerCommand(COMMAND_RUN_FILE, (argument?: unknown) =>
+      runFile(argument, false),
+    );
+
+    const runFileWithPermissionsCommand = vscode.commands.registerCommand(
+      COMMAND_RUN_FILE_WITH_PERMISSIONS,
+      (argument?: unknown) => runFile(argument, true),
+    );
+
+    const runEntryCommand = vscode.commands.registerCommand(COMMAND_RUN_ENTRY, async () => {
+      await vscode.commands.executeCommand(COMMAND_RUN_FILE);
+    });
+
+    const runEntryWithPermissionsCommand = vscode.commands.registerCommand(
+      COMMAND_RUN_ENTRY_WITH_PERMISSIONS,
       async () => {
-        await vscode.commands.executeCommand(COMMAND_RUN_FILE)
+        await vscode.commands.executeCommand(COMMAND_RUN_FILE_WITH_PERMISSIONS);
       },
-    )
+    );
 
     outputChannel.appendLine(
-      '[node-runtime] extension activated (almostnode engine, same-origin main thread).',
-    )
+      "[node-runtime] extension activated (direct workspace fs, async loader).",
+    );
 
     return {
       dispose() {
-        runFileCommand.dispose()
-        runEntryCommand.dispose()
-        engine.dispose()
+        runFileCommand.dispose();
+        runFileWithPermissionsCommand.dispose();
+        runEntryCommand.dispose();
+        runEntryWithPermissionsCommand.dispose();
+        engine.dispose();
       },
-    }
+    };
   },
-} satisfies IdeExtension
+} satisfies IdeExtension;

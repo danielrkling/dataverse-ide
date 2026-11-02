@@ -1,11 +1,25 @@
 import type * as vscodeType from "vscode";
 
+import { getService } from "@codingame/monaco-vscode-api";
+import {
+  ExtensionHostKind,
+  registerExtension,
+  type IExtensionManifest,
+} from "@codingame/monaco-vscode-api/extensions";
+import { IExtensionService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service";
+import {
+  IWorkbenchExtensionEnablementService,
+  IWorkbenchExtensionManagementService,
+} from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/common/extensionManagement.service";
+import type { ILocalExtension } from "@codingame/monaco-vscode-api/vscode/vs/platform/extensionManagement/common/extensionManagement";
+
 import type {
   ExtensionContext,
   IdeExtension,
   IdeExtensionHttp,
   IdeExtensionSecretStore,
 } from "./api.js";
+import { markPlaceholder } from "./placeholders.js";
 
 /*
  * Manifest of every IDE extension. Each entry lazily imports its module so
@@ -21,67 +35,137 @@ export const extensionModules: Record<string, () => Promise<{ default: IdeExtens
   prettier: () => import("./prettier/extension.js"),
   esbuild: () => import("./esbuild/extension.js"),
   html: () => import("./html/extension.js"),
-  // "node-runtime": () => import("./node-runtime/extension.js"),
-  "node-runtime-v2": () => import("./node-runtime-v2/extension.js"),
+  "node-runtime": () => import("./node-runtime/extension.js"),
   npm: () => import("./npm/extension.js"),
   gitlab: () => import("./gitlab/extension.js"),
   tailwind: () => import("./tailwind/extension.js"),
-  // rolldown: () => import("./rolldown/extension.js"),
-  rollup: () => import("./rollup/extension.js"),
   flatten: () => import("./flatten/extension.js"),
   scripts: () => import("./scripts/extension.js"),
+  welcome: () => import("./welcome/extension.js"),
   // taggedJsx: () => import("./taggedJsx/extension.js"), //gramer not working atm, disabling for now
 };
 
 /*
- * Default enable/disable state per extension. This is the fallback used when
- * the user has not overridden the setting in configuration: the Extensions
- * panel writes to "dataverseIde.extensions.enable.<id>", which takes
- * precedence over these defaults.
+ * Identity of the extension manifest each module contributes. The built-in
+ * Extensions view uses these ids, so they must match the publisher/name used
+ * by the extension's own `registerExtension`/`contributeExtensionManifest`
+ * call.
  */
-export const extensionEnabled: Record<string, boolean> = {
-  git: true,
-  dataverse: true,
-  prettier: true,
-  esbuild: true,
-  html: true,
-  "node-runtime": true,
-  "node-runtime-v2": true,
-  npm: true,
-  gitlab: true,
-  tailwind: true,
-  rolldown: true,
-  rollup: true,
-  flatten: true,
-  scripts: true,
-  taggedJsx: true,
+export type ExtensionManifestIdentity = {
+  publisher: string;
+  name: string;
+  displayName: string;
+  description: string;
 };
+
+export const extensionManifests: Record<string, ExtensionManifestIdentity> = {
+  git: {
+    publisher: "dataverse",
+    name: "dataverse-git",
+    displayName: "Dataverse IDE Git",
+    description: "Browser-based Git status integration for Dataverse IDE.",
+  },
+  dataverse: {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-dataverse",
+    displayName: "Dataverse IDE Dataverse",
+    description: "Web resource upload and settings management.",
+  },
+  prettier: {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-prettier",
+    displayName: "Dataverse IDE Prettier",
+    description: "Format documents with Prettier.",
+  },
+  esbuild: {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-esbuild",
+    displayName: "Dataverse IDE esbuild",
+    description: "esbuild-wasm bundling for workspace files.",
+  },
+  html: {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-html",
+    displayName: "Dataverse IDE HTML",
+    description: "Inline local scripts, stylesheets, SVGs and assets into self-contained HTML.",
+  },
+  "node-runtime": {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-node-runtime",
+    displayName: "Dataverse IDE Node Runtime",
+    description: "Run JavaScript/TypeScript files against the workspace filesystem directly.",
+  },
+  npm: {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-npm",
+    displayName: "Dataverse IDE npm",
+    description: "Install and manage npm packages in the workspace.",
+  },
+  gitlab: {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-gitlab",
+    displayName: "Dataverse IDE GitLab",
+    description: "Merge requests, issues and pipelines for GitLab projects.",
+  },
+  tailwind: {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-tailwind",
+    displayName: "Dataverse IDE Tailwind",
+    description: "Compile Tailwind CSS for the workspace.",
+  },
+  flatten: {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-flatten",
+    displayName: "Dataverse IDE Flatten",
+    description: "Combine selected files into a single markdown document.",
+  },
+  scripts: {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-scripts",
+    displayName: "Dataverse IDE Scripts",
+    description: "Run user-defined series/parallel command scripts.",
+  },
+  welcome: {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-welcome",
+    displayName: "Dataverse IDE Welcome",
+    description: "Landing page describing the IDE's features and extensions.",
+  },
+};
+
+export function extensionId(identity: ExtensionManifestIdentity): string {
+  return `${identity.publisher}.${identity.name}`.toLowerCase();
+}
+
+/*
+ * Register a minimal manifest for every extension before the workbench
+ * initializes. `registerExtension` only adds to the built-in extension list
+ * in that phase, which is what the Extensions view scans. The real manifest
+ * replaces the placeholder when the extension activates.
+ */
+export function registerExtensionPlaceholders(): void {
+  for (const identity of Object.values(extensionManifests)) {
+    const manifest: IExtensionManifest = {
+      name: identity.name,
+      publisher: identity.publisher,
+      version: "0.1.0",
+      engines: {
+        vscode: "*",
+      },
+      displayName: identity.displayName,
+      description: identity.description,
+    };
+
+    markPlaceholder(extensionId(identity));
+    registerExtension(manifest, ExtensionHostKind.LocalProcess);
+  }
+}
 
 export type ActivateExtensionsOptions = {
   vscode: typeof vscodeType;
   workspaceRootUri: vscodeType.Uri;
   workspaceDirectoryHandle?: FileSystemDirectoryHandle;
 };
-
-/** Config section owned by the Extensions manager panel. */
-const extensionsConfigSection = "dataverseIde.extensions";
-
-/*
- * A user can toggle an extension in the built-in Extensions panel, which
- * persists "enable.<id>" under dataverseIde.extensions. Highest-wins order:
- * user setting > compile-time default.
- *
- * Currently exported for future wiring; activation still uses the static
- * extensionEnabled defaults only.
- */
-export function isExtensionEnabled(options: ActivateExtensionsOptions, id: string): boolean {
-  const config = options.vscode.workspace.getConfiguration(
-    extensionsConfigSection,
-    options.workspaceRootUri ?? null,
-  );
-
-  return config.get<boolean | undefined>(`enable.${id}`) ?? extensionEnabled[id] ?? false;
-}
 
 function createHttpProxy(): IdeExtensionHttp {
   /*
@@ -127,15 +211,46 @@ export async function activateExtensions(
 ): Promise<vscodeType.Disposable> {
   const disposables: vscodeType.Disposable[] = [];
 
-  /*
-   * NOTE: the Extensions manager panel (./manager.ts) is implemented but not
-   * wired from here yet. To enable it: dynamically import registerExtensionsPanel
-   * here, push its disposable, and switch the gate below to isExtensionEnabled.
-   */
+  let enablementService: IWorkbenchExtensionEnablementService | undefined;
+  let installedById = new Map<string, ILocalExtension>();
+
+  try {
+    const extensionService = await getService(IExtensionService);
+    await extensionService.whenInstalledExtensionsRegistered();
+
+    enablementService = await getService(IWorkbenchExtensionEnablementService);
+
+    const extensionManagementService = await getService(IWorkbenchExtensionManagementService);
+    const installedExtensions = await extensionManagementService.getInstalled();
+
+    installedById = new Map(
+      installedExtensions.map((extension) => [extension.identifier.id.toLowerCase(), extension]),
+    );
+  } catch (error) {
+    /*
+     * Extension management is optional: if it is unavailable, keep the old
+     * behavior and activate everything.
+     */
+    console.warn(
+      "[Dataverse IDE] Extension enablement is unavailable; activating all extensions.",
+      error,
+    );
+  }
+
+  const inHouseExtensionIds = new Set(
+    Object.values(extensionManifests).map((identity) => extensionId(identity)),
+  );
+
   for (const [id, load] of Object.entries(extensionModules)) {
-    if (!extensionEnabled[id]) {
-      console.info(`[Dataverse IDE] Extension "${id}" is disabled.`);
-      continue;
+    const identity = extensionManifests[id];
+
+    if (identity != null && enablementService != null) {
+      const installed = installedById.get(extensionId(identity));
+
+      if (installed != null && !enablementService.isEnabled(installed)) {
+        console.info(`[Dataverse IDE] Extension "${id}" is disabled.`);
+        continue;
+      }
     }
 
     try {
@@ -162,6 +277,32 @@ export async function activateExtensions(
     } catch (error) {
       console.error(`[Dataverse IDE] Extension "${id}" failed to activate:`, error);
     }
+  }
+
+  if (enablementService != null) {
+    /*
+     * The built-in manager updates VS Code's enablement state, not our manual
+     * activation loop. Prompt a reload so the new state takes effect.
+     */
+    disposables.push(
+      enablementService.onEnablementChanged((extensions) => {
+        const changed = extensions.some((extension) =>
+          inHouseExtensionIds.has(extension.identifier.id.toLowerCase()),
+        );
+
+        if (!changed) {
+          return;
+        }
+
+        void options.vscode.window
+          .showInformationMessage("Reload to apply extension changes.", "Reload")
+          .then((choice) => {
+            if (choice === "Reload") {
+              location.reload();
+            }
+          });
+      }),
+    );
   }
 
   return {

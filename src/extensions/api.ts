@@ -1,45 +1,51 @@
-import type * as vscodeType from 'vscode'
+import type * as vscodeType from "vscode";
 
 export type IdeExtensionSecretStore = {
-  get: (key: string) => Promise<string | undefined>
-  set: (key: string, value: string) => Promise<void>
-  remove: (key: string) => Promise<void>
-}
+  get: (key: string) => Promise<string | undefined>;
+  set: (key: string, value: string) => Promise<void>;
+  remove: (key: string) => Promise<void>;
+};
 
 export type IdeExtensionHttp = {
-  (input: RequestInfo | URL, init?: RequestInit): Promise<Response>
-}
+  (input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+};
 
 export type ExtensionContext = {
-  id: string
+  id: string;
 
-  vscode: typeof vscodeType
+  vscode: typeof vscodeType;
 
-  workspaceRootUri: vscodeType.Uri
+  workspaceRootUri: vscodeType.Uri;
 
   /*
    * Available for local (File System Access API) workspaces; OPFS
    * workspaces may expose a different handle type, so this is optional.
    */
-  workspaceDirectoryHandle?: FileSystemDirectoryHandle
+  workspaceDirectoryHandle?: FileSystemDirectoryHandle;
 
-  outputChannel: vscodeType.OutputChannel
+  outputChannel: vscodeType.OutputChannel;
 
-  secrets: IdeExtensionSecretStore
+  secrets: IdeExtensionSecretStore;
 
-  http: IdeExtensionHttp
-}
+  http: IdeExtensionHttp;
+};
 
 export type IdeExtension = {
-  id: string
+  id: string;
 
-  activate(context: ExtensionContext): Promise<vscodeType.Disposable | void>
-}
+  activate(context: ExtensionContext): Promise<vscodeType.Disposable | void>;
+};
 
 import {
   ExtensionHostKind,
   registerExtension,
-} from '@codingame/monaco-vscode-api/extensions'
+  type IExtensionManifest,
+  type RegisterLocalProcessExtensionResult,
+} from "@codingame/monaco-vscode-api/extensions";
+import { getService } from "@codingame/monaco-vscode-api";
+import { IExtensionService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service";
+
+import { consumePlaceholder } from "./placeholders.js";
 
 /*
  * Contribute command palette entries for an extension.
@@ -50,34 +56,61 @@ import {
  * contribution manifest.
  */
 export async function contributeCommandManifest(input: {
-  id: string
-  displayName: string
-  description: string
-  commands: { command: string; title: string }[]
-  configuration?: ConfigurationContribution
+  id: string;
+  displayName: string;
+  description: string;
+  commands: { command: string; title: string }[];
+  configuration?: ConfigurationContribution;
 }): Promise<void> {
   const { getApi } = registerExtension(
     {
       name: `dataverse-ide-${input.id}`,
-      publisher: 'dataverse-ide',
-      version: '0.1.0',
+      publisher: "dataverse-ide",
+      version: "0.1.0",
       engines: {
-        vscode: '*',
+        vscode: "*",
       },
       displayName: input.displayName,
       description: input.description,
       contributes: {
         commands: input.commands,
-        ...(input.configuration != null
-          ? { configuration: input.configuration }
-          : {}),
+        ...(input.configuration != null ? { configuration: input.configuration } : {}),
       },
     },
     ExtensionHostKind.LocalProcess,
-  )
+  );
 
   // Force the extension api to initialize so contributions are picked up.
-  await getApi()
+  await getApi();
+}
+
+type ExtensionServiceWithDelta = IExtensionService & {
+  deltaExtensions?: (toAdd: readonly unknown[], toRemove: readonly string[]) => Promise<void>;
+};
+
+async function removeExtensionFromRegistry(id: string): Promise<void> {
+  const extensionService = (await getService(IExtensionService)) as ExtensionServiceWithDelta;
+
+  if (extensionService.deltaExtensions != null) {
+    await extensionService.deltaExtensions([], [id]);
+  }
+}
+
+/*
+ * Replace the minimal manifest registered at boot with the full one. Without
+ * this the extension service would reject the second manifest because an
+ * extension with the same id already exists.
+ */
+export async function registerExtensionReplacingPlaceholder(
+  manifest: IExtensionManifest,
+): Promise<RegisterLocalProcessExtensionResult> {
+  const id = `${manifest.publisher}.${manifest.name}`;
+
+  if (consumePlaceholder(id)) {
+    await removeExtensionFromRegistry(id);
+  }
+
+  return registerExtension(manifest, ExtensionHostKind.LocalProcess);
 }
 
 /*
@@ -87,20 +120,20 @@ export async function contributeCommandManifest(input: {
  * a solid block with no visible glyph.
  */
 const DEFAULT_ACTIVITYBAR_ICON =
-  'data:image/svg+xml;base64,' +
+  "data:image/svg+xml;base64," +
   btoa(
     '<svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
-    '<path d="M4 7h16v13H4V7Z" fill="none" stroke="#fff" stroke-width="1.8"/>' +
-    '<path d="M4 7l3-3h10l3 3" fill="none" stroke="#fff" stroke-width="1.8"/>' +
-    '</svg>',
-  )
+      '<path d="M4 7h16v13H4V7Z" fill="none" stroke="#fff" stroke-width="1.8"/>' +
+      '<path d="M4 7l3-3h10l3 3" fill="none" stroke="#fff" stroke-width="1.8"/>' +
+      "</svg>",
+  );
 
 export type ViewContribution = {
-  containerId: string
-  containerTitle: string
-  icon?: string
-  views: { id: string; name: string }[]
-}
+  containerId: string;
+  containerTitle: string;
+  icon?: string;
+  views: { id: string; name: string }[];
+};
 
 /*
  * Same as contributeCommandManifest, plus sidebar (activity bar) views.
@@ -118,89 +151,89 @@ export type ViewContribution = {
  * diverge from the path the views extension point computes.
  */
 export function activitybarIconPath(id: string): string {
-  return `${id}-icon.svg`
+  return `${id}-icon.svg`;
 }
 
 export type ConfigurationContribution = {
-  title: string
-  properties: Record<string, unknown>
-}
+  title: string;
+  properties: Record<string, unknown>;
+};
 
 export type MenuContribution =
   | {
       /** Menu id, e.g. "explorer/context". */
-      menu: string
-      command: string
+      menu: string;
+      command: string;
       /** e.g. "navigation@60". */
-      group?: string
+      group?: string;
       /** Optional clause, e.g. "resourceExtname == .html". */
-      when?: string
+      when?: string;
     }
   | {
       /** Menu id, e.g. "view/item/context". */
-      menu: string
-      submenu: string
-      group?: string
-      when?: string
-    }
+      menu: string;
+      submenu: string;
+      group?: string;
+      when?: string;
+    };
 
 export type SubmenuContribution = {
-  id: string
-  label: string
-  icon?: string
-}
+  id: string;
+  label: string;
+  icon?: string;
+};
 
 export async function contributeExtensionManifest(input: {
-  id: string
-  displayName: string
-  description: string
+  id: string;
+  displayName: string;
+  description: string;
   commands: {
-    command: string
-    title: string
-    icon?: string
-  }[]
-  views?: ViewContribution
-  configuration?: ConfigurationContribution
-  menus?: MenuContribution[]
-  submenus?: SubmenuContribution[]
+    command: string;
+    title: string;
+    icon?: string;
+  }[];
+  views?: ViewContribution;
+  configuration?: ConfigurationContribution;
+  menus?: MenuContribution[];
+  submenus?: SubmenuContribution[];
 }): Promise<void> {
   const contributes: Record<string, unknown> = {
     commands: input.commands,
-  }
+  };
 
   if (input.configuration != null) {
-    contributes.configuration = input.configuration
+    contributes.configuration = input.configuration;
   }
 
   if (input.menus != null && input.menus.length > 0) {
-    const menus: Record<string, unknown[]> = {}
-  
+    const menus: Record<string, unknown[]> = {};
+
     for (const entry of input.menus) {
       const placement: Record<string, unknown> =
-        'command' in entry
+        "command" in entry
           ? {
               command: entry.command,
             }
           : {
               submenu: entry.submenu,
-            }
-  
+            };
+
       if (entry.group != null) {
-        placement.group = entry.group
+        placement.group = entry.group;
       }
-  
+
       if (entry.when != null) {
-        placement.when = entry.when
+        placement.when = entry.when;
       }
-  
-      ;(menus[entry.menu] ??= []).push(placement)
+
+      (menus[entry.menu] ??= []).push(placement);
     }
-  
-    contributes.menus = menus
+
+    contributes.menus = menus;
   }
-  
+
   if (input.submenus != null && input.submenus.length > 0) {
-    contributes.submenus = input.submenus
+    contributes.submenus = input.submenus;
   }
 
   if (input.views != null) {
@@ -212,44 +245,34 @@ export async function contributeExtensionManifest(input: {
           icon: activitybarIconPath(input.id),
         },
       ],
-    }
+    };
 
     contributes.views = {
       [input.views.containerId]: input.views.views.map((view) => ({
         ...view,
-        type: 'tree',
+        type: "tree",
       })),
-    }
+    };
   }
 
-  const { getApi, registerFileUrl } = registerExtension(
-    {
-      name: `dataverse-ide-${input.id}`,
-      publisher: 'dataverse-ide',
-      version: '0.1.0',
-      engines: {
-        vscode: '*',
-      },
-      displayName: input.displayName,
-      description: input.description,
-      contributes: contributes as {
-        commands: {
-          command: string
-          title: string
-          icon?: string
-        }[]
-      },
+  const manifest: IExtensionManifest = {
+    name: `dataverse-ide-${input.id}`,
+    publisher: "dataverse-ide",
+    version: "0.1.0",
+    engines: {
+      vscode: "*",
     },
-    ExtensionHostKind.LocalProcess,
-  )
+    displayName: input.displayName,
+    description: input.description,
+    contributes: contributes as IExtensionManifest["contributes"],
+  };
+
+  const { getApi, registerFileUrl } = await registerExtensionReplacingPlaceholder(manifest);
 
   if (input.views != null) {
-    registerFileUrl(
-      activitybarIconPath(input.id),
-      input.views.icon ?? DEFAULT_ACTIVITYBAR_ICON,
-    )
+    registerFileUrl(activitybarIconPath(input.id), input.views.icon ?? DEFAULT_ACTIVITYBAR_ICON);
   }
 
   // Force the extension api to initialize so contributions are picked up.
-  await getApi()
+  await getApi();
 }

@@ -1,14 +1,11 @@
 /*
- * Main-thread workspace reader + async package resolver for rollup.
+ * Async workspace reader + package resolver used by the direct-fs Node
+ * runtime.
  *
- * Rollup's browser build has no filesystem, so the extension supplies a
- * virtual-filesystem plugin that reads only the files the dependency graph
- * actually reaches. This is the same direct-read design as the esbuild
- * extension: no workspace-wide collection, no node_modules manifest scan and
- * no lazy needFiles rounds.
+ * The loader reads only the files the module graph actually reaches through
+ * vscode.workspace.fs. There is no workspace-wide collection, no node_modules
+ * manifest scan and no lazy probe rounds.
  */
-
-import type * as vscodeType from "vscode";
 
 import {
   COMPANION_EXTENSIONS,
@@ -18,7 +15,7 @@ import {
   normalizePath,
   parseJsonSafe,
   splitPackageSpec,
-} from "../shared/packageResolver.js";
+} from "./packageResolver.js";
 
 export type WorkspaceReader = {
   /**
@@ -34,74 +31,6 @@ export type PackageResolver = {
   resolveBareImport: (specifier: string) => Promise<string | undefined>;
   resolvePackageImport: (specifier: string, importer: string) => Promise<string | undefined>;
 };
-
-/*
- * Creates a cached workspace reader over vscode.workspace.fs.
- *
- * This uses the mounted workspace provider (local folders, browser
- * workspaces and the OPFS node_modules overlay), not raw browser APIs.
- */
-export function createWorkspaceReader(
-  vscode: typeof vscodeType,
-  workspaceRootUri: vscodeType.Uri,
-): WorkspaceReader {
-  const cache = new Map<string, Promise<string | undefined>>();
-
-  return {
-    readText(path: string): Promise<string | undefined> {
-      const normalized = normalizePath(path);
-
-      if (normalized.length === 0) {
-        return Promise.resolve(undefined);
-      }
-
-      const existing = cache.get(normalized);
-
-      if (existing != null) {
-        return existing;
-      }
-
-      const pending = (async () => {
-        try {
-          const uri = vscode.Uri.joinPath(
-            workspaceRootUri,
-            ...normalized.split("/").filter((segment) => segment.length > 0),
-          );
-
-          const bytes = await vscode.workspace.fs.readFile(uri);
-
-          return new TextDecoder().decode(bytes);
-        } catch {
-          return undefined;
-        }
-      })();
-
-      cache.set(normalized, pending);
-
-      return pending;
-    },
-  };
-}
-
-export function isConfiguredExternal(path: string, externalPaths: string[]): boolean {
-  return externalPaths.some((external) => path === external || path.startsWith(`${external}/`));
-}
-
-export function joinFromImporter(importer: string, specifier: string): string {
-  if (specifier.startsWith("/")) {
-    return normalizePath(specifier);
-  }
-
-  const importerDirectory = normalizePath(importer)
-    .split("/")
-    .filter((segment) => segment.length > 0);
-
-  importerDirectory.pop();
-
-  return normalizePath(
-    importerDirectory.length > 0 ? `${importerDirectory.join("/")}/${specifier}` : specifier,
-  );
-}
 
 /*
  * Resolves a conditional target object using package key order, matching
@@ -455,37 +384,4 @@ export function createPackageResolver(reader: WorkspaceReader): PackageResolver 
     resolveBareImport,
     resolvePackageImport,
   };
-}
-
-export async function resolveRelativeWorkspacePath(
-  reader: WorkspaceReader,
-  path: string,
-): Promise<string | undefined> {
-  const normalized = normalizePath(path);
-
-  if ((await reader.readText(normalized)) != null) {
-    return normalized;
-  }
-
-  if (hasFileExtension(normalized)) {
-    return undefined;
-  }
-
-  for (const extension of COMPANION_EXTENSIONS) {
-    const candidate = `${normalized}${extension}`;
-
-    if ((await reader.readText(candidate)) != null) {
-      return candidate;
-    }
-  }
-
-  for (const trail of INDEX_TRAILS) {
-    const candidate = `${normalized}${trail}`;
-
-    if ((await reader.readText(candidate)) != null) {
-      return candidate;
-    }
-  }
-
-  return undefined;
 }

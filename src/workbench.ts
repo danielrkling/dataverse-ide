@@ -6,6 +6,7 @@ import getDialogsServiceOverride from "@codingame/monaco-vscode-dialogs-service-
 import getEnvironmentServiceOverride from "@codingame/monaco-vscode-environment-service-override";
 import getExplorerServiceOverride from "@codingame/monaco-vscode-explorer-service-override";
 import getExtensionServiceOverride from "@codingame/monaco-vscode-extensions-service-override";
+import getExtensionGalleryServiceOverride from "@codingame/monaco-vscode-extension-gallery-service-override";
 import getKeybindingsServiceOverride from "@codingame/monaco-vscode-keybindings-service-override";
 import getLanguagesServiceOverride from "@codingame/monaco-vscode-languages-service-override";
 import getLocalizationServiceOverride from "@codingame/monaco-vscode-localization-service-override";
@@ -45,8 +46,9 @@ import localFileSearchWorkerUrl from "@codingame/monaco-vscode-search-service-ov
 import outputLinkComputerWorkerUrl from "@codingame/monaco-vscode-output-service-override/worker?worker&url";
 import outputLinkDetectionWorkerUrl from "@codingame/monaco-vscode-output-service-override/worker?worker&url";
 
-import { activateExtensions } from "./extensions/registry.js";
+import { activateExtensions, registerExtensionPlaceholders } from "./extensions/registry.js";
 import { registerConfigJsonSchemas } from "./extensions/shared/configJsonSchemas.js";
+import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
 
 import { workspaceDirectoryHandle } from "./workspace/fsProvider.js";
 
@@ -201,6 +203,37 @@ window.MonacoEnvironment = {
   },
 };
 
+/*
+ * The built-in Extensions manager handles "Manage Extension" for real
+ * extensions. Components registered through the shared default API report
+ * the internal `nullExtensionDescription` id, which the manager cannot find,
+ * so answer those with a message instead of an "extension not found" error.
+ */
+function registerExtensionManageGuard(): vscode.Disposable {
+  const manage = CommandsRegistry.getCommand("_extensions.manage");
+
+  const guard = CommandsRegistry.registerCommand(
+    "_extensions.manage",
+    (accessor, extensionId?: unknown) => {
+      if (
+        manage == null ||
+        typeof extensionId !== "string" ||
+        extensionId.length === 0 ||
+        extensionId === "nullExtensionDescription"
+      ) {
+        void vscode.window.showInformationMessage(
+          "This component is built into Dataverse IDE, so there is no extension to manage.",
+        );
+        return;
+      }
+
+      return manage.handler(accessor, extensionId);
+    },
+  );
+
+  return new vscode.Disposable(() => guard.dispose());
+}
+
 function installDocumentAutoSave(delayMs = 1000): vscode.Disposable {
   const timers = new Map<string, number>();
 
@@ -296,6 +329,13 @@ function installDocumentAutoSave(delayMs = 1000): vscode.Disposable {
 export async function startWorkbench(container: HTMLElement): Promise<void> {
   preloadWorkerBlobs();
 
+  /*
+   * Register minimal manifests before the workbench starts so the built-in
+   * Extensions view can list (and enable/disable) the in-house extensions.
+   * The full manifests replace them during activation.
+   */
+  registerExtensionPlaceholders();
+
   // Existing startWorkbench code follows...
   // Like the demo: on localhost, run the web worker extension host in a sandboxed
   // iframe under a wildcard subdomain (localhost subdomains resolve for free).
@@ -364,6 +404,13 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
         enableWorkerExtensionHost: true,
         iframeAlternateDomain,
       }),
+      /*
+       * The built-in Extensions view / extension manager. This package brings
+       * the workbench's extension management services and imports the
+       * Extensions contribution, which registers the view and the internal
+       * `_extensions.manage` command.
+       */
+      ...getExtensionGalleryServiceOverride({ webOnly: true }),
       ...getModelServiceOverride(),
       ...getNotificationServiceOverride(),
       ...getDialogsServiceOverride(),
@@ -438,6 +485,12 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
   const configSchemasDisposable = registerConfigJsonSchemas();
 
   /*
+   * Let the built-in manager handle real extensions, but not the internal
+   * default-API id used by our own status bar items and notifications.
+   */
+  const extensionManageGuard = registerExtensionManageGuard();
+
+  /*
    * Contribute dataverseIde.overlayDirs (which top-level workspace
    * directories are persisted in OPFS, default ['node_modules']).
    */
@@ -461,6 +514,7 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
     () => {
       autoSaveDisposable.dispose();
       configSchemasDisposable.dispose();
+      extensionManageGuard.dispose();
       extensionsDisposable.dispose();
     },
     { once: true },

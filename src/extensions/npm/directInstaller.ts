@@ -14,9 +14,9 @@
  */
 
 import type * as vscodeType from 'vscode'
-import { npm } from 'almostnode'
 
 import { ensureWorkspacePackageJson, writeWorkspaceFileText } from './packageBridge'
+import { parsePackageSpec, Registry, type ResolvedPackage } from './registry'
 import { resolveTree } from './resolver'
 import { gunzip, parseTar } from './tarball'
 
@@ -24,7 +24,7 @@ const CONCURRENCY = 6
 
 export type NpmDependencySection = 'dependencies' | 'devDependencies'
 
-type ResolvedPackageValue = npm.ResolvedPackage
+type ResolvedPackageValue = ResolvedPackage
 
 export type ResolvedMap = Map<string, ResolvedPackageValue>
 
@@ -68,7 +68,7 @@ export async function directInstall(
     devDependencies?: Record<string, string>
   }
 
-  const registry = new npm.Registry()
+  const registry = new Registry()
 
   const roots = collectRoots(packageJson, options)
 
@@ -172,7 +172,7 @@ function collectRoots(
 }
 
 function parseSpecToRoot(spec: string): [string, string] {
-  const { name, version } = npm.parsePackageSpec(spec)
+  const { name, version } = parsePackageSpec(spec)
 
   return [name, version == null || version.length === 0 ? 'latest' : version]
 }

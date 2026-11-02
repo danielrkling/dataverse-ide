@@ -5,9 +5,9 @@
 .DESCRIPTION
     Every file under dist/ is uploaded as a web resource named
     "<prefix>/<relative path>", e.g. dist/assets/index-xyz.js ->
-    "dv_/ide/assets/index-xyz.js" served at:
+    "dv_ide/assets/index-xyz.js" served at:
 
-      https://<org>.crm.dynamics.com/webresources/dv_/ide/assets/index-xyz.js
+      https://<org>.crm.dynamics.com/webresources/dv_ide/assets/index-xyz.js
 
     Wasm/font binaries are already inlined into the JS chunks by the build
     config, so only .js/.json/.css/.html/.txt files end up being deployed.
@@ -22,7 +22,7 @@ param(
     [Parameter(Mandatory)][string] $EnvironmentUrl,
     [Parameter(Mandatory)][string] $Token,
     [string] $DistFolder = (Join-Path $PSScriptRoot "..\dist"),
-    [string] $Prefix = "dv_/ide"
+    [string] $Prefix = "dv_ide"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,7 +64,7 @@ $uploaded = 0
 $failed = 0
 foreach ($file in $files) {
     $relative = [System.IO.Path]::GetRelativePath($DistFolder, $file.FullName).Replace('\', '/')
-    $name = "$Prefix/$relative"  # e.g. dv_/ide/assets/index-xyz.js
+    $name = "$Prefix/$relative"  # e.g. dv_ide/assets/index-xyz.js
     $ext = $file.Extension.Substring(1).ToLowerInvariant()
     $type = if ($TypeMap.Contains($ext)) { $TypeMap[$ext] } else { 3 }
 

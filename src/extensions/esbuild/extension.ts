@@ -17,13 +17,6 @@ import {
 
 import { EsbuildWatcher } from "./watcher.js";
 
-import { benchmarkWorkspaceWrites, formatWriteBenchmark } from "../../workspace/writeBenchmark.js";
-import {
-  ensureWorkspaceDirectory,
-  statWorkspaceFile,
-  writeWorkspaceFile,
-} from "../../workspace/workspaceFsFast.js";
-
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
 /*
@@ -31,7 +24,7 @@ import type { ExtensionContext, IdeExtension } from "../api.js";
  *
  * The compiler reads source files directly from vscode.workspace.fs through
  * compiler.ts. There is no workspace-wide collection pass and no lazy
- * needFiles/probe loop:
+ * probe loop:
  *
  *   esbuild requests import
  *     → resolver checks the actual mounted workspace filesystem
@@ -114,7 +107,7 @@ async function writeOutputs(
        * without reading the whole output back.
        */
       try {
-        await statWorkspaceFile(vscode, outFile);
+        await vscode.workspace.fs.stat(outFile);
         skipped += 1;
         continue;
       } catch {
@@ -122,11 +115,11 @@ async function writeOutputs(
       }
     }
 
-    await ensureWorkspaceDirectory(vscode, parent);
+    await vscode.workspace.fs.createDirectory(parent);
 
     const fileStarted = performance.now();
 
-    await writeWorkspaceFile(vscode, outFile, encoded);
+    await vscode.workspace.fs.writeFile(outFile, encoded);
 
     const fileMs = performance.now() - fileStarted;
 
@@ -240,10 +233,6 @@ export default {
         {
           command: "dataverseIde.esbuild.reloadConfig",
           title: "esbuild: Reload Config",
-        },
-        {
-          command: "dataverseIde.esbuild.benchmarkWrites",
-          title: "esbuild: Benchmark Workspace Writes",
         },
       ],
       configuration: {
@@ -862,33 +851,6 @@ export default {
       },
     );
 
-    const benchmarkWritesCommand = vscode.commands.registerCommand(
-      "dataverseIde.esbuild.benchmarkWrites",
-      async () => {
-        outputChannel.show(true);
-        outputChannel.appendLine(
-          "[esbuild] write benchmark starting (writes several 400 KB temp files)…",
-        );
-
-        try {
-          const result = await benchmarkWorkspaceWrites(vscode);
-          const report = formatWriteBenchmark(result);
-
-          outputChannel.appendLine(`[esbuild] ${report}`);
-
-          await vscode.window.showInformationMessage(
-            "[esbuild] write benchmark finished — see the Output panel.",
-          );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-
-          outputChannel.appendLine(`[esbuild] write benchmark failed: ${message}`);
-
-          await vscode.window.showErrorMessage(`[esbuild] write benchmark failed: ${message}`);
-        }
-      },
-    );
-
     outputChannel.appendLine("[esbuild] commands registered.");
 
     return {
@@ -912,7 +874,6 @@ export default {
         configureSolidCommand.dispose();
         outputChannelCommand.dispose();
         reloadConfigCommand.dispose();
-        benchmarkWritesCommand.dispose();
 
         runner.dispose();
       },

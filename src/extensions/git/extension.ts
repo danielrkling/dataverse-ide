@@ -1,6 +1,7 @@
-import { ExtensionHostKind, registerExtension } from "@codingame/monaco-vscode-api/extensions";
 import type * as vscodeType from "vscode";
 import type { IExtensionManifest } from "@codingame/monaco-vscode-api/extensions";
+
+import { registerExtensionReplacingPlaceholder } from "../api.js";
 
 import {
   addRemote,
@@ -286,515 +287,512 @@ export async function installDataverseGitExtension(
     }
   }
 
-  const { getApi } = registerExtension(
-    {
-      name: "dataverse-git",
-      publisher: "dataverse",
-      version: "0.1.0",
-      engines: {
-        vscode: "*",
-      },
-      displayName: "Dataverse IDE Git",
-      description: "Browser-based Git status integration for Dataverse IDE.",
-      contributes: {
-        colors: [
-          {
-            id: "gitDecoration.modifiedResourceForeground",
-            description: "Explorer decorations: modified resources",
-            defaults: {
-              dark: "#E2C08D",
-              light: "#895503",
-              highContrast: "#E2C08D",
-              highContrastLight: "#895503",
-            },
-          },
-          {
-            id: "gitDecoration.deletedResourceForeground",
-            description: "Explorer decorations: deleted resources",
-            defaults: {
-              dark: "#C74E39",
-              light: "#AD0707",
-              highContrast: "#C74E39",
-              highContrastLight: "#AD0707",
-            },
-          },
-          {
-            id: "gitDecoration.untrackedResourceForeground",
-            description: "Explorer decorations: untracked resources",
-            defaults: {
-              dark: "#73C991",
-              light: "#73C991",
-              highContrast: "#73C991",
-              highContrastLight: "#73C991",
-            },
-          },
-          {
-            id: "gitDecoration.addedResourceForeground",
-            description: "Explorer decorations: added resources",
-            defaults: {
-              dark: "#81B88B",
-              light: "#587C0C",
-              highContrast: "#A1E0AD",
-              highContrastLight: "#587C0C",
-            },
-          },
-          {
-            id: "gitDecoration.stagedResourceForeground",
-            description: "Explorer decorations: staged resources",
-            defaults: {
-              dark: "#B78A5E",
-              light: "#347433",
-              highContrast: "#E2C08D",
-              highContrastLight: "#347433",
-            },
-          },
-        ],
-        configuration: {
-          title: "Git",
-          properties: {
-            "dataverseIde.git.authorName": {
-              type: "string",
-              default: "",
-              description:
-                "Git commit author name. Set together with authorEmail to skip the author prompts.",
-            },
-            "dataverseIde.git.authorEmail": {
-              type: "string",
-              default: "",
-              description:
-                "Git commit author email address. Set together with authorName to skip the author prompts.",
-            },
-            "dataverseIde.git.autoFetchMinutes": {
-              type: "number",
-              default: 0,
-              minimum: 0,
-              description:
-                "Automatically fetch from the configured remote(s) every N minutes while the workspace is open. 0 disables auto-fetch.",
-            },
+  const { getApi } = await registerExtensionReplacingPlaceholder({
+    name: "dataverse-git",
+    publisher: "dataverse",
+    version: "0.1.0",
+    engines: {
+      vscode: "*",
+    },
+    displayName: "Dataverse IDE Git",
+    description: "Browser-based Git status integration for Dataverse IDE.",
+    contributes: {
+      colors: [
+        {
+          id: "gitDecoration.modifiedResourceForeground",
+          description: "Explorer decorations: modified resources",
+          defaults: {
+            dark: "#E2C08D",
+            light: "#895503",
+            highContrast: "#E2C08D",
+            highContrastLight: "#895503",
           },
         },
-        commands: [
-          {
-            command: "dataverseGit.initialize",
-            title: "Git: Initialize Repository",
+        {
+          id: "gitDecoration.deletedResourceForeground",
+          description: "Explorer decorations: deleted resources",
+          defaults: {
+            dark: "#C74E39",
+            light: "#AD0707",
+            highContrast: "#C74E39",
+            highContrastLight: "#AD0707",
           },
-          {
-            command: "dataverseGit.refresh",
-            title: "Git: Refresh Status",
+        },
+        {
+          id: "gitDecoration.untrackedResourceForeground",
+          description: "Explorer decorations: untracked resources",
+          defaults: {
+            dark: "#73C991",
+            light: "#73C991",
+            highContrast: "#73C991",
+            highContrastLight: "#73C991",
           },
-          {
-            command: "dataverseGit.stage",
-            title: "Git: Stage Changes",
-            icon: "$(plus)",
+        },
+        {
+          id: "gitDecoration.addedResourceForeground",
+          description: "Explorer decorations: added resources",
+          defaults: {
+            dark: "#81B88B",
+            light: "#587C0C",
+            highContrast: "#A1E0AD",
+            highContrastLight: "#587C0C",
           },
-          {
-            command: "dataverseGit.stageSelectedLines",
-            title: "Git: Stage Selected Lines",
+        },
+        {
+          id: "gitDecoration.stagedResourceForeground",
+          description: "Explorer decorations: staged resources",
+          defaults: {
+            dark: "#B78A5E",
+            light: "#347433",
+            highContrast: "#E2C08D",
+            highContrastLight: "#347433",
           },
-          {
-            command: "dataverseGit.discardSelectedLines",
-            title: "Git: Discard Selected Lines",
+        },
+      ],
+      configuration: {
+        title: "Git",
+        properties: {
+          "dataverseIde.git.authorName": {
+            type: "string",
+            default: "",
+            description:
+              "Git commit author name. Set together with authorEmail to skip the author prompts.",
           },
-          {
-            command: "dataverseGit.commitAmend",
-            title: "Git: Commit (Amend Last Commit)",
+          "dataverseIde.git.authorEmail": {
+            type: "string",
+            default: "",
+            description:
+              "Git commit author email address. Set together with authorName to skip the author prompts.",
           },
+          "dataverseIde.git.autoFetchMinutes": {
+            type: "number",
+            default: 0,
+            minimum: 0,
+            description:
+              "Automatically fetch from the configured remote(s) every N minutes while the workspace is open. 0 disables auto-fetch.",
+          },
+        },
+      },
+      commands: [
+        {
+          command: "dataverseGit.initialize",
+          title: "Git: Initialize Repository",
+        },
+        {
+          command: "dataverseGit.refresh",
+          title: "Git: Refresh Status",
+        },
+        {
+          command: "dataverseGit.stage",
+          title: "Git: Stage Changes",
+          icon: "$(plus)",
+        },
+        {
+          command: "dataverseGit.stageSelectedLines",
+          title: "Git: Stage Selected Lines",
+        },
+        {
+          command: "dataverseGit.discardSelectedLines",
+          title: "Git: Discard Selected Lines",
+        },
+        {
+          command: "dataverseGit.commitAmend",
+          title: "Git: Commit (Amend Last Commit)",
+        },
+        {
+          command: "dataverseGit.addToGitignore",
+          title: "Git: Add to .gitignore",
+        },
+        {
+          command: "dataverseGit.stageAll",
+          title: "Git: Stage All Changes",
+          icon: "$(plus)",
+        },
+        {
+          command: "dataverseGit.unstage",
+          title: "Git: Unstage Changes",
+          icon: "$(minus)",
+        },
+        {
+          command: "dataverseGit.unstageAll",
+          title: "Git: Unstage All Changes",
+          icon: "$(minus)",
+        },
+        {
+          command: "dataverseGit.discard",
+          title: "Git: Discard Changes",
+          icon: "$(discard)",
+        },
+        {
+          command: "dataverseGit.discardAll",
+          title: "Git: Discard All Changes",
+          icon: "$(discard)",
+        },
+        {
+          command: "dataverseGit.openChanges",
+          title: "Git: Open Changes",
+          icon: "$(diff)",
+        },
+        {
+          command: "dataverseGit.commit",
+          title: "Git: Commit Staged Changes",
+        },
+        {
+          command: "dataverseGit.createBranch",
+          title: "Git: Create Branch",
+        },
+        {
+          command: "dataverseGit.switchBranch",
+          title: "Git: Switch Branch",
+        },
+        {
+          command: "dataverseGit.deleteBranch",
+          title: "Git: Delete Branch",
+        },
+        {
+          command: "dataverseGit.showHistory",
+          title: "Git: Show Commit History",
+        },
+        {
+          command: "dataverseGit.showFileHistory",
+          title: "Git: Show File History (Timeline)",
+        },
+        {
+          command: "dataverseGit.sync",
+          title: "Git: Sync",
+        },
+        {
+          command: "dataverseGit.clone",
+          title: "Git: Clone Repository",
+        },
+        {
+          command: "dataverseGit.addRemote",
+          title: "Git: Add Remote",
+        },
+        {
+          command: "dataverseGit.removeRemote",
+          title: "Git: Remove Remote",
+        },
+        {
+          command: "dataverseGit.fetch",
+          title: "Git: Fetch",
+        },
+        {
+          command: "dataverseGit.pull",
+          title: "Git: Pull",
+        },
+        {
+          command: "dataverseGit.push",
+          title: "Git: Push",
+        },
+        {
+          command: "dataverseGit.forgetCredentials",
+          title: "Git: Forget Stored Remote Credentials",
+        },
+      ],
+
+      submenus: [
+        {
+          id: "dataverseGit.stateMenu",
+          label: "More Actions…",
+        },
+        {
+          id: "dataverseGit.repoMenu",
+          label: "Git: More Actions…",
+          icon: "$(ellipsis)",
+        },
+      ],
+
+      menus: {
+        "scm/resourceState/context": [
           {
             command: "dataverseGit.addToGitignore",
-            title: "Git: Add to .gitignore",
-          },
-          {
-            command: "dataverseGit.stageAll",
-            title: "Git: Stage All Changes",
-            icon: "$(plus)",
-          },
-          {
-            command: "dataverseGit.unstage",
-            title: "Git: Unstage Changes",
-            icon: "$(minus)",
-          },
-          {
-            command: "dataverseGit.unstageAll",
-            title: "Git: Unstage All Changes",
-            icon: "$(minus)",
-          },
-          {
-            command: "dataverseGit.discard",
-            title: "Git: Discard Changes",
-            icon: "$(discard)",
-          },
-          {
-            command: "dataverseGit.discardAll",
-            title: "Git: Discard All Changes",
-            icon: "$(discard)",
+            when: "scmProvider == dataverseGit && scmResourceState == untracked",
+            group: "9_ignored",
           },
           {
             command: "dataverseGit.openChanges",
-            title: "Git: Open Changes",
-            icon: "$(diff)",
+            when: "scmProvider == dataverseGit && scmResourceState == changes || scmProvider == dataverseGit && scmResourceState == staged",
+            group: "navigation@1",
           },
           {
-            command: "dataverseGit.commit",
-            title: "Git: Commit Staged Changes",
+            command: "dataverseGit.stage",
+            when: "scmProvider == dataverseGit && scmResourceGroup == changes && scmResourceState != untracked",
+            group: "inline@1",
+          },
+          {
+            command: "dataverseGit.unstage",
+            when: "scmProvider == dataverseGit && scmResourceGroup == staged",
+            group: "inline@1",
+          },
+          {
+            command: "dataverseGit.discard",
+            when: "scmProvider == dataverseGit && scmResourceGroup == changes",
+            group: "inline@2",
+          },
+          {
+            command: "dataverseGit.addToGitignore",
+            when: "scmProvider == dataverseGit && scmResourceGroup == changes && scmResourceState == untracked",
+            group: "inline@3",
+          },
+          {
+            submenu: "dataverseGit.stateMenu",
+            when: "scmProvider == dataverseGit",
+            group: "9_more",
+          },
+        ],
+
+        "scm/resourceGroup/context": [
+          {
+            /*
+             * Actions in the "inline" group are rendered as buttons
+             * directly on the group header row in the SCM tree.
+             */
+            command: "dataverseGit.stageAll",
+            when: "scmProvider == dataverseGit && scmResourceGroup == changes",
+            group: "inline@1",
+          },
+          {
+            command: "dataverseGit.discardAll",
+            when: "scmProvider == dataverseGit && scmResourceGroup == changes",
+            group: "inline@2",
+          },
+          {
+            command: "dataverseGit.stageAll",
+            when: "scmProvider == dataverseGit && scmResourceGroup == changes",
+            group: "1_modification@1",
+          },
+          {
+            command: "dataverseGit.addToGitignore",
+            when: "scmProvider == dataverseGit && scmResourceGroup == changes && scmResourceState == untracked",
+            group: "1_modification@2",
+          },
+          /*
+           * Discard All is destructive; the command itself asks for a
+           * modal confirmation before discarding anything.
+           */
+          {
+            command: "dataverseGit.discardAll",
+            when: "scmProvider == dataverseGit && scmResourceGroup == changes",
+            group: "2_destructive",
+          },
+          {
+            command: "dataverseGit.unstageAll",
+            when: "scmProvider == dataverseGit && scmResourceGroup == staged",
+            group: "inline@1",
+          },
+          {
+            command: "dataverseGit.unstageAll",
+            when: "scmProvider == dataverseGit && scmResourceGroup == staged",
+            group: "1_modification@1",
+          },
+          {
+            submenu: "dataverseGit.stateMenu",
+            when: "scmProvider == dataverseGit",
+            group: "9_more",
+          },
+        ],
+
+        "dataverseGit.stateMenu": [
+          {
+            command: "dataverseGit.stageAll",
+            group: "1_modification",
+          },
+          {
+            command: "dataverseGit.unstageAll",
+            group: "1_modification",
+          },
+          {
+            command: "dataverseGit.discardAll",
+            group: "2_destructive",
+          },
+          {
+            command: "dataverseGit.refresh",
+            group: "9_refresh",
+          },
+        ],
+
+        "explorer/context": [
+          {
+            command: "dataverseGit.showFileHistory",
+            when: "dataverseGit.isRepository",
+            group: "9_git",
+          },
+        ],
+        "scm/title": [
+          {
+            command: "dataverseGit.initialize",
+            when: "scmProvider == dataverseGit && !dataverseGit.isRepository",
+            group: "navigation@1",
+          },
+          {
+            command: "dataverseGit.refresh",
+            when: "scmProvider == dataverseGit && dataverseGit.isRepository",
+            group: "navigation@1",
+          },
+          {
+            /*
+             * A single "…" overflow keeps the title bar uncluttered;
+             * every other Git command lives in this submenu (desktop
+             * VS Code does the same with its "…" SCM title menu).
+             */
+            submenu: "dataverseGit.repoMenu",
+            when: "scmProvider == dataverseGit",
+            group: "navigation@2",
+          },
+        ],
+
+        "dataverseGit.repoMenu": [
+          {
+            command: "dataverseGit.stageSelectedLines",
+            group: "0_partial",
+          },
+          {
+            command: "dataverseGit.discardSelectedLines",
+            group: "0_partial",
+          },
+          {
+            command: "dataverseGit.stageAll",
+            group: "1_changes",
+          },
+          {
+            command: "dataverseGit.unstageAll",
+            group: "1_changes",
+          },
+          {
+            command: "dataverseGit.discardAll",
+            group: "2_changes_danger",
+          },
+          {
+            command: "dataverseGit.commitAmend",
+            group: "2_commit",
           },
           {
             command: "dataverseGit.createBranch",
-            title: "Git: Create Branch",
+            group: "3_branch",
           },
           {
             command: "dataverseGit.switchBranch",
-            title: "Git: Switch Branch",
+            group: "3_branch",
           },
           {
             command: "dataverseGit.deleteBranch",
-            title: "Git: Delete Branch",
-          },
-          {
-            command: "dataverseGit.showHistory",
-            title: "Git: Show Commit History",
-          },
-          {
-            command: "dataverseGit.showFileHistory",
-            title: "Git: Show File History (Timeline)",
+            group: "3_branch",
           },
           {
             command: "dataverseGit.sync",
-            title: "Git: Sync",
-          },
-          {
-            command: "dataverseGit.clone",
-            title: "Git: Clone Repository",
-          },
-          {
-            command: "dataverseGit.addRemote",
-            title: "Git: Add Remote",
-          },
-          {
-            command: "dataverseGit.removeRemote",
-            title: "Git: Remove Remote",
+            group: "4_remote",
           },
           {
             command: "dataverseGit.fetch",
-            title: "Git: Fetch",
+            group: "4_remote",
           },
           {
             command: "dataverseGit.pull",
-            title: "Git: Pull",
+            group: "4_remote",
           },
           {
             command: "dataverseGit.push",
-            title: "Git: Push",
+            group: "4_remote",
+          },
+          {
+            command: "dataverseGit.clone",
+            group: "4_remote",
+          },
+          {
+            command: "dataverseGit.addRemote",
+            group: "5_remote_config",
+          },
+          {
+            command: "dataverseGit.removeRemote",
+            group: "5_remote_config",
           },
           {
             command: "dataverseGit.forgetCredentials",
-            title: "Git: Forget Stored Remote Credentials",
+            group: "5_remote_config",
+          },
+          {
+            command: "dataverseGit.showHistory",
+            group: "6_history",
+          },
+          {
+            command: "dataverseGit.showFileHistory",
+            group: "6_history",
+          },
+          {
+            command: "dataverseGit.initialize",
+            group: "7_repo",
           },
         ],
 
-        submenus: [
+        commandPalette: [
           {
-            id: "dataverseGit.stateMenu",
-            label: "More Actions…",
+            command: "dataverseGit.initialize",
           },
           {
-            id: "dataverseGit.repoMenu",
-            label: "Git: More Actions…",
-            icon: "$(ellipsis)",
+            command: "dataverseGit.createBranch",
+            when: "dataverseGit.isRepository",
+          },
+          {
+            command: "dataverseGit.switchBranch",
+            when: "dataverseGit.isRepository",
+          },
+          {
+            command: "dataverseGit.deleteBranch",
+            when: "dataverseGit.isRepository",
+          },
+          {
+            command: "dataverseGit.showHistory",
+            when: "dataverseGit.isRepository",
+          },
+          {
+            command: "dataverseGit.showFileHistory",
+            when: "dataverseGit.isRepository",
+          },
+          {
+            command: "dataverseGit.sync",
+            when: "dataverseGit.isRepository",
+          },
+          {
+            command: "dataverseGit.stageSelectedLines",
+            when: "dataverseGit.isRepository",
+          },
+          {
+            command: "dataverseGit.discardSelectedLines",
+            when: "dataverseGit.isRepository",
+          },
+          {
+            command: "dataverseGit.commitAmend",
+            when: "dataverseGit.isRepository",
+          },
+          {
+            command: "dataverseGit.addToGitignore",
+            when: "dataverseGit.isRepository",
+          },
+          {
+            command: "dataverseGit.addRemote",
+            when: "dataverseGit.isRepository",
+          },
+          {
+            command: "dataverseGit.removeRemote",
+            when: "dataverseGit.isRepository",
+          },
+          {
+            command: "dataverseGit.fetch",
+            when: "dataverseGit.isRepository",
+          },
+          {
+            command: "dataverseGit.pull",
+            when: "dataverseGit.isRepository",
+          },
+          {
+            command: "dataverseGit.push",
+            when: "dataverseGit.isRepository",
           },
         ],
-
-        menus: {
-          "scm/resourceState/context": [
-            {
-              command: "dataverseGit.addToGitignore",
-              when: "scmProvider == dataverseGit && scmResourceState == untracked",
-              group: "9_ignored",
-            },
-            {
-              command: "dataverseGit.openChanges",
-              when: "scmProvider == dataverseGit && scmResourceState == changes || scmProvider == dataverseGit && scmResourceState == staged",
-              group: "navigation@1",
-            },
-            {
-              command: "dataverseGit.stage",
-              when: "scmProvider == dataverseGit && scmResourceGroup == changes && scmResourceState != untracked",
-              group: "inline@1",
-            },
-            {
-              command: "dataverseGit.unstage",
-              when: "scmProvider == dataverseGit && scmResourceGroup == staged",
-              group: "inline@1",
-            },
-            {
-              command: "dataverseGit.discard",
-              when: "scmProvider == dataverseGit && scmResourceGroup == changes",
-              group: "inline@2",
-            },
-            {
-              command: "dataverseGit.addToGitignore",
-              when: "scmProvider == dataverseGit && scmResourceGroup == changes && scmResourceState == untracked",
-              group: "inline@3",
-            },
-            {
-              submenu: "dataverseGit.stateMenu",
-              when: "scmProvider == dataverseGit",
-              group: "9_more",
-            },
-          ],
-
-          "scm/resourceGroup/context": [
-            {
-              /*
-               * Actions in the "inline" group are rendered as buttons
-               * directly on the group header row in the SCM tree.
-               */
-              command: "dataverseGit.stageAll",
-              when: "scmProvider == dataverseGit && scmResourceGroup == changes",
-              group: "inline@1",
-            },
-            {
-              command: "dataverseGit.discardAll",
-              when: "scmProvider == dataverseGit && scmResourceGroup == changes",
-              group: "inline@2",
-            },
-            {
-              command: "dataverseGit.stageAll",
-              when: "scmProvider == dataverseGit && scmResourceGroup == changes",
-              group: "1_modification@1",
-            },
-            {
-              command: "dataverseGit.addToGitignore",
-              when: "scmProvider == dataverseGit && scmResourceGroup == changes && scmResourceState == untracked",
-              group: "1_modification@2",
-            },
-            /*
-             * Discard All is destructive; the command itself asks for a
-             * modal confirmation before discarding anything.
-             */
-            {
-              command: "dataverseGit.discardAll",
-              when: "scmProvider == dataverseGit && scmResourceGroup == changes",
-              group: "2_destructive",
-            },
-            {
-              command: "dataverseGit.unstageAll",
-              when: "scmProvider == dataverseGit && scmResourceGroup == staged",
-              group: "inline@1",
-            },
-            {
-              command: "dataverseGit.unstageAll",
-              when: "scmProvider == dataverseGit && scmResourceGroup == staged",
-              group: "1_modification@1",
-            },
-            {
-              submenu: "dataverseGit.stateMenu",
-              when: "scmProvider == dataverseGit",
-              group: "9_more",
-            },
-          ],
-
-          "dataverseGit.stateMenu": [
-            {
-              command: "dataverseGit.stageAll",
-              group: "1_modification",
-            },
-            {
-              command: "dataverseGit.unstageAll",
-              group: "1_modification",
-            },
-            {
-              command: "dataverseGit.discardAll",
-              group: "2_destructive",
-            },
-            {
-              command: "dataverseGit.refresh",
-              group: "9_refresh",
-            },
-          ],
-
-          "explorer/context": [
-            {
-              command: "dataverseGit.showFileHistory",
-              when: "dataverseGit.isRepository",
-              group: "9_git",
-            },
-          ],
-          "scm/title": [
-            {
-              command: "dataverseGit.initialize",
-              when: "scmProvider == dataverseGit && !dataverseGit.isRepository",
-              group: "navigation@1",
-            },
-            {
-              command: "dataverseGit.refresh",
-              when: "scmProvider == dataverseGit && dataverseGit.isRepository",
-              group: "navigation@1",
-            },
-            {
-              /*
-               * A single "…" overflow keeps the title bar uncluttered;
-               * every other Git command lives in this submenu (desktop
-               * VS Code does the same with its "…" SCM title menu).
-               */
-              submenu: "dataverseGit.repoMenu",
-              when: "scmProvider == dataverseGit",
-              group: "navigation@2",
-            },
-          ],
-
-          "dataverseGit.repoMenu": [
-            {
-              command: "dataverseGit.stageSelectedLines",
-              group: "0_partial",
-            },
-            {
-              command: "dataverseGit.discardSelectedLines",
-              group: "0_partial",
-            },
-            {
-              command: "dataverseGit.stageAll",
-              group: "1_changes",
-            },
-            {
-              command: "dataverseGit.unstageAll",
-              group: "1_changes",
-            },
-            {
-              command: "dataverseGit.discardAll",
-              group: "2_changes_danger",
-            },
-            {
-              command: "dataverseGit.commitAmend",
-              group: "2_commit",
-            },
-            {
-              command: "dataverseGit.createBranch",
-              group: "3_branch",
-            },
-            {
-              command: "dataverseGit.switchBranch",
-              group: "3_branch",
-            },
-            {
-              command: "dataverseGit.deleteBranch",
-              group: "3_branch",
-            },
-            {
-              command: "dataverseGit.sync",
-              group: "4_remote",
-            },
-            {
-              command: "dataverseGit.fetch",
-              group: "4_remote",
-            },
-            {
-              command: "dataverseGit.pull",
-              group: "4_remote",
-            },
-            {
-              command: "dataverseGit.push",
-              group: "4_remote",
-            },
-            {
-              command: "dataverseGit.clone",
-              group: "4_remote",
-            },
-            {
-              command: "dataverseGit.addRemote",
-              group: "5_remote_config",
-            },
-            {
-              command: "dataverseGit.removeRemote",
-              group: "5_remote_config",
-            },
-            {
-              command: "dataverseGit.forgetCredentials",
-              group: "5_remote_config",
-            },
-            {
-              command: "dataverseGit.showHistory",
-              group: "6_history",
-            },
-            {
-              command: "dataverseGit.showFileHistory",
-              group: "6_history",
-            },
-            {
-              command: "dataverseGit.initialize",
-              group: "7_repo",
-            },
-          ],
-
-          commandPalette: [
-            {
-              command: "dataverseGit.initialize",
-            },
-            {
-              command: "dataverseGit.createBranch",
-              when: "dataverseGit.isRepository",
-            },
-            {
-              command: "dataverseGit.switchBranch",
-              when: "dataverseGit.isRepository",
-            },
-            {
-              command: "dataverseGit.deleteBranch",
-              when: "dataverseGit.isRepository",
-            },
-            {
-              command: "dataverseGit.showHistory",
-              when: "dataverseGit.isRepository",
-            },
-            {
-              command: "dataverseGit.showFileHistory",
-              when: "dataverseGit.isRepository",
-            },
-            {
-              command: "dataverseGit.sync",
-              when: "dataverseGit.isRepository",
-            },
-            {
-              command: "dataverseGit.stageSelectedLines",
-              when: "dataverseGit.isRepository",
-            },
-            {
-              command: "dataverseGit.discardSelectedLines",
-              when: "dataverseGit.isRepository",
-            },
-            {
-              command: "dataverseGit.commitAmend",
-              when: "dataverseGit.isRepository",
-            },
-            {
-              command: "dataverseGit.addToGitignore",
-              when: "dataverseGit.isRepository",
-            },
-            {
-              command: "dataverseGit.addRemote",
-              when: "dataverseGit.isRepository",
-            },
-            {
-              command: "dataverseGit.removeRemote",
-              when: "dataverseGit.isRepository",
-            },
-            {
-              command: "dataverseGit.fetch",
-              when: "dataverseGit.isRepository",
-            },
-            {
-              command: "dataverseGit.pull",
-              when: "dataverseGit.isRepository",
-            },
-            {
-              command: "dataverseGit.push",
-              when: "dataverseGit.isRepository",
-            },
-          ],
-        },
       },
-    } as unknown as IExtensionManifest,
-    ExtensionHostKind.LocalProcess,
-  );
+    },
+  } as unknown as IExtensionManifest);
 
   const vscode = await getApi();
 

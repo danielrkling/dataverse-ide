@@ -2,7 +2,7 @@ import type * as vscodeType from "vscode";
 
 /*
  * Shared config-file path resolution for file-driven extensions
- * (esbuild.config.json, rolldown.config.json, tailwind.config.json).
+ * (esbuild.config.json, html.config.json, tailwind.config.json).
  *
  * Each config file lives at the workspace root by default, but its location
  * is overridable by a workspace-relative extension setting

@@ -6,7 +6,7 @@
  * package - it only exists on almostnode's documentation site. We alias that
  * URL here (see vite.config.ts).
  *
- * The IDE runs almostnode in main-thread same-origin mode (IRuntime from
- * createRuntime with useWorker: false), so WorkerRuntime is never booted;
- * this stub only needs to be a valid worker script that exits quietly.
+ * The IDE only imports almostnode's builtin shims, but the package entry
+ * still references WorkerRuntime, so this stub only needs to be a valid
+ * worker script that exits quietly.
  */

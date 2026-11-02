@@ -12,7 +12,7 @@ import {
 
 /*
  * dataverse.config.json - the source of truth for web resource upload
- * settings, mirroring esbuild.config.json / rolldown.config.json /
+ * settings, mirroring esbuild.config.json / html.config.json /
  * tailwind.config.json. When the file is absent, these defaults apply:
  *
  *   {

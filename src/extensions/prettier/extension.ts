@@ -19,7 +19,7 @@ import { createPlugin as createTaggedJsxPlugin } from "@tagged-jsx/prettier-plug
 
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
-import { ExtensionHostKind, registerExtension } from "@codingame/monaco-vscode-api/extensions";
+import { registerExtensionReplacingPlaceholder } from "../api.js";
 
 /*
  * Prettier extension: formats the active document with the browser build
@@ -301,37 +301,34 @@ export default {
      * workbench's formatter service. The returned api runs this code as a
      * real extension.
      */
-    const { getApi } = registerExtension(
-      {
-        name: "dataverse-ide-prettier",
-        publisher: "dataverse-ide",
-        version: "0.1.0",
-        engines: {
-          vscode: "*",
-        },
-        displayName: "Dataverse IDE Prettier",
-        description: "Format documents with Prettier.",
-        contributes: {
-          commands: [
-            {
-              command: COMMAND_FORMAT,
-              title: "Prettier: Format Document",
-            },
-          ],
-          configuration: {
-            title: "Prettier",
-            properties: {
-              "dataverseIde.prettier.formatOnSave": {
-                type: "boolean",
-                default: false,
-                description: "Run Prettier every time a file is saved.",
-              },
+    const { getApi } = await registerExtensionReplacingPlaceholder({
+      name: "dataverse-ide-prettier",
+      publisher: "dataverse-ide",
+      version: "0.1.0",
+      engines: {
+        vscode: "*",
+      },
+      displayName: "Dataverse IDE Prettier",
+      description: "Format documents with Prettier.",
+      contributes: {
+        commands: [
+          {
+            command: COMMAND_FORMAT,
+            title: "Prettier: Format Document",
+          },
+        ],
+        configuration: {
+          title: "Prettier",
+          properties: {
+            "dataverseIde.prettier.formatOnSave": {
+              type: "boolean",
+              default: false,
+              description: "Run Prettier every time a file is saved.",
             },
           },
         },
       },
-      ExtensionHostKind.LocalProcess,
-    );
+    });
 
     // Extension-host api; do not fall back to context.vscode here: that is
     // the main-thread module and its languages namespace cannot register

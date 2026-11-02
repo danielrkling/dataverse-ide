@@ -5,7 +5,7 @@
  * likely utility candidates.
  *
  * The prior implementation collected a large in-memory workspace/module map
- * and used esbuild worker lazy-resolution probe rounds for @plugin modules.
+ * and used lazy-resolution probe rounds for @plugin modules.
  *
  * The current implementation uses the main-thread esbuild compiler's direct
  * vscode.workspace.fs resolver instead:
@@ -13,7 +13,7 @@
  * - workspace source files are read only while scanning candidates
  * - Tailwind @plugin modules are bundled through EsbuildBuildRunner
  * - package resolution reads package.json/module files directly as needed
- * - no node_modules collection or lazyBuild probe loop is required
+ * - no node_modules collection or lazy probe loop is required
  */
 
 import { compile } from "tailwindcss";
@@ -31,6 +31,10 @@ import {
   type DirtyDocumentSnapshot,
 } from "../shared/liveDocuments.js";
 
+import { extractCandidates } from "./scan.js";
+
+import type { TailwindLoadStylesheet } from "./theme.js";
+
 /*
  * Workspace source scanning
  */
@@ -38,22 +42,17 @@ import {
 const SCANNABLE_EXTENSIONS =
   /\.(html|htm|vue|svelte|astro|xhtml|md|mdx|txt|ts|tsx|mts|cts|jsx|js|mjs|cjs|css|scss|less|sass|php|json|jsonc|yaml|yml|toml)$/i;
 
-/*
- * Any quoted string: '…', "…", `…`. Template literals are intentionally
- * included: invalid candidates are ignored safely by Tailwind.
- */
-const STRING_CAPTURE_PATTERN = /(["'`])((?:\\.|(?!\1)[\s\S])*)\1/g;
-
-/* Unquoted class attribute values, e.g. class=flex or className={styles.x}. */
-const UNQUOTED_CLASS_PATTERN = /\bclass(?:Name)?\s*=\s*([^\s"'`>]+)/g;
-
 const DEFAULT_CSS_INPUT = '@import "tailwindcss";';
 
 const MAX_SCANNED_FILES = 4000;
 const MAX_TOKENS_PER_FILE = 20000;
-const MAX_CANDIDATE_LENGTH = 256;
 
-const CANDIDATE_SHAPE = /^[a-zA-Z0-9_![\]().,#%$@&*:+\/-]+$/;
+function fileExtension(path: string): string {
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const dot = path.lastIndexOf(".");
+
+  return dot > slash ? path.slice(dot + 1).toLowerCase() : "";
+}
 
 const BUNDLED_STYLESHEETS: Record<string, string> = {
   tailwindcss: tailwindIndexCss,
@@ -65,6 +64,27 @@ const BUNDLED_STYLESHEETS: Record<string, string> = {
   "tailwindcss/utilities.css": "@tailwind utilities;",
   "tailwindcss/utilities": "@tailwind utilities;",
 };
+
+/**
+ * Stylesheet loader for the default Tailwind design system, backed by the
+ * CSS text bundled with the IDE. Used by IntelliSense candidate generation;
+ * workspace compilation has its own loader that can read project files.
+ */
+export function createBundledStylesheetLoader(): TailwindLoadStylesheet {
+  return async (id) => {
+    const bundled = BUNDLED_STYLESHEETS[id];
+
+    if (bundled == null) {
+      throw new Error(`Unknown bundled Tailwind stylesheet "${id}".`);
+    }
+
+    return {
+      path: `virtual:tailwindcss/${id}`,
+      base: "/",
+      content: bundled,
+    };
+  };
+}
 
 export type TailwindCompileResult = {
   css: string;
@@ -88,48 +108,6 @@ const scanCache = new Map<
     candidates: string[];
   }
 >();
-
-function extractCandidates(text: string): string[] {
-  const candidates: string[] = [];
-
-  const addToken = (raw: string): void => {
-    if (candidates.length >= MAX_TOKENS_PER_FILE) {
-      return;
-    }
-
-    const candidate = raw
-      .replace(/^[\s"'`,;:(){}<>=]+/, "")
-      .replace(/[\s"'`,;:(){}<>=]+$/, "");
-
-    if (
-      candidate.length === 0 ||
-      candidate.length > MAX_CANDIDATE_LENGTH ||
-      !CANDIDATE_SHAPE.test(candidate) ||
-      !/[a-zA-Z]/.test(candidate) ||
-      candidate.startsWith("$")
-    ) {
-      return;
-    }
-
-    candidates.push(candidate);
-  };
-
-  for (const pattern of [STRING_CAPTURE_PATTERN, UNQUOTED_CLASS_PATTERN]) {
-    pattern.lastIndex = 0;
-
-    let match: RegExpExecArray | null;
-
-    while ((match = pattern.exec(text)) != null) {
-      const rawValue = match[2] ?? match[1];
-
-      for (const token of rawValue.split(/\s+/)) {
-        addToken(token);
-      }
-    }
-  }
-
-  return candidates;
-}
 
 async function scanWorkspaceCandidates(
   vscode: typeof vscodeType,
@@ -155,10 +133,11 @@ async function scanWorkspaceCandidates(
      * would otherwise be missing from the generated CSS.
      */
     const relativePath = vscode.workspace.asRelativePath(uri, false).replaceAll("\\", "/");
+    const extension = fileExtension(uri.path);
     const live = dirtyDocumentText(dirtyDocuments, relativePath);
 
     if (live != null) {
-      for (const candidate of extractCandidates(live)) {
+      for (const candidate of extractCandidates(live, MAX_TOKENS_PER_FILE, extension)) {
         candidates.add(candidate);
       }
 
@@ -187,7 +166,7 @@ async function scanWorkspaceCandidates(
       const bytes = await vscode.workspace.fs.readFile(uri);
       const text = new TextDecoder().decode(bytes);
 
-      const extracted = extractCandidates(text);
+      const extracted = extractCandidates(text, MAX_TOKENS_PER_FILE, extension);
 
       scanCache.set(uri.path, {
         mtime,
@@ -216,13 +195,9 @@ function normalizeBase(base: string): string {
 }
 
 function joinWorkspacePath(base: string, id: string): string {
-  const cleanBase = normalizeBase(base)
-    .replace(/^\/+/, "")
-    .replace(/\/+$/, "");
+  const cleanBase = normalizeBase(base).replace(/^\/+/, "").replace(/\/+$/, "");
 
-  const cleanId = id
-    .replaceAll("\\", "/")
-    .replace(/^\.\/+/, "");
+  const cleanId = id.replaceAll("\\", "/").replace(/^\.\/+/, "");
 
   if (cleanBase.length === 0) {
     return cleanId;
@@ -296,9 +271,7 @@ function createLoadStylesheet(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
 
-      throw new Error(
-        `Could not load stylesheet "${id}" (${path}): ${message}`,
-      );
+      throw new Error(`Could not load stylesheet "${id}" (${path}): ${message}`);
     }
   };
 }
@@ -317,22 +290,14 @@ function createLoadStylesheet(
 
 const VIRTUAL_PLUGIN_ENTRY = "__tailwind-plugin-entry__.mjs";
 
-type TailwindLoadModule = NonNullable<
-  NonNullable<Parameters<typeof compile>[1]>["loadModule"]
->;
+type TailwindLoadModule = NonNullable<NonNullable<Parameters<typeof compile>[1]>["loadModule"]>;
 
 type TailwindModule = Awaited<ReturnType<TailwindLoadModule>>["module"];
 
 function toPluginImportEntry(moduleSpecifier: string): string {
-  const escapedSpecifier = moduleSpecifier
-    .replaceAll("\\", "\\\\")
-    .replaceAll('"', '\\"');
+  const escapedSpecifier = moduleSpecifier.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 
-  return [
-    `import plugin from "${escapedSpecifier}";`,
-    "export default plugin;",
-    "",
-  ].join("\n");
+  return [`import plugin from "${escapedSpecifier}";`, "export default plugin;", ""].join("\n");
 }
 
 async function bundleAndImportModule(
@@ -353,25 +318,19 @@ async function bundleAndImportModule(
   });
 
   if (!response.ok) {
-    throw new Error(
-      `Bundling Tailwind module "${entry}" failed: ${response.error}`,
-    );
+    throw new Error(`Bundling Tailwind module "${entry}" failed: ${response.error}`);
   }
 
   for (const warning of response.warnings) {
     if (warning.includes("left external")) {
-      throw new Error(
-        `Tailwind module "${entry}" has an unresolved dependency: ${warning}`,
-      );
+      throw new Error(`Tailwind module "${entry}" has an unresolved dependency: ${warning}`);
     }
   }
 
   const bundle = response.outputs.find((output) => output.path.endsWith(".js"));
 
   if (bundle == null) {
-    throw new Error(
-      `Bundling Tailwind module "${entry}" produced no JavaScript output.`,
-    );
+    throw new Error(`Bundling Tailwind module "${entry}" produced no JavaScript output.`);
   }
 
   const blobUrl = URL.createObjectURL(
@@ -422,26 +381,17 @@ function createLoadModule(
     }
 
     if (runner == null) {
-      throw new Error(
-        `Cannot load @plugin "${id}": the esbuild compiler is unavailable.`,
-      );
+      throw new Error(`Cannot load @plugin "${id}": the esbuild compiler is unavailable.`);
     }
 
     const cacheKey = `${id}\u0000${base}`;
 
     const bundled =
       !id.startsWith(".") && !id.startsWith("/")
-        ? await bundleAndImportModule(
-            runner,
-            VIRTUAL_PLUGIN_ENTRY,
-            {
-              [VIRTUAL_PLUGIN_ENTRY]: toPluginImportEntry(id),
-            },
-          )
-        : await bundleAndImportModule(
-            runner,
-            joinWorkspacePath(base, id),
-          );
+        ? await bundleAndImportModule(runner, VIRTUAL_PLUGIN_ENTRY, {
+            [VIRTUAL_PLUGIN_ENTRY]: toPluginImportEntry(id),
+          })
+        : await bundleAndImportModule(runner, joinWorkspacePath(base, id));
 
     /*
      * Include the generated bundle text in the Tailwind output signature.
@@ -458,15 +408,10 @@ function createLoadModule(
       | null;
 
     const pluginModule =
-      typeof rawModule === "function"
-        ? rawModule
-        : (rawModule?.default ?? rawModule);
+      typeof rawModule === "function" ? rawModule : (rawModule?.default ?? rawModule);
 
     return {
-      path:
-        id.startsWith(".") || id.startsWith("/")
-          ? joinWorkspacePath(base, id)
-          : id,
+      path: id.startsWith(".") || id.startsWith("/") ? joinWorkspacePath(base, id) : id,
       base,
       module: pluginModule as TailwindModule,
     };
@@ -511,9 +456,7 @@ export async function compileTailwindCss(
       }
     }
 
-    base = inputPath.includes("/")
-      ? inputPath.slice(0, inputPath.lastIndexOf("/"))
-      : "/";
+    base = inputPath.includes("/") ? inputPath.slice(0, inputPath.lastIndexOf("/")) : "/";
   }
 
   const candidates = await scanWorkspaceCandidates(vscode, rootUri, dirtyDocuments);
@@ -523,11 +466,7 @@ export async function compileTailwindCss(
   const compiler = await compile(cssInput, {
     base,
     loadStylesheet: createLoadStylesheet(vscode, rootUri, dirtyDocuments),
-    loadModule: createLoadModule(
-      rootUri,
-      options.pluginRunner,
-      pluginInputs,
-    ),
+    loadModule: createLoadModule(rootUri, options.pluginRunner, pluginInputs),
   });
 
   const css = compiler.build([...candidates]);
@@ -536,9 +475,7 @@ export async function compileTailwindCss(
 
   if (options.minify === true) {
     if (options.pluginRunner == null) {
-      throw new Error(
-        "Cannot minify Tailwind CSS: the esbuild compiler is unavailable.",
-      );
+      throw new Error("Cannot minify Tailwind CSS: the esbuild compiler is unavailable.");
     }
 
     const response = await options.pluginRunner.transform({
@@ -560,11 +497,9 @@ export async function compileTailwindCss(
     finalCss = minified;
   }
 
-  const signature = [
-    cssInput,
-    ...pluginInputs,
-    [...candidates].sort().join("\u0001"),
-  ].join("\u0000");
+  const signature = [cssInput, ...pluginInputs, [...candidates].sort().join("\u0001")].join(
+    "\u0000",
+  );
 
   return {
     css: finalCss,

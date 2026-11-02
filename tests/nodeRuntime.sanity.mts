@@ -1,10 +1,10 @@
 /*
- * node-runtime-v2 sanity harness (manual, like the other *.sanity.*).
+ * node-runtime sanity harness (manual, like the other *.sanity.*).
  *
  * Run (from the repo root):
  *
- *   npx esbuild tests/nodeRuntimeV2.sanity.mts --bundle --platform=node \
- *     --format=esm --external:almostnode \
+ *   npx esbuild tests/nodeRuntime.sanity.mts --bundle --platform=node \
+ *     --format=esm --external:almostnode --external:esbuild \
  *     --alias:esbuild-wasm=./tests/esbuildNativeShim.mjs \
  *     --alias:virtual:esbuild-wasm-binary=./tests/esbuildWasmBinaryMock.mjs \
  *     --outfile=.tmp-node-v2-sanity.mjs
@@ -23,9 +23,9 @@ import { dirname, join } from "node:path";
 
 import { createProcess } from "almostnode";
 
-import { createRuntimeFs } from "../src/extensions/node-runtime-v2/fsShim.ts";
-import { createModuleLoader } from "../src/extensions/node-runtime-v2/loader.ts";
-import type { WorkspaceFs } from "../src/extensions/node-runtime-v2/workspace.ts";
+import { createRuntimeFs } from "../src/extensions/node-runtime/fsShim.ts";
+import { createModuleLoader } from "../src/extensions/node-runtime/loader.ts";
+import type { WorkspaceFs } from "../src/extensions/node-runtime/workspace.ts";
 
 function createNodeReader(root: string): WorkspaceFs {
   const full = (path: string) => join(root, ...path.split("/"));
@@ -187,7 +187,7 @@ assert.equal(asyncFile, "async-ok");
 
 await rm(root, { recursive: true, force: true });
 
-console.log("OK - node-runtime-v2 loader, fs shim and flush behave as expected.");
+console.log("OK - node-runtime loader, fs shim and flush behave as expected.");
 
 /*
  * almostnode's shims keep module-level timers/handles alive in Node; exit

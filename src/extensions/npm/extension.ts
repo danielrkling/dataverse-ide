@@ -30,14 +30,13 @@ import { directInstall } from './directInstaller.js'
 
 /*
  * Install flow: resolution + tarball extraction write straight through
- * vscode.workspace.fs (see ./directInstaller.ts). The shared VFS is left to
- * the node-runtime extension, which still mounts workspace files itself.
+ * vscode.workspace.fs (see ./directInstaller.ts); no VirtualFS is involved.
  */
 
 /*
  * npm extension: resolves and installs real npm packages into the workspace
  * straight through vscode.workspace.fs (registry metadata + tarball
- * extraction, ESM preserved for the esbuild/rolldown bundle pipeline).
+ * extraction, ESM preserved for the esbuild bundle pipeline).
  *
  * "Dataverse IDE" activity bar sidebar: the "npm Packages" tree lists
  * dependencies + devDependencies; clicking a dependency offers actions

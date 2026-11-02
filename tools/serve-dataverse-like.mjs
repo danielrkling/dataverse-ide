@@ -4,7 +4,7 @@
  * under production-like conditions instead of with `vite preview`.
  *
  * What it emulates:
- *   - the web-resource path prefix, e.g. /WebResources/dv_/ide/
+ *   - the web-resource path prefix, e.g. /WebResources/dv_ide/
  *   - NO Cross-Origin-Opener-Policy / Cross-Origin-Embedder-Policy headers
  *     (Dataverse does not send them; the app's service worker synthesizes
  *     them for navigations after it takes control - that is what makes
@@ -54,7 +54,7 @@ for (const raw of process.argv.slice(2)) {
 
 const port = Number(args.get("port") ?? 5199);
 
-const prefixRaw = args.get("prefix") ?? "/WebResources/dv_/ide";
+const prefixRaw = args.get("prefix") ?? "/WebResources/dv_ide";
 const prefix = `/${prefixRaw.replace(/^\/+|\/+$/g, "")}/`;
 
 const jsMime = args.get("js-mime") ?? "application/x-javascript; charset=utf-8";
@@ -103,7 +103,7 @@ const CSP_PRESETS = {
 
   /*
    * Reproduces the "Dataverse CSP does not allow blob: workers" failure.
-   * The extension-host iframe and every Monaco/rolldown worker should fail.
+   * The extension-host iframe and every Monaco worker should fail.
    */
   "no-blob-worker": [
     "default-src 'self' 'unsafe-inline' 'unsafe-eval' data:",
