@@ -17,6 +17,8 @@ import {
 
 import { EsbuildWatcher } from "./watcher.js";
 
+import { benchmarkWorkspaceWrites, formatWriteBenchmark } from "../../workspace/writeBenchmark.js";
+
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
 /*
@@ -233,6 +235,10 @@ export default {
         {
           command: "dataverseIde.esbuild.reloadConfig",
           title: "esbuild: Reload Config",
+        },
+        {
+          command: "dataverseIde.esbuild.benchmarkWrites",
+          title: "esbuild: Benchmark Workspace Writes",
         },
       ],
       configuration: {
@@ -851,6 +857,33 @@ export default {
       },
     );
 
+    const benchmarkWritesCommand = vscode.commands.registerCommand(
+      "dataverseIde.esbuild.benchmarkWrites",
+      async () => {
+        outputChannel.show(true);
+        outputChannel.appendLine(
+          "[esbuild] write benchmark starting (writes several 400 KB temp files)…",
+        );
+
+        try {
+          const result = await benchmarkWorkspaceWrites(vscode);
+          const report = formatWriteBenchmark(result);
+
+          outputChannel.appendLine(`[esbuild] ${report}`);
+
+          await vscode.window.showInformationMessage(
+            "[esbuild] write benchmark finished — see the Output panel.",
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+
+          outputChannel.appendLine(`[esbuild] write benchmark failed: ${message}`);
+
+          await vscode.window.showErrorMessage(`[esbuild] write benchmark failed: ${message}`);
+        }
+      },
+    );
+
     outputChannel.appendLine("[esbuild] commands registered.");
 
     return {
@@ -874,6 +907,7 @@ export default {
         configureSolidCommand.dispose();
         outputChannelCommand.dispose();
         reloadConfigCommand.dispose();
+        benchmarkWritesCommand.dispose();
 
         runner.dispose();
       },
