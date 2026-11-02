@@ -18,6 +18,11 @@ import {
 import { EsbuildWatcher } from "./watcher.js";
 
 import { benchmarkWorkspaceWrites, formatWriteBenchmark } from "../../workspace/writeBenchmark.js";
+import {
+  ensureWorkspaceDirectory,
+  statWorkspaceFile,
+  writeWorkspaceFile,
+} from "../../workspace/workspaceFsFast.js";
 
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
@@ -109,7 +114,7 @@ async function writeOutputs(
        * without reading the whole output back.
        */
       try {
-        await vscode.workspace.fs.stat(outFile);
+        await statWorkspaceFile(vscode, outFile);
         skipped += 1;
         continue;
       } catch {
@@ -117,11 +122,11 @@ async function writeOutputs(
       }
     }
 
-    await vscode.workspace.fs.createDirectory(parent);
+    await ensureWorkspaceDirectory(vscode, parent);
 
     const fileStarted = performance.now();
 
-    await vscode.workspace.fs.writeFile(outFile, encoded);
+    await writeWorkspaceFile(vscode, outFile, encoded);
 
     const fileMs = performance.now() - fileStarted;
 

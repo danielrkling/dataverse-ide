@@ -128,9 +128,29 @@ export async function benchmarkWorkspaceWrites(
   const samples: WriteBenchmarkSample[] = [];
 
   samples.push(
-    await timed("vscode.workspace.fs (full stack)", sizeBytes, () =>
+    await timed("vscode.workspace.fs (full stack, new file)", sizeBytes, () =>
       vscode.workspace.fs.writeFile(fullUri, data),
     ),
+  );
+
+  /*
+   * Same file again. If this is fast while the new-file write above is slow,
+   * the cost is create/change-event handling, not the write itself.
+   */
+  samples.push(
+    await timed("vscode.workspace.fs (overwrite)", sizeBytes, () =>
+      vscode.workspace.fs.writeFile(fullUri, data),
+    ),
+  );
+
+  samples.push(
+    await timed("vscode.workspace.fs stat", sizeBytes, () => vscode.workspace.fs.stat(fullUri)),
+  );
+
+  samples.push(
+    await timed("vscode.workspace.fs readFile", sizeBytes, async () => {
+      await vscode.workspace.fs.readFile(fullUri);
+    }),
   );
 
   samples.push(
@@ -165,6 +185,29 @@ export async function benchmarkWorkspaceWrites(
         data,
         WRITE_OPTIONS,
       ),
+    ),
+  );
+
+  /*
+   * Same full extension API path, but routed to OPFS instead of the real
+   * folder. Separates "RPC/FileService is slow" from "real FSA write + sync
+   * is slow".
+   */
+  samples.push(
+    await timed("vscode.workspace.fs (OPFS path)", sizeBytes, () =>
+      vscode.workspace.fs.writeFile(
+        vscode.Uri.joinPath(overlayDirectoryUri, "full-stack-opfs.bin"),
+        data,
+      ),
+    ),
+  );
+
+  const smallData = new Uint8Array(4096);
+  smallData.fill(0x5a);
+
+  samples.push(
+    await timed("vscode.workspace.fs (full stack, 4 KB)", 4096, () =>
+      vscode.workspace.fs.writeFile(vscode.Uri.joinPath(directoryUri, "small.bin"), smallData),
     ),
   );
 
