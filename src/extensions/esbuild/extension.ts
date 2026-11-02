@@ -422,6 +422,7 @@ export default {
         outDir: () => currentConfig.outdir,
         entry: () => currentConfig.entryPoints[0],
         configPath: () => configRelativePathFor(vscode, context.workspaceRootUri),
+        buildOnChange: true,
         build: async (entry) => {
           await runBuild(entry, {
             silent: true,

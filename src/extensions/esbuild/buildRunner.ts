@@ -9,6 +9,8 @@ import {
   type WorkspaceReader,
 } from "./compiler.js";
 
+import { captureDirtyDocuments, dirtyDocumentText } from "../shared/liveDocuments.js";
+
 /*
  * Main-thread esbuild runner.
  *
@@ -16,10 +18,61 @@ import {
  * `virtualFiles` are an optional, per-build overlay for generated sources
  * such as Tailwind's ephemeral @plugin entry module.
  *
+ * Dirty editor buffers are layered over the filesystem. Without this, a build
+ * triggered while typing silently compiled the last *saved* content, which
+ * made esbuild (and watch mode) look one save behind the editor.
+ *
  * `files` and `absentPaths` remain in the public type only for Rolldown's
  * existing worker/lazyBuild protocol. The main-thread esbuild compiler does
  * not use them.
  */
+
+/*
+ * Wraps the workspace reader so open, unsaved documents are visible to the
+ * build. The snapshot is taken per build, so it always reflects the state at
+ * the moment the build starts.
+ */
+function createLiveWorkspaceReader(
+  vscode: typeof vscodeType,
+  workspaceRootUri: vscodeType.Uri,
+): WorkspaceReader {
+  const disk = createWorkspaceReader(vscode, workspaceRootUri);
+  const dirtyDocuments = captureDirtyDocuments(vscode, workspaceRootUri);
+
+  if (dirtyDocuments.size === 0) {
+    return disk;
+  }
+
+  return {
+    stats: disk.stats,
+
+    async readText(path: string): Promise<string | undefined> {
+      const live = dirtyDocumentText(dirtyDocuments, path);
+
+      return live != null ? live : disk.readText(path);
+    },
+
+    ...(disk.readDir != null ? { readDir: (path: string) => disk.readDir!(path) } : {}),
+  };
+}
+
+/*
+ * Compact per-build filesystem telemetry. A healthy direct-FS build does one
+ * file read per module and one directory listing per directory reached; the
+ * counters make it obvious when resolution is doing probe work instead.
+ */
+function formatReaderStats(reader: WorkspaceReader): string {
+  const stats = reader.stats;
+
+  if (stats == null) {
+    return "";
+  }
+
+  return (
+    ` (fs: ${stats.fileReads} file reads, ${stats.fileReadCacheHits} cached; ` +
+    `${stats.directoryReads} dir listings, ${stats.directoryReadCacheHits} cached)`
+  );
+}
 
 export type { BuildOutputFile };
 
@@ -138,6 +191,9 @@ export class EsbuildBuildRunner {
     }
 
     try {
+      const started = performance.now();
+      const workspace = createLiveWorkspaceReader(this.vscode, this.workspaceRootUri);
+
       const response = await runBuild({
         id,
         type: "build",
@@ -147,7 +203,7 @@ export class EsbuildBuildRunner {
          * - caches duplicate reads during this build
          * - cannot return stale content after a workspace file changes
          */
-        workspace: createWorkspaceReader(this.vscode, this.workspaceRootUri),
+        workspace,
 
         /*
          * `files` and `absentPaths` are intentionally ignored by compiler.ts.
@@ -160,6 +216,8 @@ export class EsbuildBuildRunner {
         })(),
       });
 
+      const elapsed = Math.round(performance.now() - started);
+
       if (!this.initialized) {
         this.initialized = true;
 
@@ -167,6 +225,10 @@ export class EsbuildBuildRunner {
           "[esbuild] main-thread compiler initialized (direct workspace filesystem reads).",
         );
       }
+
+      this.outputChannel.appendLine(
+        `[esbuild] build #${id} ${elapsed}ms${formatReaderStats(workspace)}`,
+      );
 
       return response;
     } catch (error) {

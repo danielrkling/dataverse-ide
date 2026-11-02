@@ -69,6 +69,90 @@ const rolldownPatchHotReload: Plugin = {
   },
 };
 
+/*
+ * monaco-vscode-api's background tokenizer does:
+ *
+ *   const { applyStateStackDiff, INITIAL } =
+ *     await import('@codingame/monaco-vscode-api/_virtual/main').then(n => n.main)
+ *
+ * In a production build rollup tree-shakes the dynamic-import target down to
+ * the exports it sees being used (`main`), while Vite rewrites the consumer's
+ * `.then(n => n.main)` indirection into a top-level destructure. The two
+ * disagree and `applyStateStackDiff` ends up undefined at runtime:
+ *
+ *   Cannot destructure property 'applyStateStackDiff' of '(intermediate value)'
+ *
+ * Redirect `_virtual/main` to a shim that exposes the vscode-textmate API both
+ * at the top level and under `main`, and make the destructuring consumers use
+ * the namespace directly. Both shapes then resolve no matter how rollup
+ * rewrites the import.
+ */
+const textmateMainShim: Plugin = {
+  name: "dataverse-ide-textmate-main-shim",
+  enforce: "pre",
+  resolveId(id: string) {
+    if (id === "@codingame/monaco-vscode-api/_virtual/main") {
+      return "\0dataverse-ide-textmate-main";
+    }
+
+    if (id === "\0dataverse-ide-textmate-main") {
+      return id;
+    }
+
+    return null;
+  },
+  load(id: string) {
+    if (id !== "\0dataverse-ide-textmate-main") {
+      return null;
+    }
+
+    const vscodeTextmateMain = path.join(
+      import.meta.dirname,
+      "node_modules/@codingame/monaco-vscode-api/_virtual/main.js",
+    );
+
+    /*
+     * The absolute path is important: it bypasses resolveId above, so the shim
+     * does not alias itself recursively. Importing the namespace statically
+     * also stops rollup from tree-shaking the real `main`/`default` exports.
+     */
+    return [
+      `import * as __vscodeTextmateModule from ${JSON.stringify(vscodeTextmateMain)};`,
+      "const __vscodeTextmate = __vscodeTextmateModule.main ?? __vscodeTextmateModule.default;",
+      "export const applyStateStackDiff = __vscodeTextmate.applyStateStackDiff;",
+      "export const diffStateStacksRefEq = __vscodeTextmate.diffStateStacksRefEq;",
+      "export const INITIAL = __vscodeTextmate.INITIAL;",
+      "export const main = __vscodeTextmate;",
+      "export default __vscodeTextmate;",
+      "",
+    ].join("\n");
+  },
+  transform(code: string, id: string) {
+    const normalizedId = id.replaceAll("\\", "/");
+
+    /*
+     * Only the consumers that destructure the dynamic import result need the
+     * identity rewrite. Callers that assign the whole module (`vscodeTextmate`)
+     * keep using `.main`, which the shim provides.
+     */
+    if (
+      normalizedId.includes("textMateWorkerTokenizerController") ||
+      normalizedId.includes("backgroundTokenization/worker/textMateWorkerTokenizer.js")
+    ) {
+      const patched = code.replace(
+        /\.then\(function \(n\) \{ return n\.main; \}\)/g,
+        ".then(function (n) { return n; })",
+      );
+
+      if (patched !== code) {
+        return { code: patched, map: null };
+      }
+    }
+
+    return null;
+  },
+};
+
 const forcePreventTransformAssets: Plugin = {
   name: "force-prevent-transform-assets",
   apply: "serve",
@@ -315,11 +399,12 @@ export default defineConfig({
   },
   worker: {
     format: "es",
-    // Worker code is re-bundled with its own plugin list - share the wasm
-    // inliner so the workers can load the virtual wasm modules
-    plugins: () => [webResourceWasmInline],
+    // Worker code is re-bundled with its own plugin list - share the textmate
+    // main shim and the wasm inliner so workers resolve both virtual modules
+    plugins: () => [textmateMainShim, webResourceWasmInline],
   },
   plugins: [
+    textmateMainShim,
     configureResponseHeaders,
     rolldownPatchHotReload,
     forcePreventTransformAssets,

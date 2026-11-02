@@ -25,6 +25,11 @@ import tailwindThemeCss from "tailwindcss/theme.css?raw";
 import type * as vscodeType from "vscode";
 
 import { EsbuildBuildRunner } from "../esbuild/buildRunner.js";
+import {
+  captureDirtyDocuments,
+  dirtyDocumentText,
+  type DirtyDocumentSnapshot,
+} from "../shared/liveDocuments.js";
 
 /*
  * Workspace source scanning
@@ -129,6 +134,7 @@ function extractCandidates(text: string): string[] {
 async function scanWorkspaceCandidates(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
+  dirtyDocuments: DirtyDocumentSnapshot,
 ): Promise<Set<string>> {
   const uris = await vscode.workspace.findFiles(
     "**/*",
@@ -140,6 +146,22 @@ async function scanWorkspaceCandidates(
 
   for (const uri of uris) {
     if (!SCANNABLE_EXTENSIONS.test(uri.path)) {
+      continue;
+    }
+
+    /*
+     * Unsaved buffers win over the stat/read cache: mtime does not change
+     * until autosave writes the document, so class names typed a moment ago
+     * would otherwise be missing from the generated CSS.
+     */
+    const relativePath = vscode.workspace.asRelativePath(uri, false).replaceAll("\\", "/");
+    const live = dirtyDocumentText(dirtyDocuments, relativePath);
+
+    if (live != null) {
+      for (const candidate of extractCandidates(live)) {
+        candidates.add(candidate);
+      }
+
       continue;
     }
 
@@ -216,6 +238,7 @@ function joinWorkspacePath(base: string, id: string): string {
 function createLoadStylesheet(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
+  dirtyDocuments: DirtyDocumentSnapshot,
 ) {
   return async (
     id: string,
@@ -250,6 +273,15 @@ function createLoadStylesheet(
     }
 
     const path = joinWorkspacePath(base, id);
+    const live = dirtyDocumentText(dirtyDocuments, path);
+
+    if (live != null) {
+      return {
+        path,
+        base: path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "/",
+        content: live,
+      };
+    }
 
     try {
       const bytes = await vscode.workspace.fs.readFile(
@@ -452,24 +484,31 @@ export async function compileTailwindCss(
   } = {},
 ): Promise<TailwindCompileResult> {
   const inputPath = options.input;
+  const dirtyDocuments = captureDirtyDocuments(vscode, rootUri);
 
   let cssInput = DEFAULT_CSS_INPUT;
   let base = "/";
 
   if (inputPath != null && inputPath.trim().length > 0) {
-    try {
-      const bytes = await vscode.workspace.fs.readFile(
-        vscode.Uri.joinPath(rootUri, ...inputPath.split("/")),
-      );
+    const liveInput = dirtyDocumentText(dirtyDocuments, inputPath);
 
-      cssInput = new TextDecoder().decode(bytes);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+    if (liveInput != null) {
+      cssInput = liveInput;
+    } else {
+      try {
+        const bytes = await vscode.workspace.fs.readFile(
+          vscode.Uri.joinPath(rootUri, ...inputPath.split("/")),
+        );
 
-      throw new Error(
-        `Could not read the Tailwind input stylesheet "${inputPath}": ${message}. ` +
-          'Create the file, or remove "input" from tailwind.config.json to use the default (@import "tailwindcss").',
-      );
+        cssInput = new TextDecoder().decode(bytes);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+
+        throw new Error(
+          `Could not read the Tailwind input stylesheet "${inputPath}": ${message}. ` +
+            'Create the file, or remove "input" from tailwind.config.json to use the default (@import "tailwindcss").',
+        );
+      }
     }
 
     base = inputPath.includes("/")
@@ -477,13 +516,13 @@ export async function compileTailwindCss(
       : "/";
   }
 
-  const candidates = await scanWorkspaceCandidates(vscode, rootUri);
+  const candidates = await scanWorkspaceCandidates(vscode, rootUri, dirtyDocuments);
 
   const pluginInputs: string[] = [];
 
   const compiler = await compile(cssInput, {
     base,
-    loadStylesheet: createLoadStylesheet(vscode, rootUri),
+    loadStylesheet: createLoadStylesheet(vscode, rootUri, dirtyDocuments),
     loadModule: createLoadModule(
       rootUri,
       options.pluginRunner,

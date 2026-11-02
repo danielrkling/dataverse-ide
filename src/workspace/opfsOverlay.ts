@@ -25,11 +25,15 @@ import { contributeExtensionManifest } from "../extensions/api.js";
  * breaks installs.
  *
  * Architecture:
- * - `fsProvider.ts` builds an OverlayFileSystemProvider for the `file`
- *   scheme with two delegates: the HTMLFileSystemProvider (real folder,
- *   priority 1) and this provider (priority 2, wins inside overlay dirs).
+ * - `fsProvider.ts` registers a path-prefix router for the `file` scheme.
+ *   Paths inside an overlay dir go directly to this provider (OPFS); every
+ *   other path goes directly to the HTMLFileSystemProvider (real folder).
+ *   (The library OverlayFileSystemProvider is not used: its readdir queries
+ *   both delegates, its non-overlay reads reject against the overlay first,
+ *   and it retries overlay misses against the real folder twice.)
  * - Reads inside an overlay dir prefer OPFS and fall back to the real folder
- *   (legacy content keeps working without a migration step).
+ *   (legacy content keeps working without a migration step). The real
+ *   fallback is skipped entirely when the overlay dir does not exist there.
  * - Writes inside an overlay dir land in OPFS only - the real folder is
  *   never touched for overlay paths.
  * - Deletes remove the OPFS entry and also the matching real entry, so a
@@ -110,6 +114,70 @@ function notFound(uri: vscodeType.Uri): never {
     `No such entry: ${uri.toString()}`,
     FileSystemProviderErrorCode.FileNotFound,
   );
+}
+
+/*
+ * Directory handles are stable while the directory exists, and resolving one
+ * through the File System Access API is a real async call per path segment.
+ * Bundlers read many files from the same package directories, so cache the
+ * successful directory lookups (per parent handle) and invalidate on
+ * mkdir/delete/rename.
+ *
+ * Only successful lookups are cached; a miss or a type mismatch is rethrown
+ * to the caller unchanged so lookupIn keeps its file-vs-directory fallback.
+ */
+const directoryHandleCache = new WeakMap<
+  FileSystemDirectoryHandle,
+  Map<string, Promise<FileSystemDirectoryHandle>>
+>();
+
+function getDirectoryHandleCached(
+  parent: FileSystemDirectoryHandle,
+  name: string,
+): Promise<FileSystemDirectoryHandle> {
+  let cache = directoryHandleCache.get(parent);
+
+  if (cache == null) {
+    cache = new Map();
+    directoryHandleCache.set(parent, cache);
+  }
+
+  const existing = cache.get(name);
+
+  if (existing != null) {
+    return existing;
+  }
+
+  const pending = parent.getDirectoryHandle(name);
+
+  cache.set(name, pending);
+
+  pending.catch(() => {
+    if (cache.get(name) === pending) {
+      cache.delete(name);
+    }
+  });
+
+  return pending;
+}
+
+function invalidateDirectoryHandle(parent: FileSystemDirectoryHandle, name: string): void {
+  directoryHandleCache.get(parent)?.delete(name);
+}
+
+function rememberDirectoryHandle(
+  parent: FileSystemDirectoryHandle,
+  name: string,
+  handle: FileSystemDirectoryHandle,
+): void {
+  let cache = directoryHandleCache.get(parent);
+
+  if (cache == null) {
+    cache = new Map();
+    directoryHandleCache.set(parent, cache);
+  }
+
+  cache.set(name, Promise.resolve(handle));
 }
 
 function notAllowed(message: string): never {
@@ -267,7 +335,7 @@ async function lookupIn(
     }
 
     try {
-      current = await current.getDirectoryHandle(segment);
+      current = await getDirectoryHandleCached(current, segment);
     } catch (error) {
       if (isNotFoundError(error)) {
         return undefined;
@@ -296,7 +364,7 @@ async function lookupIn(
   try {
     return {
       kind: "directory",
-      handle: await current.getDirectoryHandle(last),
+      handle: await getDirectoryHandleCached(current, last),
     };
   } catch (error) {
     if (isNotFoundError(error)) {
@@ -334,8 +402,15 @@ async function ensureDirectory(
   parent: FileSystemDirectoryHandle,
   name: string,
 ): Promise<FileSystemDirectoryHandle> {
+  // The name may previously have been a file, so never trust a cached handle.
+  invalidateDirectoryHandle(parent, name);
+
   try {
-    return await parent.getDirectoryHandle(name, { create: true });
+    const handle = await parent.getDirectoryHandle(name, { create: true });
+
+    rememberDirectoryHandle(parent, name, handle);
+
+    return handle;
   } catch (error) {
     if (!isTypeMismatchError(error)) {
       throw error;
@@ -352,7 +427,11 @@ async function ensureDirectory(
       );
     }
 
-    return parent.getDirectoryHandle(name, { create: true });
+    const handle = await parent.getDirectoryHandle(name, { create: true });
+
+    rememberDirectoryHandle(parent, name, handle);
+
+    return handle;
   }
 }
 
@@ -372,7 +451,7 @@ async function parentOf(
     }
 
     try {
-      current = await current.getDirectoryHandle(segment);
+      current = await getDirectoryHandleCached(current, segment);
     } catch (error) {
       if (isNotFoundError(error) || isTypeMismatchError(error)) {
         throw createFileSystemProviderError(
@@ -454,9 +533,13 @@ async function deleteIn(
   }
 
   try {
-    await parent.removeEntry(segments[segments.length - 1], {
+    const name = segments[segments.length - 1];
+
+    await parent.removeEntry(name, {
       recursive,
     });
+
+    invalidateDirectoryHandle(parent, name);
 
     return true;
   } catch {
@@ -464,8 +547,40 @@ async function deleteIn(
   }
 }
 
+function splitOverlayKey(key: string): {
+  top: string;
+  rest: string;
+} {
+  const slash = key.indexOf("/");
+
+  if (slash === -1) {
+    return { top: key, rest: "" };
+  }
+
+  return {
+    top: key.slice(0, slash),
+    rest: key.slice(slash + 1),
+  };
+}
+
 export class OpfsOverlayProvider implements IFileSystemProviderWithFileReadWriteCapability {
   private readonly workspace: OpfsWorkspace;
+
+  /*
+   * Legacy (pre-overlay) content still living in the real workspace folder.
+   * Most workspaces never have node_modules on the real folder, so remember
+   * that fact instead of paying a failed real-folder lookup on every overlay
+   * miss. Present roots are cached indefinitely; absent roots are re-checked
+   * after a short TTL.
+   */
+  private readonly legacyRootCache = new Map<
+    string,
+    {
+      at: number;
+      present: boolean;
+      promise: Promise<FileSystemDirectoryHandle | undefined>;
+    }
+  >();
 
   private readonly changeEmitter = new SimpleEmitter<readonly IFileChange[]>();
 
@@ -483,9 +598,10 @@ export class OpfsOverlayProvider implements IFileSystemProviderWithFileReadWrite
 
   /*
    * Overlay-relative key ('node_modules/…') for a workspace URI, or null when
-   * the URI is outside the overlay.
+   * the URI is outside the overlay. Public so the path-prefix router can pick
+   * a delegate without attempting a lookup first.
    */
-  private overlayKeyFor(uri: vscodeType.Uri): string | null {
+  overlayKeyFor(uri: vscodeType.Uri): string | null {
     if (uri.scheme !== "file") {
       return null;
     }
@@ -514,6 +630,38 @@ export class OpfsOverlayProvider implements IFileSystemProviderWithFileReadWrite
     }
 
     return segments.join("/");
+  }
+
+  /*
+   * Real-folder handle for an overlay dir, or undefined when the workspace
+   * never had legacy content there. Cached so overlay-only workspaces do not
+   * pay a failed real lookup on every read.
+   */
+  private legacyOverlayRoot(topLevel: string): Promise<FileSystemDirectoryHandle | undefined> {
+    const cached = this.legacyRootCache.get(topLevel);
+    const now = Date.now();
+
+    if (cached != null && (cached.present || now - cached.at < 30_000)) {
+      return cached.promise;
+    }
+
+    const entry = {
+      at: now,
+      present: false,
+      promise: undefined as unknown as Promise<FileSystemDirectoryHandle | undefined>,
+    };
+
+    entry.promise = this.workspaceHandle.getDirectoryHandle(topLevel).then(
+      (handle) => {
+        entry.present = true;
+        return handle;
+      },
+      () => undefined,
+    );
+
+    this.legacyRootCache.set(topLevel, entry);
+
+    return entry.promise;
   }
 
   private fireSoon(type: FileChangeType, resource: vscodeType.Uri): void {
@@ -585,7 +733,14 @@ export class OpfsOverlayProvider implements IFileSystemProviderWithFileReadWrite
      * Legacy real-folder fallback: the entry has not been migrated into the
      * OPFS overlay yet, so report the real entry.
      */
-    const legacy = await lookupIn(this.workspaceHandle, overlayKey);
+    const { top, rest } = splitOverlayKey(overlayKey);
+    const legacyRoot = await this.legacyOverlayRoot(top);
+
+    if (legacyRoot == null) {
+      notFound(uri);
+    }
+
+    const legacy = await lookupIn(legacyRoot, rest);
 
     if (legacy == null) {
       notFound(uri);
@@ -644,15 +799,23 @@ export class OpfsOverlayProvider implements IFileSystemProviderWithFileReadWrite
      */
     const merged = new Map<string, FileType>();
 
-    await readdirInto(this.workspaceHandle, overlayKey, merged);
+    const { top, rest } = splitOverlayKey(overlayKey);
+    const legacyRoot = await this.legacyOverlayRoot(top);
+
+    if (legacyRoot != null) {
+      await readdirInto(legacyRoot, rest, merged);
+    }
+
     await readdirInto(await this.workspace.root, overlayKey, merged);
 
     if (merged.size === 0) {
-      const exists =
-        (await lookupIn(await this.workspace.root, overlayKey))?.kind === "directory" ||
-        (await lookupIn(this.workspaceHandle, overlayKey))?.kind === "directory";
+      const existsInOpfs =
+        (await lookupIn(await this.workspace.root, overlayKey))?.kind === "directory";
 
-      if (!exists) {
+      const existsInLegacy =
+        legacyRoot != null && (await lookupIn(legacyRoot, rest))?.kind === "directory";
+
+      if (!existsInOpfs && !existsInLegacy) {
         notFound(uri);
       }
     }
@@ -683,7 +846,14 @@ export class OpfsOverlayProvider implements IFileSystemProviderWithFileReadWrite
       }
     }
 
-    const legacy = await lookupIn(this.workspaceHandle, overlayKey);
+    const { top, rest } = splitOverlayKey(overlayKey);
+    const legacyRoot = await this.legacyOverlayRoot(top);
+
+    if (legacyRoot == null) {
+      notFound(uri);
+    }
+
+    const legacy = await lookupIn(legacyRoot, rest);
 
     if (legacy == null) {
       notFound(uri);
@@ -755,6 +925,8 @@ export class OpfsOverlayProvider implements IFileSystemProviderWithFileReadWrite
         );
       }
 
+      invalidateDirectoryHandle(parent, name);
+
       handle = await parent.getFileHandle(name, {
         create: true,
       });
@@ -807,6 +979,8 @@ export class OpfsOverlayProvider implements IFileSystemProviderWithFileReadWrite
      * readdir would bring it back from disk.
      */
     await deleteIn(this.workspaceHandle, overlayKey, Boolean(opts.recursive));
+
+    this.legacyRootCache.delete(splitOverlayKey(overlayKey).top);
 
     this.fireSoon(FileChangeType.DELETED, uri);
   }
@@ -879,9 +1053,8 @@ export class OpfsOverlayProvider implements IFileSystemProviderWithFileReadWrite
   watch(_resource: vscodeType.Uri, _opts: IWatchOptions): DisposableLike {
     /*
      * Watching is event-driven: writes performed through this provider emit
-     * change events via onDidChangeFile (see fireSoon), and the
-     * OverlayFileSystemProvider aggregates them with the real folder
-     * provider's own watcher.
+     * change events via onDidChangeFile (see fireSoon), and the workspace
+     * router aggregates them with the real folder provider's own watcher.
      */
     return {
       dispose: () => {},

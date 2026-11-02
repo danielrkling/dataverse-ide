@@ -516,6 +516,9 @@ export default {
 
         entry: () => currentConfig.input,
 
+        buildOnChange: true,
+        changeDebounceMs: 750,
+
         build: async () => {
           await runCompile({
             silent: true,

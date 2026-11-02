@@ -54,12 +54,38 @@ export type BuildOutputFile = {
   text: string;
 };
 
+export type WorkspaceEntryKind = "file" | "directory";
+
+/**
+ * Per-build filesystem counters. Reported by the runner so slow builds can be
+ * diagnosed without opening devtools.
+ */
+export type WorkspaceReaderStats = {
+  fileReads: number;
+  fileReadCacheHits: number;
+  directoryReads: number;
+  directoryReadCacheHits: number;
+};
+
 export type WorkspaceReader = {
   /**
    * Reads a workspace-relative UTF-8 text file. Returns undefined when the
    * file does not exist or cannot be read.
    */
   readText: (path: string) => Promise<string | undefined>;
+
+  /**
+   * Lists a workspace-relative directory. Returns undefined when the reader
+   * cannot list directories (the resolver then falls back to direct probes).
+   *
+   * This is the difference between one filesystem round trip per directory
+   * and one per *candidate extension*: extensionless imports used to probe up
+   * to 20 paths each through vscode.workspace.fs.
+   */
+  readDir?: (path: string) => Promise<Map<string, WorkspaceEntryKind> | undefined>;
+
+  /** Mutable counters for this reader (when the reader tracks them). */
+  readonly stats?: WorkspaceReaderStats;
 };
 
 export type BuildRequest = {
@@ -201,9 +227,25 @@ export function createWorkspaceReader(
   vscode: typeof vscodeType,
   workspaceRootUri: vscodeType.Uri,
 ): WorkspaceReader {
-  const cache = new Map<string, Promise<string | undefined>>();
+  const fileCache = new Map<string, Promise<string | undefined>>();
+  const directoryCache = new Map<string, Promise<Map<string, WorkspaceEntryKind> | undefined>>();
+
+  const stats: WorkspaceReaderStats = {
+    fileReads: 0,
+    fileReadCacheHits: 0,
+    directoryReads: 0,
+    directoryReadCacheHits: 0,
+  };
+
+  const uriFor = (normalized: string): vscodeType.Uri =>
+    vscode.Uri.joinPath(
+      workspaceRootUri,
+      ...normalized.split("/").filter((segment) => segment.length > 0),
+    );
 
   return {
+    stats,
+
     readText(path: string): Promise<string | undefined> {
       const normalized = normalizePath(path);
 
@@ -211,20 +253,18 @@ export function createWorkspaceReader(
         return Promise.resolve(undefined);
       }
 
-      const existing = cache.get(normalized);
+      const existing = fileCache.get(normalized);
 
       if (existing != null) {
+        stats.fileReadCacheHits++;
         return existing;
       }
 
+      stats.fileReads++;
+
       const pending = (async () => {
         try {
-          const uri = vscode.Uri.joinPath(
-            workspaceRootUri,
-            ...normalized.split("/").filter((segment) => segment.length > 0),
-          );
-
-          const bytes = await vscode.workspace.fs.readFile(uri);
+          const bytes = await vscode.workspace.fs.readFile(uriFor(normalized));
 
           return new TextDecoder().decode(bytes);
         } catch {
@@ -232,7 +272,38 @@ export function createWorkspaceReader(
         }
       })();
 
-      cache.set(normalized, pending);
+      fileCache.set(normalized, pending);
+
+      return pending;
+    },
+
+    readDir(path: string): Promise<Map<string, WorkspaceEntryKind> | undefined> {
+      const normalized = normalizePath(path);
+      const existing = directoryCache.get(normalized);
+
+      if (existing != null) {
+        stats.directoryReadCacheHits++;
+        return existing;
+      }
+
+      stats.directoryReads++;
+
+      const pending = (async () => {
+        try {
+          const entries = await vscode.workspace.fs.readDirectory(uriFor(normalized));
+          const listing = new Map<string, WorkspaceEntryKind>();
+
+          for (const [name, type] of entries) {
+            listing.set(name, type === vscode.FileType.Directory ? "directory" : "file");
+          }
+
+          return listing;
+        } catch {
+          return undefined;
+        }
+      })();
+
+      directoryCache.set(normalized, pending);
 
       return pending;
     },
@@ -252,12 +323,24 @@ function withVirtualFiles(
   }
 
   const normalizedVirtualFiles = new Map<string, string>();
+  const virtualNamesByDirectory = new Map<string, Set<string>>();
 
   for (const [path, contents] of Object.entries(virtualFiles)) {
-    normalizedVirtualFiles.set(normalizePath(path), contents);
+    const normalized = normalizePath(path);
+
+    normalizedVirtualFiles.set(normalized, contents);
+
+    const { directory, name } = splitDirectoryAndName(normalized);
+
+    const names = virtualNamesByDirectory.get(directory) ?? new Set<string>();
+
+    names.add(name);
+    virtualNamesByDirectory.set(directory, names);
   }
 
   return {
+    stats: workspace.stats,
+
     async readText(path: string): Promise<string | undefined> {
       const normalized = normalizePath(path);
 
@@ -268,6 +351,28 @@ function withVirtualFiles(
       }
 
       return workspace.readText(normalized);
+    },
+
+    async readDir(path: string): Promise<Map<string, WorkspaceEntryKind> | undefined> {
+      if (workspace.readDir == null) {
+        return undefined;
+      }
+
+      const normalized = normalizePath(path);
+      const virtualNames = virtualNamesByDirectory.get(normalized);
+      const base = await workspace.readDir(normalized);
+
+      if (virtualNames == null) {
+        return base;
+      }
+
+      const listing = new Map(base ?? []);
+
+      for (const name of virtualNames) {
+        listing.set(name, "file");
+      }
+
+      return listing;
     },
   };
 }
@@ -404,6 +509,145 @@ function getImporterDirectory(importer: string): string {
   return segments.join("/");
 }
 
+function splitDirectoryAndName(path: string): {
+  directory: string;
+  name: string;
+} {
+  const normalized = normalizePath(path);
+  const slash = normalized.lastIndexOf("/");
+
+  if (slash === -1) {
+    return { directory: "", name: normalized };
+  }
+
+  return {
+    directory: normalized.slice(0, slash),
+    name: normalized.slice(slash + 1),
+  };
+}
+
+function joinDirectoryAndName(directory: string, name: string): string {
+  return directory.length > 0 ? `${directory}/${name}` : name;
+}
+
+async function readDirectoryListing(
+  reader: WorkspaceReader,
+  directory: string,
+): Promise<Map<string, WorkspaceEntryKind> | undefined> {
+  if (reader.readDir == null) {
+    return undefined;
+  }
+
+  try {
+    return await reader.readDir(directory);
+  } catch {
+    return undefined;
+  }
+}
+
+/*
+ * Resolves a path against a cached directory listing instead of probing every
+ * candidate extension through vscode.workspace.fs.
+ *
+ * Before this, an extensionless import like `./components` performed up to 11
+ * failed readFile round trips in the importer directory and then up to 10 more
+ * `/index.*` probes. On the File System Access API provider every failure is an
+ * async rejection, so a 500-module app spent most of a build in resolution.
+ *
+ * Falls back to the original probe strategy when a reader cannot list
+ * directories (the Rolldown/worker readers, or an unreadable directory).
+ */
+async function resolveWithListing(
+  reader: WorkspaceReader,
+  path: string,
+  extensions: readonly string[],
+  indexTrails: readonly string[],
+): Promise<string | undefined> {
+  const normalized = normalizePath(path);
+
+  if (normalized.length === 0) {
+    return undefined;
+  }
+
+  const { directory, name } = splitDirectoryAndName(normalized);
+  const listing = await readDirectoryListing(reader, directory);
+
+  if (listing != null) {
+    const exact = listing.get(name);
+
+    if (exact === "file") {
+      return normalized;
+    }
+
+    if (!hasFileExtension(normalized)) {
+      for (const extension of extensions) {
+        if (extension.length === 0) {
+          continue;
+        }
+
+        const candidate = `${name}${extension}`;
+
+        if (listing.get(candidate) === "file") {
+          return joinDirectoryAndName(directory, candidate);
+        }
+      }
+    }
+
+    if (exact === "directory") {
+      const nested = await readDirectoryListing(reader, normalized);
+
+      if (nested != null) {
+        for (const trail of indexTrails) {
+          const indexName = trail.replace(/^\/+/, "");
+
+          if (nested.get(indexName) === "file") {
+            return joinDirectoryAndName(normalized, indexName);
+          }
+        }
+
+        return undefined;
+      }
+
+      /*
+       * Listing the nested directory failed even though the parent listing
+       * says it exists (permissions, provider hiccup). Fall through to probes.
+       */
+    } else if (exact == null) {
+      /*
+       * The parent listing is authoritative: neither the exact name nor any
+       * extension exists, and a missing path cannot have an index module.
+       */
+      return undefined;
+    }
+  }
+
+  if ((await reader.readText(normalized)) != null) {
+    return normalized;
+  }
+
+  if (hasFileExtension(normalized)) {
+    return undefined;
+  }
+
+  for (const extension of extensions) {
+    const candidate = `${normalized}${extension}`;
+
+    if ((await reader.readText(candidate)) != null) {
+      return candidate;
+    }
+  }
+
+  for (const trail of indexTrails) {
+    const candidate = `${normalized}${trail}`;
+
+    if ((await reader.readText(candidate)) != null) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
 function joinFromImporter(importer: string, specifier: string): string {
   if (specifier.startsWith("/")) {
     return normalizePath(specifier);
@@ -500,33 +744,7 @@ function createPackageResolver(reader: WorkspaceReader): PackageResolver {
   }
 
   async function lookup(path: string): Promise<string | undefined> {
-    const normalized = normalizePath(path);
-
-    if ((await reader.readText(normalized)) != null) {
-      return normalized;
-    }
-
-    if (hasFileExtension(normalized)) {
-      return undefined;
-    }
-
-    for (const extension of COMPANION_EXTENSIONS) {
-      const candidate = `${normalized}${extension}`;
-
-      if ((await reader.readText(candidate)) != null) {
-        return candidate;
-      }
-    }
-
-    for (const trail of INDEX_TRAILS) {
-      const candidate = `${normalized}${trail}`;
-
-      if ((await reader.readText(candidate)) != null) {
-        return candidate;
-      }
-    }
-
-    return undefined;
+    return resolveWithListing(reader, path, COMPANION_EXTENSIONS, INDEX_TRAILS);
   }
 
   async function resolveExportTarget(
@@ -735,20 +953,7 @@ function createPackageResolver(reader: WorkspaceReader): PackageResolver {
   async function resolveBareImport(specifier: string): Promise<string | undefined> {
     const { packageDir, subpath } = splitPackageSpec(specifier);
 
-    const manifestPath = `${packageDir}/package.json`;
-
-    const manifestText = await reader.readText(manifestPath);
-    const packageJson = manifestText != null ? parseJsonSafe(manifestText) : undefined;
-
-    console.info("[esbuild] resolving package import", {
-      specifier,
-      packageDir,
-      subpath,
-      manifestPath,
-      manifestFound: manifestText != null,
-      hasExports: packageJson?.exports != null,
-      exports: packageJson?.exports,
-    });
+    const packageJson = await readPackageJson(packageDir);
 
     if (packageJson != null) {
       /*
@@ -792,33 +997,7 @@ async function resolveRelativeWorkspacePath(
   reader: WorkspaceReader,
   path: string,
 ): Promise<string | undefined> {
-  const normalized = normalizePath(path);
-
-  if ((await reader.readText(normalized)) != null) {
-    return normalized;
-  }
-
-  if (hasFileExtension(normalized)) {
-    return undefined;
-  }
-
-  for (const extension of RESOLVABLE_EXTENSIONS) {
-    const candidate = `${normalized}${extension}`;
-
-    if ((await reader.readText(candidate)) != null) {
-      return candidate;
-    }
-  }
-
-  for (const trail of INDEX_TRAILS) {
-    const candidate = `${normalized}${trail}`;
-
-    if ((await reader.readText(candidate)) != null) {
-      return candidate;
-    }
-  }
-
-  return undefined;
+  return resolveWithListing(reader, path, RESOLVABLE_EXTENSIONS, INDEX_TRAILS);
 }
 
 function createWorkspaceFsPlugin(

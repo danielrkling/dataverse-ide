@@ -3,6 +3,11 @@ import type * as vscodeType from "vscode";
 import { contributeExtensionManifest } from "../api.js";
 import { createWatchStatus } from "../watchStatus.js";
 import { createPanelIcon, PANEL_GLYPHS, registerExtensionPanel } from "../panels.js";
+import {
+  captureDirtyDocuments,
+  dirtyDocumentText,
+  type DirtyDocumentSnapshot,
+} from "../shared/liveDocuments.js";
 
 import { bundleHtml } from "./bundler.js";
 
@@ -275,7 +280,15 @@ export default {
       }
     }
 
+    let dirtyDocuments: DirtyDocumentSnapshot = new Map();
+
     async function readWorkspaceText(path: string): Promise<string | undefined> {
+      const live = dirtyDocumentText(dirtyDocuments, path);
+
+      if (live != null) {
+        return live;
+      }
+
       try {
         const bytes = await vscode.workspace.fs.readFile(
           uriFor(vscode, context.workspaceRootUri, path),
@@ -288,6 +301,12 @@ export default {
     }
 
     async function readWorkspaceBytes(path: string): Promise<Uint8Array | undefined> {
+      const live = dirtyDocumentText(dirtyDocuments, path);
+
+      if (live != null) {
+        return new TextEncoder().encode(live);
+      }
+
       try {
         return await vscode.workspace.fs.readFile(uriFor(vscode, context.workspaceRootUri, path));
       } catch {
@@ -305,6 +324,8 @@ export default {
       const inputPath = normalizeWorkspacePath(requestedEntry.input);
 
       try {
+        dirtyDocuments = captureDirtyDocuments(vscode, context.workspaceRootUri);
+
         await reloadConfigFromDisk();
 
         const outputPath = normalizeWorkspacePath(
@@ -340,7 +361,8 @@ export default {
         let sourceBytes: Uint8Array;
 
         try {
-          sourceBytes = await vscode.workspace.fs.readFile(inputUri);
+          sourceBytes =
+            (await readWorkspaceBytes(inputPath)) ?? (await vscode.workspace.fs.readFile(inputUri));
         } catch {
           throw new Error(
             `Entry "${inputPath}" was not found in the workspace. ` +

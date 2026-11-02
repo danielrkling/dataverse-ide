@@ -1,11 +1,11 @@
 import {
   createHTMLFileSystemProvider,
-  OverlayFileSystemProvider,
   registerCustomProvider,
   type HTMLFileSystemProvider,
 } from "@codingame/monaco-vscode-files-service-override";
 import type * as vscode from "vscode";
 import { OpfsOverlayProvider } from "./opfsOverlay.js";
+import { WorkspaceFileSystemProvider } from "./workspaceFileSystemProvider.js";
 
 export let provider: HTMLFileSystemProvider;
 export let opfsOverlayProvider: OpfsOverlayProvider;
@@ -32,13 +32,20 @@ export async function openWorkspaceDirectory(
   workspaceDirectoryHandle = dirHandle;
 
   /*
-   * Mount the workspace through an OverlayFileSystemProvider so that
-   * configurable top-level directories (default: node_modules) are served
-   * from the browser's OPFS instead of the real folder (see opfsOverlay.ts).
+   * Mount the workspace through a path-prefix router so that configurable
+   * top-level directories (default: node_modules) are served from the
+   * browser's OPFS instead of the real folder (see opfsOverlay.ts).
    *
-   * - the real folder provider is priority 1 (wins everywhere else),
-   * - the OPFS overlay is priority 2 (wins for overlay dirs),
-   * - the overlay composite becomes the provider for the `file` scheme.
+   * The router dispatches each operation to exactly one delegate:
+   *
+   * - paths inside an overlay dir go only to OPFS
+   * - everything else goes only to the real folder provider
+   *
+   * (The library OverlayFileSystemProvider queries both providers for every
+   * readdir, rejects overlay work for every non-overlay read, and retries a
+   * missing overlay file against the real folder twice. The router makes the
+   * path prefix the single dispatch decision and leaves the legacy fallback
+   * to the overlay provider.)
    */
   const realFs = createHTMLFileSystemProvider();
 
@@ -46,19 +53,11 @@ export async function openWorkspaceDirectory(
 
   opfsOverlayProvider = new OpfsOverlayProvider(dirHandle, rootUri.path);
 
-  const overlay = new OverlayFileSystemProvider();
+  const workspaceFs = new WorkspaceFileSystemProvider(rootUri.path, realFs, opfsOverlayProvider);
 
-  const realFsDisposable = overlay.register(1, realFs);
-  const opfsDisposable = overlay.register(2, opfsOverlayProvider);
-
-  registerCustomProvider("file", overlay);
+  registerCustomProvider("file", workspaceFs);
 
   provider = realFs;
-
-  /*
-   * Keep both handles alive for the lifetime of the workspace mount.
-   */
-  void [realFsDisposable, opfsDisposable];
 
   return rootUri;
 }
