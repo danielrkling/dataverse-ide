@@ -326,7 +326,21 @@ function installDocumentAutoSave(delayMs = 1000): vscode.Disposable {
   });
 }
 
+/*
+ * The workbench renders the top-left title bar app icon with the
+ * `--product-icon` CSS variable (falling back to the stock VS Code logo).
+ * Resolve the URL at runtime so the icon also works when the built app is
+ * served from a sub-path (e.g. a Dataverse web resource).
+ */
+function applyProductIcon(): void {
+  const iconUrl = new URL("./icons/dataverse-ide.svg", document.baseURI).href;
+
+  document.documentElement.style.setProperty("--product-icon", `url("${iconUrl}")`);
+}
+
 export async function startWorkbench(container: HTMLElement): Promise<void> {
+  applyProductIcon();
+
   preloadWorkerBlobs();
 
   /*

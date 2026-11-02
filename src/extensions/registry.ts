@@ -3,13 +3,21 @@ import type * as vscodeType from "vscode";
 import { getService } from "@codingame/monaco-vscode-api";
 import {
   ExtensionHostKind,
+  getBuiltinExtensions,
   registerExtension,
   type IExtensionManifest,
 } from "@codingame/monaco-vscode-api/extensions";
+import { servicesInitialized } from "@codingame/monaco-vscode-api/lifecycle";
+import { IExtensionService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service";
 import { IWorkbenchExtensionEnablementService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/common/extensionManagement.service";
+import { IWorkbenchExtensionManagementService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/common/extensionManagement.service";
 import type { ILocalExtension } from "@codingame/monaco-vscode-api/vscode/vs/platform/extensionManagement/common/extensionManagement";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
-import { ExtensionType } from "@codingame/monaco-vscode-api/vscode/vs/platform/extensions/common/extensions";
+import {
+  ExtensionType,
+  TargetPlatform,
+} from "@codingame/monaco-vscode-api/vscode/vs/platform/extensions/common/extensions";
+import type { IExtension } from "@codingame/monaco-vscode-api/vscode/vs/platform/extensions/common/extensions";
 
 import type {
   ExtensionContext,
@@ -165,12 +173,53 @@ function placeholderExtension(identity: ExtensionManifestIdentity): ILocalExtens
 }
 
 /*
+ * Minimal built-in extension entry. Normally `registerExtension` adds this
+ * itself, but only while services are still uninitialized. If something has
+ * already initialized them (different module-order in dev/build), the entry
+ * would otherwise miss the built-in scanner and the Extensions view would be
+ * empty, so add it to the scanner input manually.
+ */
+function builtinExtensionFor(identity: ExtensionManifestIdentity): IExtension {
+  const id = extensionId(identity);
+
+  return {
+    manifest: {
+      name: identity.name,
+      publisher: identity.publisher,
+      version: "0.1.0",
+      engines: {
+        vscode: "*",
+      },
+      displayName: identity.displayName,
+      description: identity.description,
+    },
+    type: ExtensionType.User,
+    isBuiltin: true,
+    identifier: { id },
+    location: URI.from({ scheme: "extension-file", authority: id, path: "/extension" }),
+    targetPlatform: TargetPlatform.WEB,
+    isValid: true,
+    validations: [],
+    preRelease: false,
+  } as unknown as IExtension;
+}
+
+/*
  * Register a minimal manifest for every extension before the workbench
  * initializes. `registerExtension` only adds to the built-in extension list
  * in that phase, which is what the Extensions view scans. The real manifest
  * replaces the placeholder when the extension activates.
  */
 export function registerExtensionPlaceholders(): void {
+  const builtinsBefore = getBuiltinExtensions().length;
+
+  console.info(
+    "[Dataverse IDE] Built-in extensions before placeholders:",
+    builtinsBefore,
+    "servicesInitialized:",
+    servicesInitialized,
+  );
+
   for (const identity of Object.values(extensionManifests)) {
     const manifest: IExtensionManifest = {
       name: identity.name,
@@ -183,9 +232,22 @@ export function registerExtensionPlaceholders(): void {
       description: identity.description,
     };
 
-    markPlaceholder(extensionId(identity));
+    const id = extensionId(identity);
+
+    markPlaceholder(id);
     registerExtension(manifest, ExtensionHostKind.LocalProcess);
+
+    const builtins = getBuiltinExtensions();
+
+    if (!builtins.some((extension) => extension.identifier.id.toLowerCase() === id)) {
+      builtins.push(builtinExtensionFor(identity));
+    }
   }
+
+  console.info(
+    "[Dataverse IDE] Built-in extensions after placeholders:",
+    getBuiltinExtensions().length,
+  );
 }
 
 export type ActivateExtensionsOptions = {
@@ -258,6 +320,46 @@ export async function activateExtensions(
   const inHouseExtensionIds = new Set(
     Object.values(extensionManifests).map((identity) => extensionId(identity)),
   );
+
+  /*
+   * Diagnostic only: the built-in Extensions view can render empty when the
+   * management service scan never settles. Do not block activation on it.
+   */
+  void (async () => {
+    try {
+      const extensionService = await getService(IExtensionService);
+      await Promise.race([
+        extensionService.whenInstalledExtensionsRegistered(),
+        new Promise<never>((_, reject) => {
+          window.setTimeout(() => reject(new Error("registry timed out")), 5000);
+        }),
+      ]);
+      console.info("[Dataverse IDE] Extension registry ready:", extensionService.extensions.length);
+    } catch (error) {
+      console.warn("[Dataverse IDE] Extension registry did not become ready:", error);
+    }
+  })();
+
+  void (async () => {
+    try {
+      const management = await getService(IWorkbenchExtensionManagementService);
+      const installed = await Promise.race([
+        management.getInstalled(),
+        new Promise<never>((_, reject) => {
+          window.setTimeout(() => reject(new Error("scan timed out")), 5000);
+        }),
+      ]);
+
+      console.info(
+        "[Dataverse IDE] Installed extensions:",
+        installed.map(
+          (extension) => `${extension.identifier.id}${extension.isBuiltin ? " (built-in)" : ""}`,
+        ),
+      );
+    } catch (error) {
+      console.warn("[Dataverse IDE] Extension scan failed:", error);
+    }
+  })();
 
   console.info("[Dataverse IDE] Activating extensions.");
 

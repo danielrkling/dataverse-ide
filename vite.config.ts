@@ -345,15 +345,8 @@ export default defineConfig({
       "babel-preset-solid",
     ],
     // brotli-wasm's wasm URL reference breaks the dev pre-bundler's
-    // import.meta.resolve; excluded so vite serves/patches it directly.
-    // The extension gallery override pulls in the whole Extensions view and is
-    // too large to pre-bundle reliably; served as source so it shares the
-    // already-optimized monaco/vscode modules instead of duplicating them.
-    exclude: [
-      "@vscode/diff",
-      "brotli-wasm",
-      "@codingame/monaco-vscode-extension-gallery-service-override",
-    ],
+    // import.meta.resolve; excluded so vite serves/patches it directly
+    exclude: ["@vscode/diff", "brotli-wasm"],
     esbuildOptions: {
       plugins: [importMetaUrlPlugin],
     },
