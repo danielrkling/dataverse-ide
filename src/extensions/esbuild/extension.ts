@@ -59,13 +59,30 @@ function outputPathSegments(outputPath: string): string[] {
     .filter((segment) => segment.length > 0 && segment !== "." && segment !== "..");
 }
 
+/*
+ * Last content successfully written per output URI. Watch rebuilds commonly
+ * produce byte-identical output; remembering it avoids both a disk read and a
+ * slow File System Access write on synced folders.
+ */
+const lastWrittenOutputs = new Map<string, string>();
+
 async function writeOutputs(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
   outDir: string,
   outputs: BuildOutputFile[],
-): Promise<vscodeType.Uri[]> {
+): Promise<{
+  written: vscodeType.Uri[];
+  skipped: number;
+  bytes: number;
+  elapsedMs: number;
+  slow: { path: string; bytes: number; ms: number }[];
+}> {
+  const started = performance.now();
   const written: vscodeType.Uri[] = [];
+  const slow: { path: string; bytes: number; ms: number }[] = [];
+  let skipped = 0;
+  let bytes = 0;
 
   for (const output of outputs) {
     const segments = outputPathSegments(output.path);
@@ -78,14 +95,50 @@ async function writeOutputs(
 
     const parent = vscode.Uri.joinPath(rootUri, outDir, ...segments.slice(0, -1));
 
+    const encoded = new TextEncoder().encode(output.text);
+
+    bytes += encoded.length;
+
+    const key = outFile.toString();
+
+    if (lastWrittenOutputs.get(key) === output.text) {
+      /*
+       * Verify the file still exists (it may have been deleted externally)
+       * without reading the whole output back.
+       */
+      try {
+        await vscode.workspace.fs.stat(outFile);
+        skipped += 1;
+        continue;
+      } catch {
+        // Fall through and rewrite it.
+      }
+    }
+
     await vscode.workspace.fs.createDirectory(parent);
 
-    await vscode.workspace.fs.writeFile(outFile, new TextEncoder().encode(output.text));
+    const fileStarted = performance.now();
+
+    await vscode.workspace.fs.writeFile(outFile, encoded);
+
+    const fileMs = performance.now() - fileStarted;
+
+    if (fileMs >= 250) {
+      slow.push({ path: segments.join("/"), bytes: encoded.length, ms: fileMs });
+    }
+
+    lastWrittenOutputs.set(key, output.text);
 
     written.push(outFile);
   }
 
-  return written;
+  return {
+    written,
+    skipped,
+    bytes,
+    elapsedMs: performance.now() - started,
+    slow,
+  };
 }
 
 async function workspaceFileExists(
@@ -273,18 +326,75 @@ export default {
       }
     });
 
+    let buildActive = false;
+    let pendingBuild:
+      | {
+          entry: string;
+          options?: { silent?: boolean };
+        }
+      | undefined;
+
+    /*
+     * Single-flight coordinator. Manual builds, watch-triggered builds and the
+     * initial watch build all funnel through here: only one build/write runs at
+     * a time, and requests that arrive mid-build collapse into one follow-up
+     * build using the latest entry. Without this, overlapping builds raced to
+     * write the same output file through the File System Access API.
+     */
     async function runBuild(
       requestedEntryPath: string,
       options?: {
         silent?: boolean;
       },
     ): Promise<boolean> {
-      const started = Date.now();
+      if (buildActive) {
+        outputChannel.appendLine(`[esbuild] build queued: ${requestedEntryPath}`);
+
+        pendingBuild = { entry: requestedEntryPath, options };
+
+        return true;
+      }
+
+      buildActive = true;
+
+      try {
+        let next:
+          | {
+              entry: string;
+              options?: { silent?: boolean };
+            }
+          | undefined = { entry: requestedEntryPath, options };
+
+        let result = true;
+
+        while (next != null) {
+          pendingBuild = undefined;
+          result = await performBuild(next.entry, next.options);
+          next = pendingBuild;
+        }
+
+        return result;
+      } finally {
+        buildActive = false;
+      }
+    }
+
+    async function performBuild(
+      requestedEntryPath: string,
+      options?: {
+        silent?: boolean;
+      },
+    ): Promise<boolean> {
+      const started = performance.now();
 
       const entryPath = requestedEntryPath.replaceAll("\\", "/").replace(/^(?:\.{1,2}\/)+/, "");
 
       try {
+        const configStarted = performance.now();
+
         await reloadConfigFromDisk();
+
+        const configMs = performance.now() - configStarted;
 
         lastStatus = "building";
         lastMessage = `Building ${entryPath}…`;
@@ -295,6 +405,8 @@ export default {
         }
 
         outputChannel.appendLine(`[esbuild] Building ${entryPath}…`);
+
+        const entryStarted = performance.now();
 
         /*
          * The compiler now reads the workspace itself. Verify the entry
@@ -307,6 +419,10 @@ export default {
               "Check the entry setting in esbuild.config.json.",
           );
         }
+
+        const entryMs = performance.now() - entryStarted;
+
+        const compileStarted = performance.now();
 
         const response = await runner.build({
           entry: entryPath,
@@ -344,6 +460,8 @@ export default {
           solid: currentConfig.solid,
         });
 
+        const compileMs = performance.now() - compileStarted;
+
         if (!response.ok) {
           outputChannel.appendLine(`[esbuild] ${response.error}`);
           outputChannel.show(true);
@@ -369,20 +487,54 @@ export default {
           return false;
         }
 
-        const writtenUris = await writeOutputs(
+        /*
+         * If another change arrived while compiling, this output is already
+         * stale. Skip the (potentially slow) write and let the queued build
+         * write the final result instead.
+         */
+        if (options?.silent === true && pendingBuild != null) {
+          outputChannel.appendLine("[esbuild] write skipped: a newer build is queued.");
+
+          return true;
+        }
+
+        const writeStarted = performance.now();
+
+        const writeResult = await writeOutputs(
           vscode,
           context.workspaceRootUri,
           currentConfig.outdir,
           response.outputs,
         );
 
-        const elapsed = Date.now() - started;
+        const writeMs = performance.now() - writeStarted;
 
-        const summary =
-          `Built ${entryPath} in ${elapsed}ms → ` +
-          writtenUris.map((uri) => vscode.workspace.asRelativePath(uri, false)).join(", ");
+        const elapsed = Math.round(performance.now() - started);
+
+        const writtenLabel =
+          writeResult.written.length > 0
+            ? writeResult.written
+                .map((uri) => vscode.workspace.asRelativePath(uri, false))
+                .join(", ")
+            : `${writeResult.skipped} unchanged file(s)`;
+
+        const summary = `Built ${entryPath} in ${elapsed}ms → ${writtenLabel}`;
 
         outputChannel.appendLine(`[esbuild] ${summary}`);
+        outputChannel.appendLine(
+          `[esbuild] stages: config ${Math.round(configMs)}ms, entry ${Math.round(entryMs)}ms, ` +
+            `compile ${Math.round(compileMs)}ms, write ${Math.round(writeMs)}ms ` +
+            `(${writeResult.written.length} written, ${writeResult.skipped} unchanged, ` +
+            `${writeResult.bytes} bytes)`,
+        );
+
+        if (writeResult.slow.length > 0) {
+          outputChannel.appendLine(
+            `[esbuild] slow writes: ${writeResult.slow
+              .map((file) => `${file.path} ${file.bytes}b ${Math.round(file.ms)}ms`)
+              .join(", ")}`,
+          );
+        }
 
         if (options?.silent !== true) {
           outputChannel.show(true);
@@ -703,6 +855,7 @@ export default {
 
     return {
       dispose() {
+        pendingBuild = undefined;
         watcher?.dispose();
         watchSettingListener.dispose();
         watchStatus.dispose();

@@ -87,9 +87,14 @@ const rolldownPatchHotReload: Plugin = {
  * the namespace directly. Both shapes then resolve no matter how rollup
  * rewrites the import.
  */
+let isProductionBuild = false;
+
 const textmateMainShim: Plugin = {
   name: "dataverse-ide-textmate-main-shim",
   enforce: "pre",
+  configResolved(config) {
+    isProductionBuild = config.command === "build";
+  },
   resolveId(id: string) {
     if (id === "@codingame/monaco-vscode-api/_virtual/main") {
       return "\0dataverse-ide-textmate-main";
@@ -139,10 +144,51 @@ const textmateMainShim: Plugin = {
       normalizedId.includes("textMateWorkerTokenizerController") ||
       normalizedId.includes("backgroundTokenization/worker/textMateWorkerTokenizer.js")
     ) {
-      const patched = code.replace(
+      let patched = code.replace(
         /\.then\(function \(n\) \{ return n\.main; \}\)/g,
         ".then(function (n) { return n; })",
       );
+
+      /*
+       * The background tokenizer normally sends state *deltas* relative to the
+       * state of the previous line, and the main thread applies them to its own
+       * copy of that state. If the main thread ever misses/skips a line state,
+       * the pops in the next delta underflow and throw:
+       *
+       *   Cannot read properties of null (reading 'parent')
+       *
+       * Making the worker serialize each state relative to `null` (a full
+       * state-stack reconstruction) and applying it from `null` on the main
+       * thread removes the inter-line dependency entirely. This is a little
+       * more data per line but makes the protocol self-contained and immune to
+       * skipped batches / reordered states.
+       */
+      /*
+       * Build-only: in dev the textmate service override is prebundled by the
+       * dep optimizer, so the matching controller transform below cannot be
+       * applied to it. Keeping the worker on the original relative-delta
+       * protocol in dev keeps both ends consistent.
+       */
+      if (isProductionBuild) {
+        if (normalizedId.includes("backgroundTokenization/worker/textMateWorkerTokenizer.js")) {
+          patched = patched
+            .replace(
+              /this\._diffStateStacksRefEqFn\(lineToTokenize\.startState, r\.endState\)/g,
+              "this._diffStateStacksRefEqFn(null, r.endState)",
+            )
+            .replace(
+              /stateDeltaBuilder\.setState\(lineToTokenize\.lineNumber, null\);/g,
+              "stateDeltaBuilder.setState(lineToTokenize.lineNumber, this._diffStateStacksRefEqFn(null, r.endState));",
+            );
+        }
+
+        if (normalizedId.includes("textMateWorkerTokenizerController")) {
+          patched = patched.replace(
+            /state = this\._applyStateStackDiffFn\(prevState, delta\);/g,
+            "state = this._applyStateStackDiffFn(null, delta);",
+          );
+        }
+      }
 
       if (patched !== code) {
         return { code: patched, map: null };
