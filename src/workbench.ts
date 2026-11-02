@@ -336,6 +336,8 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
    */
   registerExtensionPlaceholders();
 
+  console.info("[Dataverse IDE] Starting workbench services.");
+
   // Existing startWorkbench code follows...
   // Like the demo: on localhost, run the web worker extension host in a sandboxed
   // iframe under a wildcard subdomain (localhost subdomains resolve for free).
@@ -483,6 +485,8 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
    * so the built-in JSON language features validate/complete the config files.
    */
   const configSchemasDisposable = registerConfigJsonSchemas();
+
+  console.info("[Dataverse IDE] Workbench services ready; activating extensions.");
 
   /*
    * Let the built-in manager handle real extensions, but not the internal

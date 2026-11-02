@@ -6,12 +6,10 @@ import {
   registerExtension,
   type IExtensionManifest,
 } from "@codingame/monaco-vscode-api/extensions";
-import { IExtensionService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service";
-import {
-  IWorkbenchExtensionEnablementService,
-  IWorkbenchExtensionManagementService,
-} from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/common/extensionManagement.service";
+import { IWorkbenchExtensionEnablementService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/common/extensionManagement.service";
 import type { ILocalExtension } from "@codingame/monaco-vscode-api/vscode/vs/platform/extensionManagement/common/extensionManagement";
+import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
+import { ExtensionType } from "@codingame/monaco-vscode-api/vscode/vs/platform/extensions/common/extensions";
 
 import type {
   ExtensionContext,
@@ -138,6 +136,35 @@ export function extensionId(identity: ExtensionManifestIdentity): string {
 }
 
 /*
+ * Minimal local-extension shape for enablement checks. We deliberately do not
+ * wait for the management service to scan installed extensions: that scan can
+ * be slow (or never complete in some sandboxed environments), and enablement
+ * only needs the identifier, manifest, location and type.
+ */
+function placeholderExtension(identity: ExtensionManifestIdentity): ILocalExtension {
+  const id = extensionId(identity);
+
+  return {
+    identifier: { id },
+    manifest: {
+      name: identity.name,
+      publisher: identity.publisher,
+      version: "0.1.0",
+      engines: {
+        vscode: "*",
+      },
+      displayName: identity.displayName,
+      description: identity.description,
+    },
+    location: URI.from({ scheme: "extension-file", authority: id, path: "/extension" }),
+    type: ExtensionType.User,
+    isBuiltin: true,
+    isValid: true,
+    validations: [],
+  } as unknown as ILocalExtension;
+}
+
+/*
  * Register a minimal manifest for every extension before the workbench
  * initializes. `registerExtension` only adds to the built-in extension list
  * in that phase, which is what the Extensions view scans. The real manifest
@@ -211,24 +238,15 @@ export async function activateExtensions(
 ): Promise<vscodeType.Disposable> {
   const disposables: vscodeType.Disposable[] = [];
 
+  console.info("[Dataverse IDE] Resolving extension enablement.");
+
   let enablementService: IWorkbenchExtensionEnablementService | undefined;
-  let installedById = new Map<string, ILocalExtension>();
 
   try {
-    const extensionService = await getService(IExtensionService);
-    await extensionService.whenInstalledExtensionsRegistered();
-
     enablementService = await getService(IWorkbenchExtensionEnablementService);
-
-    const extensionManagementService = await getService(IWorkbenchExtensionManagementService);
-    const installedExtensions = await extensionManagementService.getInstalled();
-
-    installedById = new Map(
-      installedExtensions.map((extension) => [extension.identifier.id.toLowerCase(), extension]),
-    );
   } catch (error) {
     /*
-     * Extension management is optional: if it is unavailable, keep the old
+     * Extension enablement is optional: if it is unavailable, keep the old
      * behavior and activate everything.
      */
     console.warn(
@@ -241,15 +259,22 @@ export async function activateExtensions(
     Object.values(extensionManifests).map((identity) => extensionId(identity)),
   );
 
+  console.info("[Dataverse IDE] Activating extensions.");
+
   for (const [id, load] of Object.entries(extensionModules)) {
     const identity = extensionManifests[id];
 
     if (identity != null && enablementService != null) {
-      const installed = installedById.get(extensionId(identity));
-
-      if (installed != null && !enablementService.isEnabled(installed)) {
-        console.info(`[Dataverse IDE] Extension "${id}" is disabled.`);
-        continue;
+      try {
+        if (!enablementService.isEnabled(placeholderExtension(identity))) {
+          console.info(`[Dataverse IDE] Extension "${id}" is disabled.`);
+          continue;
+        }
+      } catch (error) {
+        console.warn(
+          `[Dataverse IDE] Could not read enablement for extension "${id}"; activating it.`,
+          error,
+        );
       }
     }
 
