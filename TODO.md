@@ -12,7 +12,10 @@
 
 # Extension panel to enable or disabled extensions
 
-- ability to add manual vsix files
+- [implemented] ability to add manual vsix files: `VSIX: Install Extension from File…`
+  parses the ZIP, rejects Node-only packages, serves extension files through
+  `registerFileUrl`, and persists archives in IndexedDB; restored before
+  `initialize()` so they appear in the built-in Extensions view.
 
 # NPM
 
@@ -197,7 +200,7 @@ produced no output.` when the file map lacks node_modules contents (overlay-FS w
   `onRetry`).
 - [added 2026-11-02] permission levels: `dataverseIde.nodeRuntime.permissions`
   (`read-only` / `workspace` / `trusted`) plus per-run `Node: Run File with
-  Permissions…` / `Node: Run Active File with Permissions…` commands. FS writes
+Permissions…` / `Node: Run Active File with Permissions…` commands. FS writes
   are denied in the workspace reader + fs shim; network blocking is best-effort
   (global fetch/XHR/WebSocket/EventSource/sendBeacon wrappers), not a security
   boundary.

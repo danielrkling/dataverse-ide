@@ -9,6 +9,7 @@ import * as esbuild from "esbuild";
 
 export const transform = esbuild.transform;
 export const build = esbuild.build;
+export const context = esbuild.context;
 export const version = esbuild.version;
 export const formatMessages = esbuild.formatMessages;
 

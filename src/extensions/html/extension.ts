@@ -21,6 +21,12 @@ import {
   type HtmlEntry,
 } from "./config.js";
 
+import {
+  ensureWorkspaceDirectory,
+  notifyWorkspaceFilesChanged,
+  writeWorkspaceFile,
+} from "../../workspace/workspaceFsFast.js";
+
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
 /*
@@ -31,8 +37,10 @@ import type { ExtensionContext, IdeExtension } from "../api.js";
  * posters), and writes the self-contained document under `outdir`.
  *
  * Watch mode uses a pair model: each bundle records the workspace files it
- * touched, and saving any of them rebuilds that entry. Saving the config file
- * reloads it and rebuilds every known entry.
+ * touched, and changing (or saving) any of them rebuilds that entry from the
+ * live editor buffer. Saving the config file reloads it and rebuilds every
+ * known entry. A workspace file watcher also picks up dependencies written by
+ * other tools, so watch mode does not depend on the editor's save events.
  */
 
 const CONFIG_SECTION = "dataverseIde.html";
@@ -102,13 +110,20 @@ async function ensureParentDirectory(
     path: uri.path.slice(0, separatorIndex),
   });
 
-  await vscode.workspace.fs.createDirectory(parentUri);
+  await ensureWorkspaceDirectory(vscode, parentUri);
 }
 
 type WatchPair = {
   entry: HtmlEntry;
   outputPath: string;
   dependencies: Set<string>;
+  /**
+   * Dependency path → editor version used by the last successful build.
+   * Autosave after a change-triggered build writes the same bytes to disk;
+   * the save handler consults this map so it does not rebuild them twice
+   * (the same dedupe the shared esbuild/tailwind watcher performs).
+   */
+  builtVersions: Map<string, number>;
   /** True when the pair comes from html.config.json (removed on config sync). */
   configured: boolean;
 };
@@ -187,6 +202,7 @@ export default {
     let watchTimer: number | undefined;
     let watchBusy = false;
     let watchPending = false;
+    let fileSystemWatcher: vscodeType.FileSystemWatcher | undefined;
 
     const watchPairs = new Map<string, WatchPair>();
 
@@ -257,6 +273,7 @@ export default {
         entry,
         outputPath: "",
         dependencies: new Set([entry.input, configRelativePath()]),
+        builtVersions: new Map(),
         configured: false,
       };
 
@@ -324,6 +341,25 @@ export default {
 
       try {
         dirtyDocuments = captureDirtyDocuments(vscode, context.workspaceRootUri);
+
+        /*
+         * Remember the editor versions this build reads from dirty buffers.
+         * The save that follows an autosave writes identical bytes and should
+         * not rebuild the same entry again.
+         */
+        const dirtyVersions = new Map<string, number>();
+
+        for (const document of vscode.workspace.textDocuments) {
+          if (document.uri.scheme !== "file" || document.isUntitled || !document.isDirty) {
+            continue;
+          }
+
+          const relativePath = workspaceRelativePath(document.uri);
+
+          if (relativePath != null) {
+            dirtyVersions.set(relativePath, document.version);
+          }
+        }
 
         await reloadConfigFromDisk();
 
@@ -409,7 +445,30 @@ export default {
 
         await ensureParentDirectory(vscode, outputUri);
 
-        await vscode.workspace.fs.writeFile(outputUri, new TextEncoder().encode(result.html));
+        const created = await writeWorkspaceFile(
+          vscode,
+          outputUri,
+          new TextEncoder().encode(result.html),
+        );
+
+        if (created != null) {
+          /*
+           * The write bypassed IFileService, so publish the change after the
+           * complete document is on disk. A different entry may inline this
+           * output, and external watchers (upload, etc.) should see it too.
+           */
+          notifyWorkspaceFilesChanged([{ uri: outputUri, created }]);
+        }
+
+        pair.builtVersions.clear();
+
+        for (const dependency of pair.dependencies) {
+          const version = dirtyVersions.get(dependency);
+
+          if (version != null) {
+            pair.builtVersions.set(dependency, version);
+          }
+        }
 
         const elapsed = Date.now() - started;
 
@@ -472,22 +531,147 @@ export default {
       return { bundled, failed };
     }
 
-    function isOutputPath(relativePath: string): boolean {
-      const outdir = normalizeWorkspacePath(currentConfig.outdir);
-
-      if (outdir.length > 0) {
-        if (relativePath === outdir || relativePath.startsWith(`${outdir}/`)) {
-          return true;
-        }
+    /** Workspace-relative, slash-normalized path for a workspace document/URI. */
+    function workspaceRelativePath(uri: vscodeType.Uri): string | undefined {
+      if (uri.scheme !== "file") {
+        return undefined;
       }
 
-      for (const pair of watchPairs.values()) {
+      const rootPath = context.workspaceRootUri.path.replace(/\/+$/, "");
+      const uriPath = uri.path.replace(/\/+$/, "");
+
+      if (rootPath.length > 0 && uriPath !== rootPath && !uriPath.startsWith(`${rootPath}/`)) {
+        return undefined;
+      }
+
+      /*
+       * Derive the path from the URI instead of asRelativePath(): the pair
+       * dependency set stores workspace-relative paths produced by the
+       * bundler, and this keeps both sides in exactly the same form.
+       */
+      const relativePath = (rootPath.length > 0 ? uriPath.slice(rootPath.length) : uriPath)
+        .replace(/^\/+/, "")
+        .replaceAll("\\", "/");
+
+      return relativePath.length > 0 ? relativePath : undefined;
+    }
+
+    /**
+     * Queue the entries whose dependency graph contains `relativePath`.
+     *
+     * Editor changes and saves arrive without touching the filesystem yet
+     * (autosave/unsaved buffers), while the file watcher covers dependencies
+     * written by tools outside the editor. Both funnel through here so watch
+     * does not depend on a manual Ctrl+S.
+     */
+    function queueChangedPath(
+      relativePath: string,
+      options?: { reloadConfig?: boolean; savedDocument?: vscodeType.TextDocument },
+    ): void {
+      if (relativePath === configRelativePath()) {
+        /*
+         * Reload only after a save (or an external write): reloading while
+         * the config buffer is mid-edit would replace it with stale/invalid
+         * JSON on every keystroke.
+         */
+        if (options?.reloadConfig !== true) {
+          return;
+        }
+
+        void (async () => {
+          await reloadConfigFromDisk();
+          syncConfiguredPairs(currentConfig.entryPoints);
+          queueAllPairs();
+          scheduleWatch();
+        })();
+
+        return;
+      }
+
+      const savedDocument = options?.savedDocument;
+
+      const triggered = [...watchPairs.values()].filter((pair) => {
+        /*
+         * Never rebuild an entry because its own output changed; that would
+         * loop. Outputs from *other* pairs or tools may legitimately be
+         * dependencies (for example an esbuild bundle under the same
+         * `dist/` folder that this document inlines).
+         */
         if (pair.outputPath.length > 0 && pair.outputPath === relativePath) {
-          return true;
+          return false;
+        }
+
+        if (!pair.dependencies.has(relativePath)) {
+          return false;
+        }
+
+        /*
+         * A change-triggered build already used this exact editor version;
+         * the following autosave writes identical bytes to disk.
+         */
+        return (
+          savedDocument == null || pair.builtVersions.get(relativePath) !== savedDocument.version
+        );
+      });
+
+      if (triggered.length === 0) {
+        return;
+      }
+
+      for (const pair of triggered) {
+        if (!pendingInputs.includes(pair.entry.input)) {
+          pendingInputs.push(pair.entry.input);
         }
       }
 
-      return false;
+      watchPending = true;
+      scheduleWatch();
+    }
+
+    function ensureFileSystemWatcher(): void {
+      if (fileSystemWatcher != null) {
+        return;
+      }
+
+      const watcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(context.workspaceRootUri, "**/*"),
+      );
+
+      const onFileEvent = (uri: vscodeType.Uri): void => {
+        if (!watchEnabled) {
+          return;
+        }
+
+        /*
+         * Files open in an editor are already covered by the change/save
+         * listeners. Handling the filesystem event as well would rebuild
+         * twice (once for the edit, again for autosave).
+         */
+        if (
+          vscode.workspace.textDocuments.some(
+            (document) => document.uri.toString() === uri.toString(),
+          )
+        ) {
+          return;
+        }
+
+        const relativePath = workspaceRelativePath(uri);
+
+        if (relativePath != null) {
+          queueChangedPath(relativePath, { reloadConfig: true });
+        }
+      };
+
+      watcher.onDidChange(onFileEvent);
+      watcher.onDidCreate(onFileEvent);
+      watcher.onDidDelete(onFileEvent);
+
+      fileSystemWatcher = watcher;
+    }
+
+    function disposeFileSystemWatcher(): void {
+      fileSystemWatcher?.dispose();
+      fileSystemWatcher = undefined;
     }
 
     function scheduleWatch(): void {
@@ -569,6 +753,8 @@ export default {
       outputChannel.appendLine(`[html] watch ${enabled ? "started" : "stopped"}.`);
 
       if (enabled) {
+        ensureFileSystemWatcher();
+
         void (async () => {
           await reloadConfigFromDisk();
           syncConfiguredPairs(currentConfig.entryPoints);
@@ -578,7 +764,12 @@ export default {
           await runWatch();
         })();
       } else {
+        disposeFileSystemWatcher();
         pendingInputs = [];
+
+        for (const pair of watchPairs.values()) {
+          pair.builtVersions.clear();
+        }
       }
 
       notifyStatus();
@@ -709,46 +900,34 @@ export default {
       await vscode.window.showInformationMessage("HTML: configuration reloaded.");
     });
 
+    /*
+     * Rebuild while the user types (debounced) instead of waiting for a save.
+     * runBundle() snapshots dirty editor buffers, so the rebuild sees the
+     * current text. Saving still triggers a rebuild for files that were
+     * changed outside the editor.
+     */
+    const changeWatcher = vscode.workspace.onDidChangeTextDocument((event) => {
+      if (!watchEnabled || event.contentChanges.length === 0) {
+        return;
+      }
+
+      const relativePath = workspaceRelativePath(event.document.uri);
+
+      if (relativePath != null) {
+        queueChangedPath(relativePath);
+      }
+    });
+
     const saveWatcher = vscode.workspace.onDidSaveTextDocument((document) => {
-      if (!watchEnabled || document.uri.scheme !== "file") {
+      if (!watchEnabled) {
         return;
       }
 
-      const relativePath = vscode.workspace
-        .asRelativePath(document.uri, false)
-        .replaceAll("\\", "/");
+      const relativePath = workspaceRelativePath(document.uri);
 
-      if (isOutputPath(relativePath)) {
-        return;
+      if (relativePath != null) {
+        queueChangedPath(relativePath, { reloadConfig: true, savedDocument: document });
       }
-
-      if (relativePath === configRelativePath()) {
-        void (async () => {
-          await reloadConfigFromDisk();
-          syncConfiguredPairs(currentConfig.entryPoints);
-          queueAllPairs();
-          scheduleWatch();
-        })();
-
-        return;
-      }
-
-      const triggered = [...watchPairs.values()].filter((pair) =>
-        pair.dependencies.has(relativePath),
-      );
-
-      if (triggered.length === 0) {
-        return;
-      }
-
-      for (const pair of triggered) {
-        if (!pendingInputs.includes(pair.entry.input)) {
-          pendingInputs.push(pair.entry.input);
-        }
-      }
-
-      watchPending = true;
-      scheduleWatch();
     });
 
     await reloadConfigFromDisk();
@@ -777,6 +956,8 @@ export default {
 
         watchEnabled = false;
 
+        disposeFileSystemWatcher();
+        changeWatcher.dispose();
         saveWatcher.dispose();
         watchStatus.dispose();
         watchSettingListener.dispose();

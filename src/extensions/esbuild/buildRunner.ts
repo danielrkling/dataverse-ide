@@ -2,7 +2,7 @@ import type * as vscodeType from "vscode";
 
 import {
   createWorkspaceReader,
-  runBuild,
+  EsbuildBuildSession,
   runTransform,
   type BuildOutputFile,
   type BuildResponse,
@@ -155,6 +155,10 @@ export class EsbuildBuildRunner {
 
   private initialized = false;
 
+  private readonly buildSession = new EsbuildBuildSession();
+
+  private latestDependencies: readonly string[] = [];
+
   constructor(
     private readonly vscode: typeof vscodeType,
     private readonly workspaceRootUri: vscodeType.Uri,
@@ -175,7 +179,7 @@ export class EsbuildBuildRunner {
       const started = performance.now();
       const workspace = createLiveWorkspaceReader(this.vscode, this.workspaceRootUri);
 
-      const response = await runBuild({
+      const response = await this.buildSession.build({
         id,
         type: "build",
         /*
@@ -201,6 +205,17 @@ export class EsbuildBuildRunner {
       this.outputChannel.appendLine(
         `[esbuild] build #${id} ${elapsed}ms${formatReaderStats(workspace)}`,
       );
+
+      /*
+       * A failed build still reports the paths resolution reached, so watch
+       * can rebuild when the broken file (or its importer) is edited. Keep
+       * the previous graph when the failure happened before resolution.
+       */
+      if (response.ok) {
+        this.latestDependencies = response.dependencies;
+      } else if (response.dependencies != null && response.dependencies.length > 0) {
+        this.latestDependencies = response.dependencies;
+      }
 
       return response;
     } catch (error) {
@@ -245,11 +260,17 @@ export class EsbuildBuildRunner {
     }
   }
 
+  /** Workspace-relative files reached by the last successful build. */
+  get dependencies(): readonly string[] {
+    return this.latestDependencies;
+  }
+
   dispose(): void {
     /*
-     * esbuild-wasm is process-global and has no per-runner teardown API.
-     * Mark this facade unusable so disposed extensions cannot start new work.
+     * esbuild-wasm is process-global, but this runner owns an incremental
+     * context. Dispose it so the context and its cached graph are released.
      */
     this.disposed = true;
+    void this.buildSession.dispose();
   }
 }

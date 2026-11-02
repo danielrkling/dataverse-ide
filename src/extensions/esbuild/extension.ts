@@ -17,6 +17,14 @@ import {
 
 import { EsbuildWatcher } from "./watcher.js";
 
+import {
+  ensureWorkspaceDirectory,
+  notifyWorkspaceFilesChanged,
+  statWorkspaceFile,
+  writeWorkspaceFile,
+  type WorkspaceFileWrite,
+} from "../../workspace/workspaceFsFast.js";
+
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
 /*
@@ -80,6 +88,7 @@ async function writeOutputs(
 }> {
   const started = performance.now();
   const written: vscodeType.Uri[] = [];
+  const changes: WorkspaceFileWrite[] = [];
   const slow: { path: string; bytes: number; ms: number }[] = [];
   let skipped = 0;
   let bytes = 0;
@@ -107,7 +116,7 @@ async function writeOutputs(
        * without reading the whole output back.
        */
       try {
-        await vscode.workspace.fs.stat(outFile);
+        await statWorkspaceFile(vscode, outFile);
         skipped += 1;
         continue;
       } catch {
@@ -115,11 +124,11 @@ async function writeOutputs(
       }
     }
 
-    await vscode.workspace.fs.createDirectory(parent);
+    await ensureWorkspaceDirectory(vscode, parent);
 
     const fileStarted = performance.now();
 
-    await vscode.workspace.fs.writeFile(outFile, encoded);
+    const created = await writeWorkspaceFile(vscode, outFile, encoded);
 
     const fileMs = performance.now() - fileStarted;
 
@@ -127,10 +136,20 @@ async function writeOutputs(
       slow.push({ path: segments.join("/"), bytes: encoded.length, ms: fileMs });
     }
 
+    /*
+     * The write bypasses IFileService when the workspace provider is mounted.
+     * Remember it so watchers can be notified after every output is written.
+     */
+    if (created != null) {
+      changes.push({ uri: outFile, created });
+    }
+
     lastWrittenOutputs.set(key, output.text);
 
     written.push(outFile);
   }
+
+  notifyWorkspaceFilesChanged(changes);
 
   return {
     written,
@@ -575,6 +594,8 @@ export default {
         entry: () => currentConfig.entryPoints[0],
         configPath: () => configRelativePathFor(vscode, context.workspaceRootUri),
         buildOnChange: true,
+        watchFileSystem: true,
+        getDependencies: () => runner.dependencies,
         build: async (entry) => {
           await runBuild(entry, {
             silent: true,

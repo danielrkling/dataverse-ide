@@ -11,6 +11,13 @@ import type * as vscodeType from "vscode";
  * a build from the live buffer, and the autosave that follows for the same
  * version does not trigger a second identical build.
  *
+ * When `watchFileSystem` is enabled, writes made outside the editor (another
+ * tool, a generated dependency, etc.) also trigger a build. Open documents
+ * are excluded from that path because change/save events already cover them.
+ *
+ * `getDependencies` narrows every trigger to the last successful build's
+ * graph, so editing an unrelated workspace file does not rebuild the bundle.
+ *
  * Echo guard: file saves caused by the build itself (outputs written under
  * outDir, plus the config file) are filtered out so watch does not rebuild
  * forever from its own writes.
@@ -33,6 +40,10 @@ export class EsbuildWatcher {
   /** Document URI → buffer version used by the most recent build attempt. */
   private builtVersions = new Map<string, number>();
 
+  private dependencyRef: readonly string[] | undefined;
+
+  private dependencySet: Set<string> | undefined;
+
   private readonly disposables: vscodeType.Disposable[];
 
   constructor(
@@ -40,6 +51,8 @@ export class EsbuildWatcher {
     private readonly rootUri: vscodeType.Uri,
     private readonly options: {
       outDir: () => string;
+      /** Exact output files to ignore in addition to `outDir`. */
+      outputPaths?: () => string[];
       entry: () => string;
       build: (entry: string) => Promise<void>;
       /**
@@ -62,6 +75,24 @@ export class EsbuildWatcher {
        * (Tailwind) use a longer delay than graph-based bundlers.
        */
       changeDebounceMs?: number;
+
+      /**
+       * Also rebuild when workspace files are written outside the editor
+       * (another tool, a generated dependency, etc.). Uses the browser file
+       * watcher where available; when the platform lacks FileSystemObserver
+       * this is inert and editor change/save events remain the trigger.
+       * Defaults to false.
+       */
+      watchFileSystem?: boolean;
+
+      /**
+       * Current workspace-relative dependency graph. When provided and
+       * non-empty, external filesystem events outside this set are ignored;
+       * unrelated project files no longer trigger a rebuild. The getter is
+       * read lazily so queued builds can update the graph without racing
+       * the watcher.
+       */
+      getDependencies?: () => readonly string[] | undefined;
     },
   ) {
     const rootPath = rootUri.path.replace(/\/+$/, "");
@@ -84,6 +115,14 @@ export class EsbuildWatcher {
         }
       }
 
+      for (const outputPath of this.options.outputPaths?.() ?? []) {
+        const normalizedOutput = outputPath.replaceAll("\\", "/").replace(/^\/+/, "");
+
+        if (normalizedOutput.length > 0 && normalized === `${rootPath}/${normalizedOutput}`) {
+          return true;
+        }
+      }
+
       return false;
     };
 
@@ -92,6 +131,26 @@ export class EsbuildWatcher {
       !document.isUntitled &&
       document.uri.path.startsWith(`${rootPath}/`) &&
       !isIgnoredPath(document.uri.path);
+
+    /*
+     * With a known dependency graph, unrelated workspace edits are ignored.
+     * An empty graph (before the first successful build) accepts everything
+     * so watch can recover from a failed initial build.
+     */
+    const isRelevantPath = (path: string): boolean => {
+      this.refreshDependencies();
+
+      if (this.dependencySet == null || this.dependencySet.size === 0) {
+        return true;
+      }
+
+      const relativePath = (rootPath.length > 0 ? path.slice(rootPath.length) : path).replace(
+        /^\/+/,
+        "",
+      );
+
+      return this.dependencySet.has(relativePath);
+    };
 
     const changeWatcher = this.vscode.workspace.onDidChangeTextDocument((event) => {
       if (this.options.buildOnChange !== true) {
@@ -106,7 +165,7 @@ export class EsbuildWatcher {
         return;
       }
 
-      if (!isWorkspaceDocument(event.document)) {
+      if (!isWorkspaceDocument(event.document) || !isRelevantPath(event.document.uri.path)) {
         return;
       }
 
@@ -114,7 +173,7 @@ export class EsbuildWatcher {
     });
 
     const saveWatcher = this.vscode.workspace.onDidSaveTextDocument((document) => {
-      if (!isWorkspaceDocument(document)) {
+      if (!isWorkspaceDocument(document) || !isRelevantPath(document.uri.path)) {
         return;
       }
 
@@ -130,7 +189,66 @@ export class EsbuildWatcher {
       this.schedule();
     });
 
-    this.disposables = [changeWatcher, saveWatcher];
+    const disposables: vscodeType.Disposable[] = [changeWatcher, saveWatcher];
+
+    if (this.options.watchFileSystem === true) {
+      const fileSystemWatcher = this.vscode.workspace.createFileSystemWatcher(
+        new this.vscode.RelativePattern(rootUri, "**/*"),
+      );
+
+      const onFileEvent = (uri: vscodeType.Uri): void => {
+        if (
+          uri.scheme !== "file" ||
+          !uri.path.startsWith(`${rootPath}/`) ||
+          isIgnoredPath(uri.path)
+        ) {
+          return;
+        }
+
+        if (!isRelevantPath(uri.path)) {
+          return;
+        }
+
+        /*
+         * Open documents are already covered by the change/save listeners;
+         * handling their filesystem writes too would rebuild twice.
+         */
+        if (
+          this.vscode.workspace.textDocuments.some(
+            (document) => document.uri.toString() === uri.toString(),
+          )
+        ) {
+          return;
+        }
+
+        this.schedule(this.options.changeDebounceMs ?? DEBOUNCE_MS);
+      };
+
+      fileSystemWatcher.onDidChange(onFileEvent);
+      fileSystemWatcher.onDidCreate(onFileEvent);
+      fileSystemWatcher.onDidDelete(onFileEvent);
+
+      disposables.push(fileSystemWatcher);
+    }
+
+    this.disposables = disposables;
+  }
+
+  private refreshDependencies(): void {
+    const dependencies = this.options.getDependencies?.();
+
+    if (dependencies == null) {
+      this.dependencyRef = undefined;
+      this.dependencySet = undefined;
+      return;
+    }
+
+    if (dependencies !== this.dependencyRef) {
+      this.dependencyRef = dependencies;
+      this.dependencySet = new Set(
+        dependencies.map((path) => path.replaceAll("\\", "/").replace(/^\/+/, "")),
+      );
+    }
   }
 
   private wasVersionBuilt(document: vscodeType.TextDocument): boolean {
@@ -233,5 +351,7 @@ export class EsbuildWatcher {
     }
 
     this.builtVersions.clear();
+    this.dependencyRef = undefined;
+    this.dependencySet = undefined;
   }
 }

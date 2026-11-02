@@ -119,6 +119,19 @@ const SECTIONS: WelcomeSection[] = [
           },
         ],
       },
+      {
+        title: "Install VSIX extensions",
+        description:
+          "Bring browser-ready extensions into the IDE from local .vsix files. Packages persist in browser storage and are restored alongside the built-in extension toggles.",
+        icon: "cloud-download",
+        actions: [
+          {
+            label: "Install from VSIX…",
+            command: "dataverseIde.vsix.install",
+            primary: true,
+          },
+        ],
+      },
     ],
   },
   {
@@ -287,13 +300,17 @@ const SECTIONS: WelcomeSection[] = [
       {
         title: "GitLab",
         description:
-          "Connect with a personal access token to browse merge requests, issues and pipelines, or open a new merge request without leaving the IDE.",
+          "Connect with a personal access token to clone projects, browse merge requests, issues and pipelines, or open a new merge request without leaving the IDE.",
         icon: "git-pull-request",
         actions: [
           {
             label: "Connect…",
             command: "dataverseIde.gitlab.connect",
             primary: true,
+          },
+          {
+            label: "Clone Repository",
+            command: "dataverseIde.gitlab.cloneRepository",
           },
           {
             label: "Merge Requests",

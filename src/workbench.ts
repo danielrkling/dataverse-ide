@@ -47,6 +47,7 @@ import outputLinkComputerWorkerUrl from "@codingame/monaco-vscode-output-service
 import outputLinkDetectionWorkerUrl from "@codingame/monaco-vscode-output-service-override/worker?worker&url";
 
 import { activateExtensions, registerExtensionPlaceholders } from "./extensions/registry.js";
+import { restoreInstalledVsixExtensions } from "./extensions/vsix/installer.js";
 import { registerConfigJsonSchemas } from "./extensions/shared/configJsonSchemas.js";
 import { CommandsRegistry } from "@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands";
 
@@ -349,6 +350,13 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
    * The full manifests replace them during activation.
    */
   registerExtensionPlaceholders();
+
+  /*
+   * Restore VSIX extensions from IndexedDB before the workbench initializes:
+   * registerExtension only contributes to the built-in list in this phase,
+   * which is what the Extensions view scans.
+   */
+  await restoreInstalledVsixExtensions();
 
   console.info("[Dataverse IDE] Starting workbench services.");
 

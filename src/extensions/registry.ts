@@ -49,6 +49,7 @@ export const extensionModules: Record<string, () => Promise<{ default: IdeExtens
   flatten: () => import("./flatten/extension.js"),
   scripts: () => import("./scripts/extension.js"),
   welcome: () => import("./welcome/extension.js"),
+  vsix: () => import("./vsix/extension.js"),
   // taggedJsx: () => import("./taggedJsx/extension.js"), //gramer not working atm, disabling for now
 };
 
@@ -112,7 +113,7 @@ export const extensionManifests: Record<string, ExtensionManifestIdentity> = {
     publisher: "dataverse-ide",
     name: "dataverse-ide-gitlab",
     displayName: "Dataverse IDE GitLab",
-    description: "Merge requests, issues and pipelines for GitLab projects.",
+    description: "Clone projects and manage merge requests, issues and pipelines for GitLab.",
   },
   tailwind: {
     publisher: "dataverse-ide",
@@ -137,6 +138,12 @@ export const extensionManifests: Record<string, ExtensionManifestIdentity> = {
     name: "dataverse-ide-welcome",
     displayName: "Dataverse IDE Welcome",
     description: "Landing page describing the IDE's features and extensions.",
+  },
+  vsix: {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-vsix",
+    displayName: "Dataverse IDE VSIX Installer",
+    description: "Install and manage browser extensions from .vsix files.",
   },
 };
 

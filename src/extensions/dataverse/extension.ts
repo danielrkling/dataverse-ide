@@ -295,6 +295,7 @@ export async function installDataverseUploadExtension(
   const output = vscode.window.createOutputChannel("Dataverse Web Resource Upload");
 
   let fileWatcher: vscodeType.FileSystemWatcher | undefined;
+  let saveWatcher: vscodeType.Disposable | undefined;
   let watchTimer: number | undefined;
   let watchUploadInProgress = false;
   let watchRefreshQueued = false;
@@ -450,6 +451,16 @@ export async function installDataverseUploadExtension(
     return vscode.Uri.joinPath(workspaceRootUri, ...settings.uploadRoot.split("/"));
   }
 
+  function isWithinFolder(uri: vscodeType.Uri, folderUri: vscodeType.Uri): boolean {
+    if (uri.scheme !== folderUri.scheme) {
+      return false;
+    }
+
+    const folderPath = folderUri.path.replace(/\/+$/, "");
+
+    return uri.path === folderPath || uri.path.startsWith(`${folderPath}/`);
+  }
+
   /** Watch debounce is runtime tuning: extension setting, not the config file. */
   function getWatchDebounceMs(): number {
     const value = vscode.workspace
@@ -551,6 +562,9 @@ export async function installDataverseUploadExtension(
 
     pendingWatchFiles.clear();
 
+    saveWatcher?.dispose();
+    saveWatcher = undefined;
+
     fileWatcher?.dispose();
     fileWatcher = undefined;
   }
@@ -594,6 +608,21 @@ export async function installDataverseUploadExtension(
           output.appendLine(`[watch] Deleted locally; remote retained: ${uri.path}`);
 
           pendingWatchFiles.delete(uri.toString());
+        });
+
+        /*
+         * Browser file watchers depend on the experimental FileSystemObserver
+         * API. Fall back to save notifications (manual save and autosave) so
+         * watch upload still works when the watcher is unavailable. The
+         * pending map deduplicates when both paths report the same write.
+         */
+        saveWatcher = vscode.workspace.onDidSaveTextDocument((document) => {
+          if (fileWatcher == null || !isWithinFolder(document.uri, uploadRootUri)) {
+            return;
+          }
+
+          output.appendLine(`[watch] Saved: ${document.uri.path}`);
+          void scheduleWatchUpload(document.uri);
         });
 
         output.appendLine(`[watch] Started for ${uploadRootUri.path}`);

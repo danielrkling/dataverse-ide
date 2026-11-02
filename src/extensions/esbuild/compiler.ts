@@ -21,6 +21,10 @@
  * - Node builtins left external
  * - tagged JSX transforms for workspace source files
  * - optional virtual source files for callers such as Tailwind @plugin
+ *
+ * Builds can run through a reusable `EsbuildBuildSession` (context + rebuild)
+ * so watch mode keeps esbuild's incremental graph. Each rebuild still gets a
+ * fresh workspace reader, so edits are never served from a stale build cache.
  */
 
 import * as esbuild from "esbuild-wasm";
@@ -177,12 +181,24 @@ export type BuildSuccessResponse = {
   ok: true;
   outputs: BuildOutputFile[];
   warnings: string[];
+  /**
+   * Workspace-relative files in the build's dependency graph (workspace
+   * sources plus node_modules modules). Watch mode uses this set to ignore
+   * unrelated filesystem writes.
+   */
+  dependencies: string[];
 };
 
 export type BuildFailureResponse = {
   id: number;
   ok: false;
   error: string;
+  /**
+   * Paths resolution reached before the failure. Watch can keep rebuilding
+   * when one of them changes, so a newly-added broken file can be fixed
+   * without editing its importer again.
+   */
+  dependencies?: string[];
 };
 
 export type BuildResponse = BuildSuccessResponse | BuildFailureResponse;
@@ -717,11 +733,26 @@ function packageTargetPath(packageDirectory: string, target: string): string | u
  * reads only the package manifests and module files actually reached by the
  * current dependency graph.
  */
-function createPackageResolver(reader: WorkspaceReader): PackageResolver {
+function createPackageResolver(
+  getReader: () => WorkspaceReader,
+  getGeneration: () => number = () => 0,
+): PackageResolver {
   const packageJsonCache = new Map<string, Promise<PackageJson | undefined>>();
+
+  let cacheGeneration = getGeneration();
 
   async function readPackageJson(packageDirectory: string): Promise<PackageJson | undefined> {
     const packageJsonPath = getPackageJsonPath(packageDirectory);
+
+    /*
+     * A reused esbuild context keeps this resolver alive across rebuilds.
+     * Package manifests can change (npm install), so discard the cache for
+     * each new build generation.
+     */
+    if (cacheGeneration !== getGeneration()) {
+      packageJsonCache.clear();
+      cacheGeneration = getGeneration();
+    }
 
     const existing = packageJsonCache.get(packageJsonPath);
 
@@ -729,13 +760,15 @@ function createPackageResolver(reader: WorkspaceReader): PackageResolver {
       return existing;
     }
 
-    const pending = reader.readText(packageJsonPath).then((text) => {
-      if (text == null) {
-        return undefined;
-      }
+    const pending = getReader()
+      .readText(packageJsonPath)
+      .then((text) => {
+        if (text == null) {
+          return undefined;
+        }
 
-      return parseJsonSafe(text);
-    });
+        return parseJsonSafe(text);
+      });
 
     packageJsonCache.set(packageJsonPath, pending);
 
@@ -743,7 +776,7 @@ function createPackageResolver(reader: WorkspaceReader): PackageResolver {
   }
 
   async function lookup(path: string): Promise<string | undefined> {
-    return resolveWithListing(reader, path, COMPANION_EXTENSIONS, INDEX_TRAILS);
+    return resolveWithListing(getReader(), path, COMPANION_EXTENSIONS, INDEX_TRAILS);
   }
 
   async function resolveExportTarget(
@@ -862,7 +895,7 @@ function createPackageResolver(reader: WorkspaceReader): PackageResolver {
 
       const packageJsonPath = directory.length > 0 ? `${directory}/package.json` : "package.json";
 
-      if ((await reader.readText(packageJsonPath)) != null) {
+      if ((await getReader().readText(packageJsonPath)) != null) {
         return directory;
       }
     }
@@ -1000,23 +1033,38 @@ async function resolveRelativeWorkspacePath(
 }
 
 function createWorkspaceFsPlugin(
-  reader: WorkspaceReader,
+  getReader: () => WorkspaceReader,
+  getGeneration: () => number,
   externalPaths: string[],
   unresolvedImports: Set<string>,
+  dependencyPaths: Set<string>,
   taggedJsxRequest: TaggedJsxMode = "off",
 ): esbuild.Plugin {
   return {
     name: "dataverse-ide-workspace-fs",
 
     setup(build) {
-      const packageResolver = createPackageResolver(reader);
+      const packageResolver = createPackageResolver(getReader, getGeneration);
+
+      /*
+       * Record every workspace path esbuild resolves, including files that
+       * fail to load. A failed rebuild still updates the watch set, so fixing
+       * the newly-added file triggers the next rebuild.
+       */
+      const workspaceResult = (path: string): esbuild.OnResolveResult => {
+        const normalized = normalizePath(path);
+
+        dependencyPaths.add(normalized);
+
+        return {
+          path: normalized,
+          namespace: "workspace",
+        };
+      };
 
       build.onResolve({ filter: /.*/ }, async (args) => {
         if (args.kind === "entry-point") {
-          return {
-            path: normalizePath(args.path),
-            namespace: "workspace",
-          };
+          return workspaceResult(args.path);
         }
 
         if (isConfiguredExternal(args.path, externalPaths)) {
@@ -1037,10 +1085,7 @@ function createWorkspaceFsPlugin(
           );
 
           if (resolved != null) {
-            return {
-              path: resolved,
-              namespace: "workspace",
-            };
+            return workspaceResult(resolved);
           }
 
           /*
@@ -1065,10 +1110,7 @@ function createWorkspaceFsPlugin(
           const resolved = await packageResolver.resolveBareImport(normalizePath(args.path));
 
           if (resolved != null) {
-            return {
-              path: resolved,
-              namespace: "workspace",
-            };
+            return workspaceResult(resolved);
           }
 
           unresolvedImports.add(`${args.path} imported by ${args.importer || "<entry point>"}`);
@@ -1084,13 +1126,10 @@ function createWorkspaceFsPlugin(
          */
         const joined = joinFromImporter(args.importer, args.path);
 
-        const resolved = await resolveRelativeWorkspacePath(reader, joined);
+        const resolved = await resolveRelativeWorkspacePath(getReader(), joined);
 
         if (resolved != null) {
-          return {
-            path: resolved,
-            namespace: "workspace",
-          };
+          return workspaceResult(resolved);
         }
 
         unresolvedImports.add(
@@ -1111,7 +1150,7 @@ function createWorkspaceFsPlugin(
         },
         async (args) => {
           const normalizedPath = normalizePath(args.path);
-          let contents = await reader.readText(normalizedPath);
+          let contents = await getReader().readText(normalizedPath);
 
           if (contents == null) {
             return {
@@ -1214,6 +1253,7 @@ export async function runTransform(request: TransformRequest): Promise<BuildResp
         },
       ],
       warnings: result.warnings.map((warning) => warning.text),
+      dependencies: [],
     };
   } catch (error) {
     return {
@@ -1268,131 +1308,363 @@ export async function transformForBundler(
   };
 }
 
+type BuildState = {
+  request: BuildRequest;
+  reader: WorkspaceReader;
+  unresolvedImports: Set<string>;
+  dependencyPaths: Set<string>;
+  generation: number;
+};
+
+function createBuildPlugins(state: BuildState): esbuild.Plugin[] {
+  const { request } = state;
+  const taggedJsx = request.taggedJsx ?? "off";
+  const solid = request.solid ?? "off";
+  const plugins: esbuild.Plugin[] = [];
+
+  /*
+   * Solid compiles before esbuild's loaders and before the workspace-fs
+   * plugin's catch-all onLoad (esbuild tries onLoad callbacks in plugin
+   * order). It only claims workspace .jsx/.tsx files; everything else
+   * falls through to the normal loader.
+   */
+  if (solid !== "off") {
+    plugins.push(
+      createSolidEsbuildPlugin({
+        version: solid,
+        readText: (path) => state.reader.readText(path),
+        sourcemap: request.sourcemap != null && request.sourcemap !== false,
+        beforeTransform:
+          taggedJsx === "off"
+            ? undefined
+            : async (source) => {
+                const transformers = await ensureTaggedJsxTransformers();
+
+                const converted = convertTaggedJsx(source, taggedJsx, transformers);
+
+                return { code: converted.code, errors: converted.errors };
+              },
+      }),
+    );
+  }
+
+  plugins.push(
+    createWorkspaceFsPlugin(
+      () => state.reader,
+      () => state.generation,
+      request.external ?? [],
+      state.unresolvedImports,
+      state.dependencyPaths,
+      taggedJsx,
+    ),
+  );
+
+  return plugins;
+}
+
+function createBuildOptions(
+  request: BuildRequest,
+  plugins: esbuild.Plugin[],
+): esbuild.BuildOptions {
+  const entryPoint = normalizePath(request.entry);
+  const entryDirectory = entryPoint.includes("/")
+    ? entryPoint.slice(0, entryPoint.lastIndexOf("/"))
+    : ".";
+
+  return {
+    entryPoints: [entryPoint],
+    bundle: request.bundle ?? true,
+    write: false,
+    format: request.format ?? "esm",
+    platform: request.platform,
+    charset: request.charset,
+    globalName: request.globalName,
+    minify: request.minify ?? false,
+    sourcemap: request.sourcemap ?? false,
+    sourceRoot: request.sourceRoot,
+    sourcesContent: request.sourcesContent,
+    target: request.target ?? "es2022",
+    treeShaking: request.treeShaking,
+    keepNames: request.keepNames,
+    legalComments: request.legalComments,
+    lineLimit: request.lineLimit != null && request.lineLimit > 0 ? request.lineLimit : undefined,
+    drop: request.drop,
+    banner: request.banner,
+    footer: request.footer,
+    pure: request.pure,
+    jsx: request.jsx,
+    jsxFactory: request.jsxFactory,
+    jsxFragment: request.jsxFragment,
+    jsxImportSource: request.jsxImportSource,
+    jsxDev: request.jsxDev,
+    jsxSideEffects: request.jsxSideEffects,
+    external: request.external,
+    define: request.define,
+    splitting: request.splitting,
+    entryNames: request.entryNames,
+    chunkNames: request.chunkNames,
+    outExtension: request.outExtension,
+    logLevel: "silent",
+    /*
+     * Needed for the dependency set handed back to watch mode. The metafile
+     * is only used to decide which files can trigger a rebuild.
+     */
+    metafile: true,
+    plugins,
+    /*
+     * Keep the entry's own directory out of the output path, so
+     * "src/app.ts" still writes "app.js" (plus sibling chunks/maps).
+     */
+    outbase: entryDirectory,
+    outdir: "out",
+  };
+}
+
+/**
+ * Stable identity for a reusable esbuild context. Everything that changes the
+ * build options or the plugin setup must be part of this key; the workspace
+ * reader and virtual-file *contents* are intentionally excluded because the
+ * plugins read those through mutable build state on every rebuild.
+ */
+function buildRequestKey(request: BuildRequest): string {
+  return JSON.stringify({
+    entry: normalizePath(request.entry),
+    format: request.format ?? "esm",
+    platform: request.platform,
+    charset: request.charset,
+    globalName: request.globalName,
+    minify: request.minify ?? false,
+    sourcemap: request.sourcemap ?? false,
+    sourceRoot: request.sourceRoot,
+    sourcesContent: request.sourcesContent,
+    target: request.target ?? "es2022",
+    treeShaking: request.treeShaking,
+    keepNames: request.keepNames,
+    legalComments: request.legalComments,
+    lineLimit: request.lineLimit,
+    drop: request.drop,
+    banner: request.banner,
+    footer: request.footer,
+    pure: request.pure,
+    jsx: request.jsx,
+    jsxFactory: request.jsxFactory,
+    jsxFragment: request.jsxFragment,
+    jsxImportSource: request.jsxImportSource,
+    jsxDev: request.jsxDev,
+    jsxSideEffects: request.jsxSideEffects,
+    bundle: request.bundle ?? true,
+    splitting: request.splitting,
+    external: request.external ?? [],
+    define: request.define,
+    entryNames: request.entryNames,
+    chunkNames: request.chunkNames,
+    outExtension: request.outExtension,
+    taggedJsx: request.taggedJsx ?? "off",
+    solid: request.solid ?? "off",
+    virtualFiles: Object.keys(request.virtualFiles ?? {}).sort(),
+  });
+}
+
+function collectDependencies(
+  result: esbuild.BuildResult,
+  resolvedPaths: ReadonlySet<string>,
+): string[] {
+  const metafile = (result as esbuild.BuildResult & { metafile?: esbuild.Metafile }).metafile;
+  const dependencies = new Set<string>();
+
+  for (const input of Object.keys(metafile?.inputs ?? {})) {
+    const path = input.startsWith("workspace:") ? input.slice("workspace:".length) : input;
+
+    /*
+     * Skip stdin and generated virtual modules (Tailwind's @plugin entry),
+     * which are not real workspace files the watcher could observe.
+     */
+    if (path.startsWith("<") || path.startsWith("__")) {
+      continue;
+    }
+
+    dependencies.add(normalizePath(path));
+  }
+
+  /*
+   * Resolution can reach files that do not appear in the metafile (a build
+   * that failed before linking, for example). Those are still dependencies
+   * worth watching so the error can be fixed without another trigger.
+   */
+  for (const path of resolvedPaths) {
+    if (!path.startsWith("<") && !path.startsWith("__")) {
+      dependencies.add(normalizePath(path));
+    }
+  }
+
+  return [...dependencies].sort();
+}
+
+function toBuildResponse(
+  request: BuildRequest,
+  result: esbuild.BuildResult,
+  unresolvedImports: ReadonlySet<string>,
+  dependencyPaths: ReadonlySet<string>,
+): BuildSuccessResponse {
+  const warnings = [
+    ...result.warnings.map(
+      (warning) =>
+        `${warning.text}${
+          warning.location != null ? ` (${formatLocation(warning.location)})` : ""
+        }`,
+    ),
+
+    ...[...unresolvedImports]
+      .sort()
+      .map(
+        (detail) =>
+          `Could not resolve npm package "${detail}". ` +
+          "It was left external in the output bundle.",
+      ),
+  ];
+
+  return {
+    id: request.id,
+    ok: true,
+    outputs: (result.outputFiles ?? [])
+      .filter((file) => file.contents != null)
+      .map((file) => ({
+        path: file.path,
+        text: file.text,
+      })),
+    warnings,
+    dependencies: collectDependencies(result, dependencyPaths),
+  };
+}
+
 export async function runBuild(request: BuildRequest): Promise<BuildResponse> {
   try {
     await ensureInitialized();
 
-    const unresolvedImports = new Set<string>();
-
-    const reader = withVirtualFiles(request.workspace, request.virtualFiles);
-
-    const entryPoint = normalizePath(request.entry);
-    const entryDirectory = entryPoint.includes("/")
-      ? entryPoint.slice(0, entryPoint.lastIndexOf("/"))
-      : ".";
-
-    const taggedJsx = request.taggedJsx ?? "off";
-    const solid = request.solid ?? "off";
-
-    const plugins: esbuild.Plugin[] = [];
-
-    /*
-     * Solid compiles before esbuild's loaders and before the workspace-fs
-     * plugin's catch-all onLoad (esbuild tries onLoad callbacks in plugin
-     * order). It only claims workspace .jsx/.tsx files; everything else
-     * falls through to the normal loader.
-     */
-    if (solid !== "off") {
-      plugins.push(
-        createSolidEsbuildPlugin({
-          version: solid,
-          readText: (path) => reader.readText(path),
-          sourcemap: request.sourcemap != null && request.sourcemap !== false,
-          beforeTransform:
-            taggedJsx === "off"
-              ? undefined
-              : async (source) => {
-                  const transformers = await ensureTaggedJsxTransformers();
-
-                  const converted = convertTaggedJsx(source, taggedJsx, transformers);
-
-                  return { code: converted.code, errors: converted.errors };
-                },
-        }),
-      );
-    }
-
-    plugins.push(
-      createWorkspaceFsPlugin(reader, request.external ?? [], unresolvedImports, taggedJsx),
-    );
-
-    const result = await esbuild.build({
-      entryPoints: [entryPoint],
-      bundle: request.bundle ?? true,
-      write: false,
-      format: request.format ?? "esm",
-      platform: request.platform,
-      charset: request.charset,
-      globalName: request.globalName,
-      minify: request.minify ?? false,
-      sourcemap: request.sourcemap ?? false,
-      sourceRoot: request.sourceRoot,
-      sourcesContent: request.sourcesContent,
-      target: request.target ?? "es2022",
-      treeShaking: request.treeShaking,
-      keepNames: request.keepNames,
-      legalComments: request.legalComments,
-      lineLimit: request.lineLimit != null && request.lineLimit > 0 ? request.lineLimit : undefined,
-      drop: request.drop,
-      banner: request.banner,
-      footer: request.footer,
-      pure: request.pure,
-      jsx: request.jsx,
-      jsxFactory: request.jsxFactory,
-      jsxFragment: request.jsxFragment,
-      jsxImportSource: request.jsxImportSource,
-      jsxDev: request.jsxDev,
-      jsxSideEffects: request.jsxSideEffects,
-      external: request.external,
-      define: request.define,
-      splitting: request.splitting,
-      entryNames: request.entryNames,
-      chunkNames: request.chunkNames,
-      outExtension: request.outExtension,
-      logLevel: "silent",
-      plugins,
-      /*
-       * Keep the entry's own directory out of the output path, so
-       * "src/app.ts" still writes "app.js" (plus sibling chunks/maps).
-       */
-      outbase: entryDirectory,
-      outdir: "out",
-    });
-
-    const warnings = [
-      ...result.warnings.map(
-        (warning) =>
-          `${warning.text}${
-            warning.location != null ? ` (${formatLocation(warning.location)})` : ""
-          }`,
-      ),
-
-      ...[...unresolvedImports]
-        .sort()
-        .map(
-          (detail) =>
-            `Could not resolve npm package "${detail}". ` +
-            "It was left external in the output bundle.",
-        ),
-    ];
-
-    return {
-      id: request.id,
-      ok: true,
-      outputs: result.outputFiles
-        .filter((file) => file.contents != null)
-        .map((file) => ({
-          path: file.path,
-          text: file.text,
-        })),
-      warnings,
+    const state: BuildState = {
+      request,
+      reader: withVirtualFiles(request.workspace, request.virtualFiles),
+      unresolvedImports: new Set<string>(),
+      dependencyPaths: new Set<string>(),
+      generation: 0,
     };
+
+    const result = await esbuild.build(createBuildOptions(request, createBuildPlugins(state)));
+
+    return toBuildResponse(request, result, state.unresolvedImports, state.dependencyPaths);
   } catch (error) {
     return {
       id: request.id,
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     };
+  }
+}
+
+/**
+ * Reusable esbuild build context.
+ *
+ * esbuild-wasm supports `context()` + `rebuild()`, but not `watch()` (the
+ * browser build has no filesystem watcher). The IDE's watcher drives rebuilds
+ * and this session keeps esbuild's incremental graph alive between them.
+ *
+ * A fresh workspace reader is supplied for every rebuild, so source edits are
+ * always visible even though the plugin closures themselves are stable. When
+ * the build options change, the old context is disposed and a new one is
+ * created.
+ */
+export class EsbuildBuildSession {
+  private context: esbuild.BuildContext | undefined;
+
+  private contextKey: string | undefined;
+
+  private state: BuildState | undefined;
+
+  async build(request: BuildRequest): Promise<BuildResponse> {
+    try {
+      await ensureInitialized();
+
+      const key = buildRequestKey(request);
+
+      if (this.context == null || this.contextKey !== key) {
+        await this.disposeContext();
+
+        const state: BuildState = {
+          request,
+          reader: withVirtualFiles(request.workspace, request.virtualFiles),
+          unresolvedImports: new Set<string>(),
+          dependencyPaths: new Set<string>(),
+          generation: 0,
+        };
+
+        this.context = await esbuild.context(
+          createBuildOptions(request, createBuildPlugins(state)),
+        );
+
+        this.contextKey = key;
+        this.state = state;
+      } else {
+        const state = this.state;
+
+        if (state == null) {
+          throw new Error("esbuild build session lost its state.");
+        }
+
+        state.request = request;
+        state.reader = withVirtualFiles(request.workspace, request.virtualFiles);
+        state.unresolvedImports.clear();
+        state.dependencyPaths.clear();
+        state.generation += 1;
+      }
+
+      const result = await this.context.rebuild();
+
+      if (this.state == null) {
+        throw new Error("esbuild build session lost its state.");
+      }
+
+      return toBuildResponse(
+        request,
+        result,
+        this.state.unresolvedImports,
+        this.state.dependencyPaths,
+      );
+    } catch (error) {
+      const dependencies =
+        this.state == null
+          ? []
+          : [...this.state.dependencyPaths]
+              .filter((path) => !path.startsWith("<") && !path.startsWith("__"))
+              .map((path) => normalizePath(path))
+              .sort();
+
+      return {
+        id: request.id,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        ...(dependencies.length > 0 ? { dependencies } : {}),
+      };
+    }
+  }
+
+  async dispose(): Promise<void> {
+    await this.disposeContext();
+  }
+
+  private async disposeContext(): Promise<void> {
+    const context = this.context;
+
+    this.context = undefined;
+    this.contextKey = undefined;
+    this.state = undefined;
+
+    if (context != null) {
+      try {
+        await context.dispose();
+      } catch {
+        // A context that already failed to build may reject on dispose.
+      }
+    }
   }
 }
 

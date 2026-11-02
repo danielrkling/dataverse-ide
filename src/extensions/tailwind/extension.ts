@@ -501,10 +501,13 @@ export default {
           return slashIndex === -1 ? "" : output.slice(0, slashIndex);
         },
 
+        outputPaths: () => [currentConfig.output],
+
         entry: () => currentConfig.input,
 
         buildOnChange: true,
         changeDebounceMs: 750,
+        watchFileSystem: true,
 
         build: async () => {
           await runCompile({

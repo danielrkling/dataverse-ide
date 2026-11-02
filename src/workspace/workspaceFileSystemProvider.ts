@@ -171,6 +171,20 @@ export class WorkspaceFileSystemProvider implements IFileSystemProviderWithFileR
       : this.real.writeFile(uri, content, opts);
   }
 
+  /**
+   * Emits change events for writes performed outside IFileService.
+   *
+   * Extensions that call this provider directly (see workspaceFsFast.ts) skip
+   * the file service, so they must publish the change themselves. Ext-host
+   * watchers (createFileSystemWatcher) listen to this event through
+   * IFileService, so notifying here keeps them firing for direct writes.
+   */
+  notifyFileChanges(changes: readonly IFileChange[]): void {
+    if (changes.length > 0) {
+      this.changeEmitter.fire(changes);
+    }
+  }
+
   mkdir(uri: vscodeType.Uri): Promise<void> {
     return this.isOverlay(uri) ? this.overlay.mkdir(uri) : this.real.mkdir(uri);
   }
