@@ -10,7 +10,8 @@ import {
 import { servicesInitialized } from "@codingame/monaco-vscode-api/lifecycle";
 import { IExtensionService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service";
 import { IWorkbenchExtensionEnablementService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/common/extensionManagement.service";
-import { IWorkbenchExtensionManagementService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/common/extensionManagement.service";
+import { IExtensionsWorkbenchService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/extensions/common/extensions.service";
+import { ISecretStorageService } from "@codingame/monaco-vscode-api/vscode/vs/platform/secrets/common/secrets.service";
 import type { ILocalExtension } from "@codingame/monaco-vscode-api/vscode/vs/platform/extensionManagement/common/extensionManagement";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 import {
@@ -173,13 +174,14 @@ function placeholderExtension(identity: ExtensionManifestIdentity): ILocalExtens
 }
 
 /*
- * Minimal built-in extension entry. Normally `registerExtension` adds this
- * itself, but only while services are still uninitialized. If something has
- * already initialized them (different module-order in dev/build), the entry
- * would otherwise miss the built-in scanner and the Extensions view would be
- * empty, so add it to the scanner input manually.
+ * Minimal scan entry for the extension management service.
+ *
+ * `isBuiltin: false` is deliberate: the default "Installed" view hides
+ * built-in extensions unless the extension host is running them. Our in-house
+ * extensions are activated manually, so a built-in entry would never appear
+ * in that list.
  */
-function builtinExtensionFor(identity: ExtensionManifestIdentity): IExtension {
+function placeholderScanEntry(identity: ExtensionManifestIdentity): IExtension {
   const id = extensionId(identity);
 
   return {
@@ -194,7 +196,7 @@ function builtinExtensionFor(identity: ExtensionManifestIdentity): IExtension {
       description: identity.description,
     },
     type: ExtensionType.User,
-    isBuiltin: true,
+    isBuiltin: false,
     identifier: { id },
     location: URI.from({ scheme: "extension-file", authority: id, path: "/extension" }),
     targetPlatform: TargetPlatform.WEB,
@@ -238,9 +240,18 @@ export function registerExtensionPlaceholders(): void {
     registerExtension(manifest, ExtensionHostKind.LocalProcess);
 
     const builtins = getBuiltinExtensions();
+    const entry = builtins.find((extension) => extension.identifier.id.toLowerCase() === id);
 
-    if (!builtins.some((extension) => extension.identifier.id.toLowerCase() === id)) {
-      builtins.push(builtinExtensionFor(identity));
+    if (entry != null) {
+      const mutable = entry as unknown as {
+        isBuiltin: boolean;
+        type: ExtensionType;
+      };
+
+      mutable.isBuiltin = false;
+      mutable.type = ExtensionType.User;
+    } else {
+      builtins.push(placeholderScanEntry(identity));
     }
   }
 
@@ -267,32 +278,40 @@ function createHttpProxy(): IdeExtensionHttp {
 
 /*
  * The registry runs after the local extension host is initialized, where the
- * secret storage service override provides `vscode.secrets`. The main
- * extension-api typings don't declare it, so we extend the shape locally.
+ * secret storage service override provides `ISecretStorageService`. In-house
+ * extensions get a small namespaced facade over it; `vscode.secrets` is not
+ * part of the public API (only `ExtensionContext.secrets` is), so resolve the
+ * service directly instead of reading it off the `vscode` namespace.
  */
-type VscodeWithSecrets = typeof vscodeType & {
-  secrets: {
-    get(key: string): Promise<string | undefined>;
-    store(key: string, value: string): Promise<void>;
-    delete(key: string): Promise<void>;
-  };
-};
-
-async function createSecretStore(
-  vscode: typeof vscodeType,
-  id: string,
-): Promise<IdeExtensionSecretStore> {
-  const secrets = (vscode as VscodeWithSecrets).secrets;
+async function createSecretStore(id: string): Promise<IdeExtensionSecretStore> {
+  const secrets = await getService(ISecretStorageService);
 
   return {
     get: (key) => secrets.get(`${id}.${key}`),
 
     set: async (key, value) => {
-      await secrets.store(`${id}.${key}`, value);
+      await secrets.set(`${id}.${key}`, value);
     },
 
     remove: (key) => secrets.delete(`${id}.${key}`),
   };
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(`${label} timed out`)), ms);
+
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 export async function activateExtensions(
@@ -328,12 +347,7 @@ export async function activateExtensions(
   void (async () => {
     try {
       const extensionService = await getService(IExtensionService);
-      await Promise.race([
-        extensionService.whenInstalledExtensionsRegistered(),
-        new Promise<never>((_, reject) => {
-          window.setTimeout(() => reject(new Error("registry timed out")), 5000);
-        }),
-      ]);
+      await withTimeout(extensionService.whenInstalledExtensionsRegistered(), 5000, "registry");
       console.info("[Dataverse IDE] Extension registry ready:", extensionService.extensions.length);
     } catch (error) {
       console.warn("[Dataverse IDE] Extension registry did not become ready:", error);
@@ -342,22 +356,29 @@ export async function activateExtensions(
 
   void (async () => {
     try {
-      const management = await getService(IWorkbenchExtensionManagementService);
-      const installed = await Promise.race([
-        management.getInstalled(),
-        new Promise<never>((_, reject) => {
-          window.setTimeout(() => reject(new Error("scan timed out")), 5000);
-        }),
-      ]);
-
+      const extensionsWorkbench = await getService(IExtensionsWorkbenchService);
+      await withTimeout(extensionsWorkbench.whenInitialized, 5000, "view initialization");
       console.info(
-        "[Dataverse IDE] Installed extensions:",
-        installed.map(
-          (extension) => `${extension.identifier.id}${extension.isBuiltin ? " (built-in)" : ""}`,
+        "[Dataverse IDE] Extensions view entries:",
+        extensionsWorkbench.local.map(
+          (extension) =>
+            `${extension.identifier.id}${extension.local?.isBuiltin ? " (built-in)" : ""}`,
         ),
       );
     } catch (error) {
-      console.warn("[Dataverse IDE] Extension scan failed:", error);
+      console.warn("[Dataverse IDE] Extensions view initialization failed:", error);
+
+      try {
+        const extensionsWorkbench = await getService(IExtensionsWorkbenchService);
+        const local = await withTimeout(extensionsWorkbench.queryLocal(), 5000, "view retry");
+
+        console.info(
+          "[Dataverse IDE] Extensions view retry entries:",
+          local.map((extension) => extension.identifier.id),
+        );
+      } catch (retryError) {
+        console.warn("[Dataverse IDE] Extensions view retry failed:", retryError);
+      }
     }
   })();
 
@@ -390,7 +411,7 @@ export async function activateExtensions(
         workspaceRootUri: options.workspaceRootUri,
         workspaceDirectoryHandle: options.workspaceDirectoryHandle,
         outputChannel,
-        secrets: await createSecretStore(options.vscode, id),
+        secrets: await createSecretStore(id),
         http: createHttpProxy(),
       };
 

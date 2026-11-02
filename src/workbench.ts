@@ -383,6 +383,13 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
       "window.title": "Dataverse IDE${separator}${dirty}${activeEditorShort}",
 
       /*
+       * The web workbench defaults to the compact menu (hamburger in the
+       * activity bar). "classic" puts File / Edit / Selection / ... across the
+       * title bar instead.
+       */
+      "window.menuBarVisibility": "classic",
+
+      /*
        * Write dirty editor buffers through the File System Access API provider.
        */
       "files.autoSave": "afterDelay",

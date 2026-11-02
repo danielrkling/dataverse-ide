@@ -172,7 +172,7 @@ export default {
     const gitlabPanel = registerExtensionPanel(vscode, {
       extensionId: 'gitlab',
       title: 'GitLab',
-      icon: createPanelIcon(PANEL_GLYPHS.merge),
+      icon: createPanelIcon(PANEL_GLYPHS.gitlab),
       description:
         'GitLab integration. Connect with a personal access token, then browse merge requests, issues, and pipelines.',
       workspaceRootUri: context.workspaceRootUri,
