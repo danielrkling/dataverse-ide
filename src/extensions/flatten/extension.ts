@@ -18,18 +18,32 @@ import type { ExtensionContext, IdeExtension } from "../api.js";
  */
 
 const COMMAND_FLATTEN_SELECTED = "dataverseIde.flatten.selected";
+const COMMAND_FLATTEN_CONFIGURED = "dataverseIde.flatten.configured";
+
+const CONFIG_SECTION = "dataverseIde.flatten";
+const SETTING_NAME = "name";
+const SETTING_INCLUDE = "include";
+const DEFAULT_CONFIGURED_NAME = "flatten";
 
 /*
  * Output files are written to the workspace root as
- * `~<folder-names>#<n>.md`, e.g. `~src-extensions#1.md`. The number
+ * `#<folder-names>#<n>.md`, e.g. `#src-extensions#1.md`. The number
  * autoincrements so successive runs never overwrite each other, and the
- * leading `~` keeps bundles grouped together in the explorer.
+ * leading `#` keeps bundles grouped together in the explorer.
+ *
+ * The old `~` prefix is no longer used: Chromium's File System Access API
+ * rejects any file name containing a tilde ("Name is not allowed"), even on
+ * Windows where the character is otherwise legal.
  */
 const MAX_SLUG_LENGTH = 40;
 
 /* Generated bundles are skipped when flattening a directory so repeat runs
  * don't fold earlier output back into the new bundle. */
-const FLATTEN_OUTPUT_PATTERN = /^~.*#(\d+)\.md$/;
+const FLATTEN_OUTPUT_PATTERN = /^#(?:.*#)?(\d+)\.md$/;
+
+/* Bundles created before the switch to `#` are still recognized so folder
+ * flattens don't include them and numbering continues from them. */
+const LEGACY_FLATTEN_OUTPUT_PATTERN = /^~(?:.*#)?(\d+)\.md$/;
 
 /* Keep a pathological selection from freezing the editor. */
 const MAX_FILES_PER_FOLDER = 500;
@@ -240,7 +254,7 @@ function languageTag(uri: vscodeType.Uri): string {
 function isGeneratedFlattenFile(uri: vscodeType.Uri): boolean {
   const name = uri.path.split("/").at(-1) ?? "";
 
-  return FLATTEN_OUTPUT_PATTERN.test(name);
+  return FLATTEN_OUTPUT_PATTERN.test(name) || LEGACY_FLATTEN_OUTPUT_PATTERN.test(name);
 }
 
 function slugify(value: string): string {
@@ -302,7 +316,7 @@ async function nextBundleNumber(
   let highest = 0;
 
   for (const [name] of entries) {
-    const match = FLATTEN_OUTPUT_PATTERN.exec(name);
+    const match = FLATTEN_OUTPUT_PATTERN.exec(name) ?? LEGACY_FLATTEN_OUTPUT_PATTERN.exec(name);
 
     if (match != null) {
       highest = Math.max(highest, Number(match[1]));
@@ -320,7 +334,7 @@ async function outputFileName(
   const slug = selectionSlug(selections);
   const number = await nextBundleNumber(vscode, workspaceRoot);
 
-  return `~${slug != null ? `${slug}#` : "#"}${number}.md`;
+  return `#${slug != null ? `${slug}#` : ""}${number}.md`;
 }
 
 function fencedBlock(language: string, content: string): string {
@@ -334,6 +348,154 @@ function fencedBlock(language: string, content: string): string {
   const fence = "`".repeat(Math.max(3, longestRun + 1));
 
   return `${fence}${language}\n${content.replace(/\s+$/, "")}\n${fence}`;
+}
+
+type FlattenSelection = { path: string; isDirectory: boolean };
+
+type FlattenResult = {
+  sections: string[];
+  selections: FlattenSelection[];
+  included: number;
+  skipped: number;
+};
+
+/*
+ * Read every selected file (or every file below a selected folder) and build
+ * the markdown sections. Shared by the interactive and configured commands.
+ */
+async function collectSections(
+  vscode: typeof vscodeType,
+  workspaceRootUri: vscodeType.Uri,
+  uris: vscodeType.Uri[],
+  outputChannel: vscodeType.OutputChannel,
+): Promise<FlattenResult> {
+  const sections: string[] = [];
+  const selections: FlattenSelection[] = [];
+  const seenFiles = new Set<string>();
+  let included = 0;
+  let skipped = 0;
+
+  for (const uri of uris) {
+    const relativePath = workspaceRelativePath(vscode, workspaceRootUri, uri);
+
+    let stat: vscodeType.FileStat;
+
+    try {
+      stat = await vscode.workspace.fs.stat(uri);
+    } catch {
+      skipped++;
+      outputChannel.appendLine(`[flatten] could not stat ${relativePath}`);
+      continue;
+    }
+
+    const isDirectory = (stat.type & vscode.FileType.Directory) !== 0;
+    selections.push({ path: relativePath, isDirectory });
+
+    const files = isDirectory ? await collectDirectoryFiles(vscode, uri, outputChannel) : [uri];
+
+    for (const file of files) {
+      /*
+       * A file can appear twice when the user selects a folder and one of its
+       * descendants, or when the same resource is forwarded twice.
+       */
+      if (!seenFiles.add(file.toString())) {
+        continue;
+      }
+
+      const section = await readSection(vscode, workspaceRootUri, file);
+
+      if (section != null) {
+        sections.push(section);
+        included++;
+      } else {
+        skipped++;
+      }
+    }
+  }
+
+  return { sections, selections, included, skipped };
+}
+
+function bundleMarkdown(result: FlattenResult): string {
+  const header =
+    `# Flattened workspace files\n\n` +
+    `Generated ${new Date().toISOString()} — ` +
+    `${result.included} file(s)` +
+    (result.skipped > 0 ? `, ${result.skipped} skipped (binary or unreadable)` : "") +
+    `\n`;
+
+  return `${header}\n${result.sections.join("\n\n")}\n`;
+}
+
+async function writeBundle(
+  vscode: typeof vscodeType,
+  workspaceRootUri: vscodeType.Uri,
+  fileName: string,
+  result: FlattenResult,
+  outputChannel: vscodeType.OutputChannel,
+): Promise<void> {
+  const outFile = vscode.Uri.joinPath(workspaceRootUri, fileName);
+
+  await vscode.workspace.fs.writeFile(outFile, new TextEncoder().encode(bundleMarkdown(result)));
+
+  outputChannel.appendLine(`[flatten] wrote ${result.included} file(s) to ${fileName}.`);
+
+  await vscode.window.showTextDocument(outFile);
+}
+
+/*
+ * The configured output name is a file name, not a path: separators and
+ * characters that are invalid on Windows are replaced, `~` is removed
+ * because Chromium's File System Access API rejects it, and `.md` is
+ * appended when the setting omits it.
+ */
+function configuredFileName(value: string | undefined): string {
+  const trimmed = (value ?? "").trim();
+  const base = trimmed.toLowerCase().endsWith(".md") ? trimmed.slice(0, -3) : trimmed;
+
+  const safe = base.replace(/[\\/:*?"<>|~]+/g, "-").replace(/^[.\s]+|[.\s]+$/g, "");
+
+  return `${safe.length > 0 ? safe : DEFAULT_CONFIGURED_NAME}.md`;
+}
+
+function resolveConfiguredIncludes(
+  vscode: typeof vscodeType,
+  workspaceRootUri: vscodeType.Uri,
+  includes: string[],
+): { uris: vscodeType.Uri[]; problems: string[] } {
+  const uris: vscodeType.Uri[] = [];
+  const problems: string[] = [];
+  const seen = new Set<string>();
+
+  for (const include of includes) {
+    const normalized = include
+      .trim()
+      .replaceAll("\\", "/")
+      .replace(/^\.?\//, "")
+      .replace(/\/+$/, "");
+
+    const segments = normalized.split("/").filter(Boolean);
+
+    if (segments.length === 0) {
+      problems.push(`Ignored empty include entry "${include}".`);
+      continue;
+    }
+
+    if (segments.some((segment) => segment === "." || segment === "..")) {
+      problems.push(`Ignored include entry outside the workspace: "${include}".`);
+      continue;
+    }
+
+    const uri = vscode.Uri.joinPath(workspaceRootUri, ...segments);
+    const key = uri.toString();
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      uris.push(uri);
+    }
+  }
+
+  return { uris, problems };
 }
 
 export default {
@@ -351,17 +513,47 @@ export default {
     await contributeExtensionManifest({
       id: "flatten",
       displayName: "Dataverse IDE Flatten",
-      description: "Combine selected files into a single markdown document.",
+      description: "Combine selected or configured files into a single markdown document.",
       commands: [
         {
           command: COMMAND_FLATTEN_SELECTED,
           title: "Flatten: Combine Selected Files into Markdown",
         },
         {
+          command: COMMAND_FLATTEN_CONFIGURED,
+          title: "Flatten: Combine Configured Files into Markdown",
+        },
+        {
           command: "dataverseIde.flatten.openGuide",
           title: "Flatten: How-to Guide",
         },
       ],
+      configuration: {
+        title: "Dataverse IDE Flatten",
+        properties: {
+          [`${CONFIG_SECTION}.${SETTING_NAME}`]: {
+            type: "string",
+            default: DEFAULT_CONFIGURED_NAME,
+            scope: "window",
+            markdownDescription:
+              "Output file name used by `Flatten: Combine Configured Files into Markdown`. " +
+              "`.md` is appended when omitted. The bundle is written to the workspace root " +
+              "and replaced on each run.",
+          },
+
+          [`${CONFIG_SECTION}.${SETTING_INCLUDE}`]: {
+            type: "array",
+            items: { type: "string" },
+            default: [],
+            scope: "window",
+            markdownDescription:
+              "Workspace-relative files and folders included by " +
+              "`Flatten: Combine Configured Files into Markdown`. Folders are expanded " +
+              "recursively; `.git`, `node_modules`, `.ide-build` and `dist` are skipped. " +
+              'Example: `["src", "package.json"]`.',
+          },
+        },
+      },
       menus: [
         {
           menu: "explorer/context",
@@ -423,54 +615,9 @@ export default {
           return;
         }
 
-        const sections: string[] = [];
-        const selections: Array<{ path: string; isDirectory: boolean }> = [];
-        const seenFiles = new Set<string>();
-        let included = 0;
-        let skipped = 0;
+        const result = await collectSections(vscode, context.workspaceRootUri, uris, outputChannel);
 
-        for (const uri of uris) {
-          const relativePath = workspaceRelativePath(vscode, context.workspaceRootUri, uri);
-
-          let stat: vscodeType.FileStat;
-
-          try {
-            stat = await vscode.workspace.fs.stat(uri);
-          } catch {
-            skipped++;
-            outputChannel.appendLine(`[flatten] could not stat ${relativePath}`);
-            continue;
-          }
-
-          const isDirectory = (stat.type & vscode.FileType.Directory) !== 0;
-          selections.push({ path: relativePath, isDirectory });
-
-          const files = isDirectory
-            ? await collectDirectoryFiles(vscode, uri, outputChannel)
-            : [uri];
-
-          for (const file of files) {
-            /*
-             * A file can appear twice when the user selects a folder and one
-             * of its descendants, or when the same resource is forwarded as
-             * both the focused argument and part of the selection array.
-             */
-            if (!seenFiles.add(file.toString())) {
-              continue;
-            }
-
-            const section = await readSection(vscode, context.workspaceRootUri, file);
-
-            if (section != null) {
-              sections.push(section);
-              included++;
-            } else {
-              skipped++;
-            }
-          }
-        }
-
-        if (sections.length === 0) {
+        if (result.sections.length === 0) {
           await vscode.window.showWarningMessage(
             "Flatten: no readable text files in the selection.",
           );
@@ -478,24 +625,76 @@ export default {
           return;
         }
 
-        const generatedAt = new Date();
-        const header =
-          `# Flattened workspace files\n\n` +
-          `Generated ${generatedAt.toISOString()} — ` +
-          `${included} file(s)` +
-          (skipped > 0 ? `, ${skipped} skipped (binary or unreadable)` : "") +
-          `\n`;
+        const fileName = await outputFileName(vscode, context.workspaceRootUri, result.selections);
 
-        const markdown = `${header}\n${sections.join("\n\n")}\n`;
-        const fileName = await outputFileName(vscode, context.workspaceRootUri, selections);
+        await writeBundle(vscode, context.workspaceRootUri, fileName, result, outputChannel);
+      },
+    );
 
-        const outFile = vscode.Uri.joinPath(context.workspaceRootUri, fileName);
+    const flattenConfiguredCommand = vscode.commands.registerCommand(
+      COMMAND_FLATTEN_CONFIGURED,
+      async () => {
+        const config = vscode.workspace.getConfiguration(CONFIG_SECTION, context.workspaceRootUri);
+        const rawIncludes = config.get<unknown>(SETTING_INCLUDE, []);
+        const problems: string[] = [];
 
-        await vscode.workspace.fs.writeFile(outFile, new TextEncoder().encode(markdown));
+        if (!Array.isArray(rawIncludes)) {
+          problems.push(`"${CONFIG_SECTION}.${SETTING_INCLUDE}" must be an array of paths.`);
+        }
 
-        outputChannel.appendLine(`[flatten] wrote ${included} file(s) to ${fileName}.`);
+        const includes = Array.isArray(rawIncludes)
+          ? rawIncludes.filter((entry): entry is string => typeof entry === "string")
+          : [];
 
-        await vscode.window.showTextDocument(outFile);
+        if (Array.isArray(rawIncludes) && includes.length !== rawIncludes.length) {
+          problems.push(
+            'Ignored non-string entries in "' + `${CONFIG_SECTION}.${SETTING_INCLUDE}".`,
+          );
+        }
+
+        if (includes.length === 0) {
+          await vscode.window.showWarningMessage(
+            `Flatten: set "${CONFIG_SECTION}.${SETTING_INCLUDE}" to at least one ` +
+              "workspace-relative file or folder.",
+          );
+
+          return;
+        }
+
+        const resolved = resolveConfiguredIncludes(vscode, context.workspaceRootUri, includes);
+
+        problems.push(...resolved.problems);
+
+        if (resolved.uris.length === 0) {
+          await vscode.window.showWarningMessage(
+            `Flatten: no valid paths in "${CONFIG_SECTION}.${SETTING_INCLUDE}".`,
+          );
+
+          return;
+        }
+
+        for (const problem of problems) {
+          outputChannel.appendLine(`[flatten] ${problem}`);
+        }
+
+        const result = await collectSections(
+          vscode,
+          context.workspaceRootUri,
+          resolved.uris,
+          outputChannel,
+        );
+
+        if (result.sections.length === 0) {
+          await vscode.window.showWarningMessage(
+            "Flatten: no readable text files in the configured includes.",
+          );
+
+          return;
+        }
+
+        const fileName = configuredFileName(config.get<string>(SETTING_NAME));
+
+        await writeBundle(vscode, context.workspaceRootUri, fileName, result, outputChannel);
       },
     );
 
@@ -504,6 +703,7 @@ export default {
     return {
       dispose() {
         flattenCommand.dispose();
+        flattenConfiguredCommand.dispose();
         guideRegistration.dispose();
       },
     };

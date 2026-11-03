@@ -18,16 +18,38 @@ folder without zip files.
 1. Select files or folders in the explorer.
 2. Right-click and choose `Flatten: Combine Selected Files into Markdown`.
 3. The bundle opens in the editor and is written to the workspace root as
-   `~<folders>#<n>.md`.
+   `#<folders>#<n>.md`.
 
 Examples:
 
-- Selecting `src/extensions` creates `~src-extensions#1.md`.
-- Selecting a single file `src/app.ts` creates `~src#1.md`.
-- If the derived name is too long or empty, the bundle is `~#1.md`.
+- Selecting `src/extensions` creates `#src-extensions#1.md`.
+- Selecting a single file `src/app.ts` creates `#src#1.md`.
+- If the derived name is too long or empty, the bundle is `#1.md`.
 
 The number auto-increments from the highest existing bundle, so repeated runs never overwrite
 an earlier one.
+
+## Flatten a configured set of files
+
+`Flatten: Combine Configured Files into Markdown` reads two workspace settings:
+
+| Setting                        | Default   | Purpose                                           |
+| ------------------------------ | --------- | ------------------------------------------------- |
+| `dataverseIde.flatten.name`    | `flatten` | Output file name; `.md` is appended when omitted. |
+| `dataverseIde.flatten.include` | `[]`      | Workspace-relative files and folders to combine.  |
+
+```json
+"dataverseIde.flatten.name": "llm-context",
+"dataverseIde.flatten.include": ["src/app", "src/styles.css", "package.json"]
+```
+
+- Paths are relative to the workspace root. Absolute paths are not used.
+- Folders are expanded recursively with the same exclusions and 500-file cap as selected
+  folders.
+- The output is written to the workspace root as `<name>.md` and replaced on each run; use
+  the selected-files command when you need numbered, non-overwriting bundles.
+- Run the command from the command palette or the welcome page. If the include list is empty
+  or contains no readable files, a warning explains what to fix.
 
 ## What goes into the bundle
 
@@ -60,8 +82,8 @@ Generated 2026-11-02T10:14:00.000Z — 3 file(s)
 
 - Folder selections recurse up to **500 files** per folder.
 - `.git`, `node_modules`, `.ide-build` and `dist` are excluded.
-- Previous flatten bundles (`~…#n.md`) are skipped, so flattening a folder twice does not fold
-  the first bundle into the second.
+- Previous flatten bundles (`#…#n.md`, plus legacy `~…#n.md`) are skipped, so flattening a
+  folder twice does not fold an earlier bundle into the new one.
 
 ## Recipes
 
@@ -77,7 +99,7 @@ document. The relative paths make it easy to trace each block.
 
 ### Snapshot a folder before refactoring
 
-Flatten the folder, keep the generated `~…md` file, and refactor. The bundle is a plain
+Flatten the folder, keep the generated `#…md` file, and refactor. The bundle is a plain
 markdown file, so it diffs and commits like any other.
 
 ## Troubleshooting
@@ -86,6 +108,7 @@ markdown file, so it diffs and commits like any other.
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
 | `select one or more files in the explorer first` | The command was run from the palette with no selection. Select files in the explorer or pass them from the context menu. |
 | `no readable text files in the selection`        | Everything selected was unreadable. Check permissions and that the paths exist.                                          |
+| `set "dataverseIde.flatten.include" …`           | The configured command has no include paths. Add workspace-relative files or folders to the setting.                     |
 | A file appears as a placeholder                  | Its extension is not in the known text list (for example an image or a binary), or it could not be read.                 |
 | Folder output is incomplete                      | Folder selections cap at 500 files and exclude `node_modules`, `dist`, `.git` and `.ide-build`.                          |
 | Bundle is huge                                   | Select fewer files or a narrower folder; there is no automatic size cap.                                                 |

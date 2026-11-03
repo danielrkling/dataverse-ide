@@ -359,13 +359,17 @@ const SECTIONS: WelcomeSection[] = [
       {
         title: "Flatten files",
         description:
-          "Right-click one or more files or folders in the explorer to combine their text into a numbered markdown bundle (named after the selected folders when short enough) — handy as LLM context or for a quick review.",
+          "Right-click one or more files or folders in the explorer to combine their text into a numbered markdown bundle, or run the configured variant to collect paths from `dataverseIde.flatten.include` — handy as LLM context or for a quick review.",
         icon: "files",
         guide: "dataverseIde.flatten.openGuide",
         actions: [
           {
             label: "Flatten Selection",
             command: "dataverseIde.flatten.selected",
+          },
+          {
+            label: "Flatten Configured",
+            command: "dataverseIde.flatten.configured",
           },
         ],
       },

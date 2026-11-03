@@ -1,4 +1,5 @@
 import { initialize, IWorkbenchConstructionOptions, LogLevel } from "@codingame/monaco-vscode-api";
+import { registerAssets } from "@codingame/monaco-vscode-api/assets";
 import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-service-override";
 import getQuickAccessServiceOverride from "@codingame/monaco-vscode-quickaccess-service-override";
 import getConfigurationServiceOverride from "@codingame/monaco-vscode-configuration-service-override";
@@ -339,6 +340,24 @@ function applyProductIcon(): void {
   document.documentElement.style.setProperty("--product-icon", `url("${iconUrl}")`);
 }
 
+/*
+ * The workbench normally registers the stock webview pre assets (hashed
+ * assets under /assets/, with a query string appended to the service-worker
+ * URL). Dataverse redirects that query-stringed URL and service-worker
+ * scripts may not follow redirects, so vite.config.ts emits patched copies
+ * under a stable /webview/ folder. Point the webview host at those instead.
+ */
+function registerWebviewAssets(): void {
+  const base = new URL("./webview/", document.baseURI);
+
+  registerAssets({
+    "vs/workbench/contrib/webview/browser/pre/index.html": new URL("index.html", base).href,
+    "vs/workbench/contrib/webview/browser/pre/fake.html": new URL("fake.html", base).href,
+    "vs/workbench/contrib/webview/browser/pre/service-worker.js": new URL("service-worker.js", base)
+      .href,
+  });
+}
+
 export async function startWorkbench(container: HTMLElement): Promise<void> {
   applyProductIcon();
 
@@ -425,6 +444,8 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
       },
     },
   };
+
+  registerWebviewAssets();
 
   await initialize(
     {

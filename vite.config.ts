@@ -2,7 +2,187 @@ import { defineConfig, type Plugin } from "vite";
 import importMetaUrlPlugin from "@codingame/esbuild-import-meta-url-plugin";
 import * as fs from "fs";
 import path from "path";
+import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
+
+/*
+ * VS Code's webview host registers its service worker from
+ *
+ *   <serviceWorkerUri>?v=<version>&vscode-resource-base-authority=...&...
+ *
+ * Dataverse answers that query-stringed web-resource URL with a redirect, and
+ * service-worker script fetches use redirect: "error", so registration fails:
+ *
+ *   Could not register service worker: SecurityError: Failed to register a
+ *   ServiceWorker for scope ... The script resource is behind a redirect,
+ *   which is disallowed.
+ *
+ * Serve the webview pre assets from a stable, query-free /webview/ folder
+ * instead. The worker keeps its own ("/webview/") scope, so it does not
+ * replace the app-wide PWA service worker, and it still covers both the shell
+ * and the fake content page so webview resource URLs resolve.
+ *
+ * The worker read its configuration (resource base authority, remote
+ * authority, platform) from the query string. Since the query string is what
+ * triggers the Dataverse redirect, bake the browser defaults into the served
+ * copy instead. The shell's inline script is covered by a CSP hash, so the
+ * hash is recomputed whenever the registration line is patched.
+ */
+const WEBVIEW_PRE_DIR = path.join(
+  import.meta.dirname,
+  "node_modules/@codingame/monaco-vscode-view-common-service-override/service-override/viewCommon/vs/workbench/contrib/webview/browser/pre",
+);
+
+function readWebviewPre(name: string): string {
+  return fs.readFileSync(path.join(WEBVIEW_PRE_DIR, name), "utf8");
+}
+
+function patchWebviewServiceWorker(source: string): string {
+  const navigationMarker = "sw.addEventListener('fetch', (event) => {";
+  const remoteAuthorityMarker = "const remoteAuthority = searchParams.get('remoteAuthority');";
+  const resourceBaseAuthorityMarker =
+    "const resourceBaseAuthority = searchParams.get('vscode-resource-base-authority');";
+
+  if (
+    !source.includes(navigationMarker) ||
+    !source.includes(remoteAuthorityMarker) ||
+    !source.includes(resourceBaseAuthorityMarker)
+  ) {
+    throw new Error(
+      "monaco-vscode-api webview service worker changed; update the patch in vite.config.ts.",
+    );
+  }
+
+  /*
+   * The workbench document is cross-origin isolated (COEP), so iframes it
+   * embeds must also carry a COEP header - Chromium fails them with
+   * "coep-frame-resource-needs-coep-header" otherwise. The app-wide PWA
+   * worker used to add these headers to every navigation, but this worker
+   * now owns the /webview/ scope, so it has to add them itself.
+   */
+  const withNavigationHeaders = `${navigationMarker}
+	const navigationUrl = new URL(event.request.url);
+
+	if (event.request.mode === 'navigate' && navigationUrl.origin === sw.location.origin) {
+		event.respondWith(fetch(event.request).then((response) => {
+			const headers = new Headers(response.headers);
+
+			headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+			headers.set('Cross-Origin-Embedder-Policy', 'require-corp');
+			headers.set('Cross-Origin-Resource-Policy', 'cross-origin');
+
+			return new Response(response.body, {
+				status: response.status,
+				statusText: response.statusText,
+				headers,
+			});
+		}));
+
+		return;
+	}
+`;
+
+  const patched = source
+    .replace(navigationMarker, withNavigationHeaders)
+    .replace(
+      remoteAuthorityMarker,
+      "const remoteAuthority = searchParams.get('remoteAuthority') ?? '';",
+    )
+    .replace(
+      resourceBaseAuthorityMarker,
+      "const resourceBaseAuthority = searchParams.get('vscode-resource-base-authority') ?? 'vscode-resource.vscode-cdn.net';",
+    );
+
+  return patched;
+}
+
+function patchWebviewShell(source: string): string {
+  const patched = source.replace(
+    /\t\t\tconst swPath = encodeURI\([^\n]*\);/,
+    "\t\t\tconst swPath = serviceWorkerUri;",
+  );
+
+  if (patched === source) {
+    throw new Error(
+      "monaco-vscode-api webview index.html changed; update the service-worker registration patch in vite.config.ts.",
+    );
+  }
+
+  const inlineScript = patched.match(/<script async type="module">([\s\S]*?)<\/script>/);
+
+  if (inlineScript == null) {
+    throw new Error(
+      "monaco-vscode-api webview index.html no longer has the expected inline module script.",
+    );
+  }
+
+  /*
+   * The meta CSP pins the inline script by hash. The registration edit above
+   * changes the script, so recompute it or the shell silently stops running.
+   */
+  const hash = createHash("sha256").update(inlineScript[1]).digest("base64");
+
+  return patched.replace(/'sha256-[^']+'/, `'sha256-${hash}'`);
+}
+
+function buildWebviewPreAssets(): Record<string, string> {
+  return {
+    "index.html": patchWebviewShell(readWebviewPre("index.html")),
+    "fake.html": readWebviewPre("fake.html"),
+    "service-worker.js": patchWebviewServiceWorker(readWebviewPre("service-worker.js")),
+  };
+}
+
+const webviewPreAssetsServe: Plugin = {
+  name: "dataverse-ide-webview-pre",
+  apply: "serve",
+  configureServer(server) {
+    server.middlewares.use((req, res, next) => {
+      const pathname = new URL(req.originalUrl ?? "/", "http://localhost").pathname;
+      const prefix = "/webview/";
+
+      if (!pathname.startsWith(prefix)) {
+        next();
+        return;
+      }
+
+      const name = pathname.slice(prefix.length);
+      const assets = buildWebviewPreAssets();
+
+      if (assets[name] == null) {
+        next();
+        return;
+      }
+
+      res.setHeader("Cache-Control", "no-store");
+      /*
+       * This middleware ends the response before the shared
+       * configureResponseHeaders middleware runs, so apply the same isolation
+       * headers here. The workbench parent is cross-origin isolated and
+       * Chromium blocks an embedding response that does not opt in.
+       */
+      res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
+      res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+      res.setHeader(
+        "Content-Type",
+        name.endsWith(".js") ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8",
+      );
+      res.end(assets[name]);
+    });
+  },
+};
+
+const webviewPreAssetsBuild: Plugin = {
+  name: "dataverse-ide-webview-pre-build",
+  apply: "build",
+  buildStart() {
+    // fileName (not name) keeps these URLs stable and free of a content hash.
+    for (const [name, source] of Object.entries(buildWebviewPreAssets())) {
+      this.emitFile({ type: "asset", fileName: `webview/${name}`, source });
+    }
+  },
+};
 
 // For the *-language-features extensions (tsserver) which use SharedArrayBuffer
 const configureResponseHeaders: Plugin = {
@@ -412,6 +592,8 @@ export default defineConfig({
     plugins: () => [textmateMainShim, webResourceWasmInline],
   },
   plugins: [
+    webviewPreAssetsServe,
+    webviewPreAssetsBuild,
     textmateMainShim,
     configureResponseHeaders,
     forcePreventTransformAssets,
