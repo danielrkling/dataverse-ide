@@ -8,11 +8,20 @@ rendering the full VSCode workbench and opening real local folders through the
 
 The whole IDE is deployed as **model-driven app web resources**:
 
-- Binaries (`.wasm`/`.ttf`) are **not** supported as web resource types, so the
-  build config inlines them into the JS chunks as base64 data URLs
-  (`build.assetsInlineLimit: 1_000_000`) - verified: no `.wasm`/`.ttf` files are emitted
-- The module graph splits into chunks kept under the default per-file limit
-  via `manualChunks` (`workbench`, `editor-core`, `builtin-extensions`)
+- Binaries (`.wasm`/fonts) are **not** supported as web resource types, so only
+  those are inlined into the JS chunks as base64 data URLs. Everything Dataverse
+  can host (`.js`, `.json`, `.txt`, `.css`, `.html`, `.svg`, images) stays a
+  separate web resource. (Inlining every asset under 1 MB used to inflate the
+  entry chunk to 45 MB, ~34 MB of it base64 data URLs.)
+- Source maps are dropped: `.map` is not a web resource type and they were
+  ~59 MB of the old `dist/` output.
+- `esbuild.wasm` ships as a gzip+base64 `.txt` web resource (~4.2 MB) and is
+  fetched/decompressed at runtime (see below).
+- Three files still exceed the 5 MB default: the eagerly loaded monaco/VS Code
+  core chunk (~15 MB) and the two prebuilt language-server workers
+  (`htmlServerMain.js` ~7.9 MB, `tsserver.web.js` ~5.8 MB). All are under
+  16 MB. Splitting the monaco core with `manualChunks` causes cross-chunk TDZ
+  errors, so the target org's upload limit is raised instead (see below).
 - Everything is same-origin, so no CORS, no service worker needed for fetches:
   fonts, wasm data URLs, tsserver, and the File System Access API all just work
 - The `{{uuid}}.localhost` iframe-remap only applies in local dev; in production
@@ -40,7 +49,8 @@ web resource via Web API v9.2 (`webresources` entity), then calls
 `PublishAllCustomizations`. Notes:
 
 - dataverse System Settings → Email tab → _Set file size limit for attachments_:
-  lift it (default 5 MB) to at least 32 MB so the `builtin-extensions` chunk fits
+  lift it (default 5 MB) to at least 16 MB so the largest chunk fits (32 MB
+  gives headroom)
 - resources are created in the default solution; move them into a proper
   solution in Power Apps once crops in, or extend the script with solution-aware upserts
 - the Dataverse org CSP needs to allow same-origin `blob:` workers
@@ -72,11 +82,33 @@ Notes:
 - No model-driven app or sitemap is included. After importing, open
   `https://<org>.crm.dynamics.com/WebResources/dv_ide/index.html`.
 - The target org's `Organization.MaxUploadFileSize` must cover the largest
-  single file (default 5 MB, set under System Settings → Email). The packager
-  prints the largest files and warns when one exceeds the default.
+  single file. After the asset-inlining fix the largest files are the monaco
+  core entry chunk (`assets/index-*.js`, ~15 MB) and the two language-server
+  workers (`htmlServerMain.js` ~7.9 MB, `tsserver.web.js` ~5.8 MB), so raise the
+  limit to at least 16 MB (32 MB gives headroom) under System Settings → Email.
+  The packager prints the largest files and warns when one exceeds the default.
 - `.map` and `.webmanifest` files are skipped: DevTools maps are not web
   resources, and `public/pwa.js` builds the manifest in memory because
   Dataverse has no `.webmanifest` type.
+
+### Publish the solution on GitHub (local release)
+
+Releases are created from this machine with the GitHub CLI — no CI required:
+
+```powershell
+gh auth login                          # once
+.\tools\release.ps1 -Tag v1.0.0        # build, package, tag, upload
+```
+
+The script derives the four-part solution version from the tag (`v1.2.3` →
+`1.2.3.0`), runs `npm run build` and `npm run package:solution`, writes
+`artifacts/SHA256SUMS.txt`, pushes the tag if it is missing on `origin`, and
+attaches both files to the GitHub Release. Options: `-SkipBuild`,
+`-NotesFile notes.md`, `-Draft`, `-Prerelease`, `-Solution`, `-Prefix`, and
+`-AllowDirty` (release uncommitted sources; the default refuses a dirty tree).
+Re-running the same tag re-uploads the assets with `--clobber`.
+
+Download page: <https://github.com/danielrkling/dataverse-ide/releases>
 
 ### Test the production build locally
 
@@ -194,6 +226,40 @@ in the command palette (Ctrl+Shift+P / Cmd+Shift+P) via `contributes.commands` m
 | Welcome      | `Welcome: Show Welcome Page`                                                                                                                                                                   | opens automatically on startup when no editor is active; uncheck **Show this page on startup** on the page or set `dataverseIde.welcome.showOnStartup` to `false`. Also available under Help → Welcome                                                                                       |
 | VSIX         | `VSIX: Install Extension from File…`, `VSIX: Uninstall Extension…`, `VSIX: Show Installed Extensions`                                                                                          | install browser-compatible `.vsix` packages (needs a `browser` entry point or no code entry point); packages persist in IndexedDB and are restored on reload                                                                                                                                 |
 
+### How-to guides
+
+Each extension keeps its detailed guide next to its code as
+`src/extensions/<id>/GUIDE.md`. Guides are bundled with the app (`?raw`), served as
+read-only virtual documents (`dataverse-ide-guide:/<id>.md`), and opened in the markdown
+preview. Every extension that ships a guide contributes a `<Feature>: How-to Guide`
+command, also linked from the welcome page:
+
+| Extension    | Command                   |
+| ------------ | ------------------------- |
+| Dataverse    | `Dataverse: How-to Guide` |
+| esbuild      | `esbuild: How-to Guide`   |
+| Flatten      | `Flatten: How-to Guide`   |
+| Git          | `Git: How-to Guide`       |
+| GitLab       | `GitLab: How-to Guide`    |
+| HTML         | `HTML: How-to Guide`      |
+| Node runtime | `Node: How-to Guide`      |
+| npm          | `npm: How-to Guide`       |
+| Prettier     | `Prettier: How-to Guide`  |
+| Scripts      | `Scripts: How-to Guide`   |
+| Tailwind     | `Tailwind: How-to Guide`  |
+| VSIX         | `VSIX: How-to Guide`      |
+| Welcome      | `Welcome: How-to Guide`   |
+
+To add a guide:
+
+1. Create `src/extensions/<id>/GUIDE.md`.
+2. Import it with `import guideContent from "./GUIDE.md?raw";`.
+3. Call
+   `registerGuide({ vscode, extensionId: "<id>", content: guideContent })` during
+   activation and dispose the returned registration.
+4. Add `dataverseIde.<id>.openGuide` to the extension's contributed commands.
+5. Optionally link it from a welcome feature with `guide: "dataverseIde.<id>.openGuide"`.
+
 ### Sidebars (activity bar → "Dataverse IDE")
 
 - **npm Packages** — Dependencies / Dev Dependencies groups; click a dependency for
@@ -258,16 +324,19 @@ Each extension also owns an output channel: Output panel → "Dataverse IDE: <id
   needed (terminal, SCM, debug, welcome, chat, liveSearch, etc.) by installing the matching
   `@codingame/monaco-vscode-*-service-override` package and spreading it into `initialize()`.
 - Extension host runs in a web worker (`enableWorkerExtensionHost: true`, worker `extensionHostWorkerMain`).
-- The production build is ~11 MB single chunk before splitting; the demo ships similarly sized.
+- The eagerly loaded portion of the production build is ~15 MB (monaco core plus
+  the built-in extensions); lazy chunks add more when those features are used.
 - Workers require `vite` config adjustments: `worker.format: 'es'`, `build.target: 'es2022'`
   (top-level await) and the `@codingame/esbuild-import-meta-url-plugin`.
 
 ### esbuild wasm packaging note
 
-`esbuild.wasm` cannot ship as a discrete Dataverse web resource, so the esbuild
-extension imports it via `virtual:esbuild-wasm-binary` (see
-`esbuildWasmInline` in `vite.config.ts`), which embeds the binary as base64 and
-is compiled with `new WebAssembly.Module()` inside the build worker.
+`esbuild.wasm` cannot ship as a `.wasm` Dataverse web resource, and raw base64
+would be 15.7 MB. Instead the build emits a gzip-compressed, base64-encoded
+`.txt` resource (`virtual:esbuild-wasm-gzip-url`, see `webResourceWasmInline` in
+`vite.config.ts`). The extension fetches it at runtime, decompresses it with
+`DecompressionStream("gzip")` and passes the bytes to `WebAssembly.compile()`.
+The resulting web resource is ~4.2 MB, under the 5 MB default.
 
 ### Node runtime & npm packaging notes
 
@@ -319,7 +388,7 @@ Two compatibility aliases live in `vite.config.ts`:
   (almostnode's dist references a hosted worker chunk that isn't shipped in
   the package; the direct runtime never boots it)
 
-`vite.config.ts` inlines every `.wasm` asset regardless of size (the 1 MB
-threshold still applies to non-wasm assets), so the production build embeds
-esbuild.wasm and other binary assets as data URLs and no separate `.wasm` web
+`vite.config.ts` inlines every `.wasm` asset and web font regardless of size;
+other hostable types stay separate web resources. `esbuild.wasm` is special
+cased as a gzip+base64 `.txt` asset (see above), so no separate `.wasm` web
 resource is emitted.

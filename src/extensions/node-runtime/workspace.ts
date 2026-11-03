@@ -10,6 +10,8 @@
 
 import type * as vscodeType from "vscode";
 
+import { ensureWorkspaceDirectory } from "../../workspace/workspaceFs.js";
+
 export type WorkspaceFs = {
   readText: (path: string) => Promise<string | undefined>;
   readBytes: (path: string) => Promise<Uint8Array | undefined>;
@@ -143,7 +145,7 @@ export function createWorkspaceFs(
       const parent = dirname(path);
 
       if (parent.length > 0) {
-        await vscode.workspace.fs.createDirectory(uri(parent));
+        await ensureWorkspaceDirectory(vscode, uri(parent));
       }
 
       await vscode.workspace.fs.writeFile(uri(path), content);
@@ -155,7 +157,7 @@ export function createWorkspaceFs(
         return;
       }
 
-      await vscode.workspace.fs.createDirectory(uri(path));
+      await ensureWorkspaceDirectory(vscode, uri(path));
     },
 
     async deletePath(path: string, recursive: boolean): Promise<void> {
@@ -171,7 +173,7 @@ export function createWorkspaceFs(
       const parent = dirname(to);
 
       if (parent.length > 0) {
-        await vscode.workspace.fs.createDirectory(uri(parent));
+        await ensureWorkspaceDirectory(vscode, uri(parent));
       }
 
       await vscode.workspace.fs.rename(uri(from), uri(to), {
@@ -184,7 +186,7 @@ export function createWorkspaceFs(
       const parent = dirname(to);
 
       if (parent.length > 0) {
-        await vscode.workspace.fs.createDirectory(uri(parent));
+        await ensureWorkspaceDirectory(vscode, uri(parent));
       }
 
       await vscode.workspace.fs.copy(uri(from), uri(to), {

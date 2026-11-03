@@ -16,6 +16,7 @@
 import type * as vscodeType from 'vscode'
 
 import { ensureWorkspacePackageJson, writeWorkspaceFileText } from './packageBridge'
+import { ensureWorkspaceDirectory } from '../../workspace/workspaceFs'
 import { parsePackageSpec, Registry, type ResolvedPackage } from './registry'
 import { resolveTree } from './resolver'
 import { gunzip, parseTar } from './tarball'
@@ -242,7 +243,8 @@ async function extractTarballToWorkspace(
     }
 
     if (entry.type === 'directory') {
-      await vscode.workspace.fs.createDirectory(
+      await ensureWorkspaceDirectory(
+        vscode,
         vscode.Uri.joinPath(dest, ...relativeParts),
       )
 
@@ -252,7 +254,8 @@ async function extractTarballToWorkspace(
     const parentSegments = relativeParts.slice(0, -1)
 
     if (parentSegments.length > 0) {
-      await vscode.workspace.fs.createDirectory(
+      await ensureWorkspaceDirectory(
+        vscode,
         vscode.Uri.joinPath(dest, ...parentSegments),
       )
     }

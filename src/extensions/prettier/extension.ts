@@ -21,6 +21,10 @@ import type { ExtensionContext, IdeExtension } from "../api.js";
 
 import { registerExtensionReplacingPlaceholder } from "../api.js";
 
+import guideContent from "./GUIDE.md?raw";
+
+import { registerGuide } from "../shared/guide.js";
+
 /*
  * Prettier extension: formats the active document with the browser build
  * of Prettier ("prettier/standalone" plus its parser plugins, which carry
@@ -316,6 +320,10 @@ export default {
             command: COMMAND_FORMAT,
             title: "Prettier: Format Document",
           },
+          {
+            command: "dataverseIde.prettier.openGuide",
+            title: "Prettier: How-to Guide",
+          },
         ],
         configuration: {
           title: "Prettier",
@@ -336,7 +344,13 @@ export default {
     const vscode = (await getApi()) as unknown as typeof vscodeType;
 
     const provider = createFormatProvider(vscode, workspaceRootUri);
-    const disposables: vscodeType.Disposable[] = [];
+    const disposables: vscodeType.Disposable[] = [
+      registerGuide({
+        vscode: context.vscode,
+        extensionId: "prettier",
+        content: guideContent,
+      }),
+    ];
 
     for (const language of Object.keys(PARSER_BY_LANGUAGE)) {
       disposables.push(

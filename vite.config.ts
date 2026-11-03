@@ -2,6 +2,7 @@ import { defineConfig, type Plugin } from "vite";
 import importMetaUrlPlugin from "@codingame/esbuild-import-meta-url-plugin";
 import * as fs from "fs";
 import path from "path";
+import { gzipSync } from "node:zlib";
 
 // For the *-language-features extensions (tsserver) which use SharedArrayBuffer
 const configureResponseHeaders: Plugin = {
@@ -198,8 +199,15 @@ const forcePreventTransformAssets: Plugin = {
  * build time (kept out of the global assetsInlineLimit - raising that would
  * also inline tsserver's large JS assets). The virtual modules are:
  *
- *   virtual:esbuild-wasm-binary        esbuild.wasm as a base64 string
+ *   virtual:esbuild-wasm-gzip-url       esbuild.wasm, gzip-compressed and
+ *                                       base64-encoded into its own .txt web
+ *                                       resource (~4.2MB), fetched and
+ *                                       decompressed at runtime
  *   virtual:brotli-wasm-data-url       brotli wasm as a data URL
+ *
+ * esbuild.wasm is 11.8MB raw, which used to be inlined into the compiler chunk
+ * as 15.7MB of base64 and exceeded Dataverse's 5MB per-web-resource limit.
+ * Gzip+base64 keeps it in one asset under that limit.
  *
  * brotli-wasm references its binary through `new URL(..., import.meta.url)`.
  * The transform hook below rewrites that reference onto the virtual module;
@@ -209,19 +217,27 @@ const forcePreventTransformAssets: Plugin = {
 const webResourceWasmInline: Plugin = {
   name: "dataverse-ide-wasm-inline",
   resolveId(id: string) {
-    if (id === "virtual:esbuild-wasm-binary" || id === "virtual:brotli-wasm-data-url") {
+    if (id === "virtual:esbuild-wasm-gzip-url" || id === "virtual:brotli-wasm-data-url") {
       return id;
     }
 
     return null;
   },
   load(id: string) {
-    if (id === "virtual:esbuild-wasm-binary") {
+    if (id === "virtual:esbuild-wasm-gzip-url") {
       const wasmPath = path.join(import.meta.dirname, "node_modules/esbuild-wasm/esbuild.wasm");
 
-      const base64 = fs.readFileSync(wasmPath).toString("base64");
+      /*
+       * A directly emitted asset is not subject to assetsInlineLimit, so this
+       * stays a separate web resource instead of being folded into the chunk.
+       */
+      const referenceId = this.emitFile({
+        type: "asset",
+        name: "esbuild.wasm.gz.b64.txt",
+        source: gzipSync(fs.readFileSync(wasmPath), { level: 9 }).toString("base64"),
+      });
 
-      return `export default ${JSON.stringify(base64)}`;
+      return `export default import.meta.ROLLUP_FILE_URL_${referenceId};`;
     }
 
     if (id === "virtual:brotli-wasm-data-url") {
@@ -264,6 +280,39 @@ const webResourceWasmInline: Plugin = {
   },
 };
 
+/*
+ * Source maps are devtools-only and not a Dataverse web-resource type.
+ * Vendor extensions reference their `.map` files via `new URL(...)`, which
+ * makes Vite emit them as assets (~59MB). Drop them from the build output;
+ * browsers only request them when devtools is open, so the missing file is
+ * harmless.
+ */
+const dropSourceMapAssets: Plugin = {
+  name: "dataverse-ide-drop-source-maps",
+  apply: "build",
+  generateBundle(_options, bundle) {
+    for (const name of Object.keys(bundle)) {
+      if (name.endsWith(".map")) {
+        delete bundle[name];
+      }
+    }
+  },
+};
+
+/*
+ * The eagerly loaded monaco/VS Code core is Rollup's entry chunk (~15MB after
+ * the base64-inlining fix below). Splitting it with manualChunks was attempted
+ * and rejected: the monaco packages are one large re-export/import web, and
+ * Rollup adds execution-order side-effect imports between manual chunks that
+ * form cycles, which throw "Cannot access 'x' before initialization" at boot.
+ * Splitting safely would require preserving native module boundaries
+ * (preserveModules), so this remains the one file that needs
+ * Organization.MaxUploadFileSize raised above the 5MB default.
+ */
+
+const HOSTABLE_ASSET_EXTENSIONS =
+  /\.(?:js|mjs|css|html?|xml|txt|json|png|jpe?g|gif|ico|svg|resx|xap|xsl|xslt)$/i;
+
 export default defineConfig({
   // Assets are referenced relative to the page (base "./"), so the bundle works
   // under any Dataverse web-resource folder, e.g. /WebResources/dv_ide/
@@ -303,22 +352,58 @@ export default defineConfig({
     chunkSizeWarningLimit: 5000,
     target: "es2022",
     sourcemap: false,
-    // NOTE: don't add manualChunks or hash-free file names here - both
-    // explode the module graph:
-    //  - topical manualChunks cut through genuine dependency cycles in the
-    //    monaco/VSCode sources ("Cannot access 'v' before initialization")
-    //  - hash-free names break the bundled webWorkerExtensionHostIframe.html
-    //    (relative module specifiers stop resolving)
-    // The web resources don't support the `.wasm` type:
-    // inline every wasm asset regardless of size (onig.wasm 466KB,
-    // diff_wasm_bg.wasm 118KB), and other binary assets under 1MB
-    // (codicon.ttf 153KB) as base64 data URLs into the JS chunks instead.
-    // Returning false for larger non-wasm assets keeps tsserver's multi-MB
-    // JS out of the main chunk (a global numeric raise would inline it and
-    // produce a >100MB chunk). esbuild.wasm is force-inlined separately
-    // through the virtual module in webResourceWasmInline.
-    assetsInlineLimit: (filePath, content) =>
-      filePath.endsWith(".wasm") || content.length < 1000000,
+    // NOTE: don't use hash-free file names here - they break the bundled
+    // webWorkerExtensionHostIframe.html (relative module specifiers stop
+    // resolving).
+    // Dataverse web resources support js/json(txt)/css/html/svg/png/... but
+    // NOT `.wasm` or fonts. Keep only those unhostable binaries inline as
+    // base64 data URLs; everything else must stay a separate asset (and thus
+    // its own sub-5MB web resource).
+    //
+    // Inlining every asset under 1MB was the main cause of the 45MB entry
+    // chunk: the monaco default extensions register their language-server
+    // scripts/text via `new URL(...)`, and each of those got base64-inlined
+    // (~34MB of data: URLs in the entry chunk alone). esbuild.wasm is shipped
+    // as a separate gzip asset through webResourceWasmInline.
+    assetsInlineLimit: (filePath, content) => {
+      const assetPath = filePath.split("?")[0].toLowerCase();
+
+      /*
+       * Source maps are dropped entirely by dropSourceMapAssets; inlining
+       * them here would put tens of MB of base64 back into the chunks.
+       */
+      if (assetPath.endsWith(".map")) {
+        return false;
+      }
+
+      // No Dataverse web-resource type exists for wasm or fonts.
+      if (assetPath.endsWith(".wasm") || /\.(woff2?|ttf|otf|eot)$/.test(assetPath)) {
+        return true;
+      }
+
+      /*
+       * Hostable types stay separate assets (and therefore separate web
+       * resources). Everything else (README.md, .ts/.tmLanguage snippets,
+       * ...) is unhostable, so embed it as a data URL like before; these are
+       * all tiny text resources.
+       */
+      if (!HOSTABLE_ASSET_EXTENSIONS.test(assetPath)) {
+        return true;
+      }
+
+      /*
+       * Never inline JS/HTML/CSS resources: JS files can be imported
+       * relatively by prebuilt extension modules or booted as workers, and
+       * HTML is used for iframes. Collapse the many tiny JSON/text/icon
+       * resources (d.ts files, package.json, codicons) into data URLs to
+       * avoid hundreds of web-resource records.
+       */
+      if (/\.(?:js|mjs|html?|css)$/.test(assetPath)) {
+        return false;
+      }
+
+      return content.length < 16 * 1024;
+    },
   },
   worker: {
     format: "es",
@@ -331,6 +416,7 @@ export default defineConfig({
     configureResponseHeaders,
     forcePreventTransformAssets,
     webResourceWasmInline,
+    dropSourceMapAssets,
   ],
   optimizeDeps: {
     /*

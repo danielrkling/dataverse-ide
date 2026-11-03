@@ -46,6 +46,7 @@ const WEB_RESOURCE_TYPES = {
   css: 2,
   js: 3,
   mjs: 3,
+  json: 3,
   xml: 4,
   txt: 4,
   png: 5,

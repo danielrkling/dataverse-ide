@@ -2,7 +2,11 @@ import type * as vscodeType from "vscode";
 
 import { EsbuildBuildRunner, type BuildOutputFile } from "./buildRunner.js";
 
+import guideContent from "./GUIDE.md?raw";
+
 import { contributeExtensionManifest } from "../api.js";
+
+import { registerGuide } from "../shared/guide.js";
 
 import { createWatchStatus } from "../watchStatus.js";
 
@@ -17,13 +21,7 @@ import {
 
 import { EsbuildWatcher } from "./watcher.js";
 
-import {
-  ensureWorkspaceDirectory,
-  notifyWorkspaceFilesChanged,
-  statWorkspaceFile,
-  writeWorkspaceFile,
-  type WorkspaceFileWrite,
-} from "../../workspace/workspaceFsFast.js";
+import { ensureWorkspaceDirectory } from "../../workspace/workspaceFs.js";
 
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
@@ -84,12 +82,12 @@ async function writeOutputs(
   skipped: number;
   bytes: number;
   elapsedMs: number;
-  slow: { path: string; bytes: number; ms: number }[];
+  slow: { path: string; bytes: number; ms: number; ensureMs: number }[];
 }> {
   const started = performance.now();
   const written: vscodeType.Uri[] = [];
-  const changes: WorkspaceFileWrite[] = [];
-  const slow: { path: string; bytes: number; ms: number }[] = [];
+  const ensuredDirectories = new Set<string>();
+  const slow: { path: string; bytes: number; ms: number; ensureMs: number }[] = [];
   let skipped = 0;
   let bytes = 0;
 
@@ -116,7 +114,7 @@ async function writeOutputs(
        * without reading the whole output back.
        */
       try {
-        await statWorkspaceFile(vscode, outFile);
+        await vscode.workspace.fs.stat(outFile);
         skipped += 1;
         continue;
       } catch {
@@ -124,32 +122,35 @@ async function writeOutputs(
       }
     }
 
-    await ensureWorkspaceDirectory(vscode, parent);
+    const parentKey = parent.toString();
+    const ensureStarted = performance.now();
+    let ensureMs = 0;
+
+    if (!ensuredDirectories.has(parentKey)) {
+      await ensureWorkspaceDirectory(vscode, parent);
+      ensuredDirectories.add(parentKey);
+      ensureMs = performance.now() - ensureStarted;
+    }
 
     const fileStarted = performance.now();
 
-    const created = await writeWorkspaceFile(vscode, outFile, encoded);
+    await vscode.workspace.fs.writeFile(outFile, encoded);
 
     const fileMs = performance.now() - fileStarted;
 
-    if (fileMs >= 250) {
-      slow.push({ path: segments.join("/"), bytes: encoded.length, ms: fileMs });
-    }
-
-    /*
-     * The write bypasses IFileService when the workspace provider is mounted.
-     * Remember it so watchers can be notified after every output is written.
-     */
-    if (created != null) {
-      changes.push({ uri: outFile, created });
+    if (fileMs >= 250 || ensureMs >= 250) {
+      slow.push({
+        path: segments.join("/"),
+        bytes: encoded.length,
+        ms: fileMs,
+        ensureMs,
+      });
     }
 
     lastWrittenOutputs.set(key, output.text);
 
     written.push(outFile);
   }
-
-  notifyWorkspaceFilesChanged(changes);
 
   return {
     written,
@@ -253,6 +254,10 @@ export default {
           command: "dataverseIde.esbuild.reloadConfig",
           title: "esbuild: Reload Config",
         },
+        {
+          command: "dataverseIde.esbuild.openGuide",
+          title: "esbuild: How-to Guide",
+        },
       ],
       configuration: {
         title: "esbuild",
@@ -287,6 +292,12 @@ export default {
           },
         },
       },
+    });
+
+    const guideRegistration = registerGuide({
+      vscode,
+      extensionId: "esbuild",
+      content: guideContent,
     });
 
     const runner = new EsbuildBuildRunner(vscode, context.workspaceRootUri, outputChannel);
@@ -550,7 +561,11 @@ export default {
         if (writeResult.slow.length > 0) {
           outputChannel.appendLine(
             `[esbuild] slow writes: ${writeResult.slow
-              .map((file) => `${file.path} ${file.bytes}b ${Math.round(file.ms)}ms`)
+              .map(
+                (file) =>
+                  `${file.path} ${file.bytes}b ` +
+                  `(${Math.round(file.ensureMs)}ms ensure, ${Math.round(file.ms)}ms write)`,
+              )
               .join(", ")}`,
           );
         }
@@ -895,6 +910,8 @@ export default {
         configureSolidCommand.dispose();
         outputChannelCommand.dispose();
         reloadConfigCommand.dispose();
+
+        guideRegistration.dispose();
 
         runner.dispose();
       },

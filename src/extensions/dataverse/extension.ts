@@ -11,6 +11,10 @@ import {
 
 import { DataverseWebResourceClient, type DataverseWebResource } from "./webResourceClient.js";
 
+import guideContent from "./GUIDE.md?raw";
+
+import { registerGuide } from "../shared/guide.js";
+
 export type DataverseUploadController = {
   dispose: () => void;
 };
@@ -238,6 +242,10 @@ export async function installDataverseUploadExtension(
             command: "dataverseIde.dataverse.openConfig",
             title: "Dataverse: Open dataverse.config.json",
           },
+          {
+            command: "dataverseIde.dataverse.openGuide",
+            title: "Dataverse: How-to Guide",
+          },
         ],
 
         menus: {
@@ -262,6 +270,9 @@ export async function installDataverseUploadExtension(
             },
             {
               command: "dataverseIde.dataverse.openConfig",
+            },
+            {
+              command: "dataverseIde.dataverse.openGuide",
             },
           ],
 
@@ -870,7 +881,20 @@ import { createWatchStatus } from "../watchStatus.js";
 export default {
   id: "dataverse",
 
-  async activate(context: ExtensionContext): Promise<void> {
+  async activate(context: ExtensionContext): Promise<vscodeType.Disposable | void> {
+    const vscodeBottom: typeof vscodeTypeBottom = context.vscode;
+
+    /*
+     * Register the guide before the workspace guard: the guide explains that
+     * uploads need a local folder, so it should still open in an OPFS
+     * workspace where activation stops below.
+     */
+    const guideRegistration = registerGuide({
+      vscode: vscodeBottom,
+      extensionId: "dataverse",
+      content: guideContent,
+    });
+
     const handle = context.workspaceDirectoryHandle;
 
     if (handle == null) {
@@ -878,8 +902,6 @@ export default {
         "The dataverse extension currently requires a local workspace directory handle.",
       );
     }
-
-    const vscodeBottom: typeof vscodeTypeBottom = context.vscode;
 
     await contributeExtensionManifest({
       id: "dataverse",
@@ -964,5 +986,7 @@ export default {
     );
 
     await installDataverseUploadExtension(context.workspaceRootUri);
+
+    return guideRegistration;
   },
 } satisfies IdeExtension;

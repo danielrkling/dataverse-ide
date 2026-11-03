@@ -6,7 +6,7 @@
  *   npx esbuild tests/nodeRuntime.sanity.mts --bundle --platform=node \
  *     --format=esm --external:almostnode --external:esbuild \
  *     --alias:esbuild-wasm=./tests/esbuildNativeShim.mjs \
- *     --alias:virtual:esbuild-wasm-binary=./tests/esbuildWasmBinaryMock.mjs \
+ *     --alias:virtual:esbuild-wasm-gzip-url=./tests/esbuildWasmBinaryMock.mjs \
  *     --outfile=.tmp-node-v2-sanity.mjs
  *   node .tmp-node-v2-sanity.mjs
  *   rm .tmp-node-v2-sanity.mjs

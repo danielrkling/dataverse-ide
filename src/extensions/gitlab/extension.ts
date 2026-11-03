@@ -6,6 +6,10 @@ import { createPanelIcon, PANEL_GLYPHS, registerExtensionPanel } from "../panels
 
 import { cloneRepository } from "../git/service.js";
 
+import guideContent from "./GUIDE.md?raw";
+
+import { registerGuide } from "../shared/guide.js";
+
 import {
   GITLAB_CONFIGURATION_PROPERTIES,
   GITLAB_SETTING_DEFAULTS,
@@ -265,6 +269,10 @@ export default {
         {
           command: COMMAND_CREATE_MR,
           title: "GitLab: New Merge Request",
+        },
+        {
+          command: "dataverseIde.gitlab.openGuide",
+          title: "GitLab: How-to Guide",
         },
       ],
       configuration: {
@@ -1017,10 +1025,17 @@ export default {
       },
     );
 
+    const guideRegistration = registerGuide({
+      vscode,
+      extensionId: "gitlab",
+      content: guideContent,
+    });
+
     outputChannel.appendLine("[gitlab] extension activated.");
 
     return {
       dispose() {
+        guideRegistration.dispose();
         gitlabPanel.dispose();
         connectCommand.dispose();
         disconnectCommand.dispose();

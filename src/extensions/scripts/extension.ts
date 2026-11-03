@@ -1,18 +1,14 @@
-import type * as vscodeType from 'vscode'
+import type * as vscodeType from "vscode";
 
-import {
-  contributeExtensionManifest,
-} from '../api.js'
+import { contributeExtensionManifest } from "../api.js";
 
-import {
-  createWatchStatus,
-  type WatchStatus,
-} from '../watchStatus.js'
+import guideContent from "./GUIDE.md?raw";
 
-import type {
-  ExtensionContext,
-  IdeExtension,
-} from '../api.js'
+import { registerGuide } from "../shared/guide.js";
+
+import { createWatchStatus, type WatchStatus } from "../watchStatus.js";
+
+import type { ExtensionContext, IdeExtension } from "../api.js";
 
 /*
  * Scripts extension: run other IDE extension commands together, driven
@@ -48,15 +44,15 @@ import type {
  *     extension has to know about this one.
  */
 
-const CONFIG_SECTION = 'dataverseIde'
-const SETTING_SCRIPTS = 'scripts.scripts'
+const CONFIG_SECTION = "dataverseIde";
+const SETTING_SCRIPTS = "scripts.scripts";
 
-const COMMAND_RUN = 'dataverseIde.scripts.run'
+const COMMAND_RUN = "dataverseIde.scripts.run";
 
 type ScriptCommand = {
-  id: string
-  args: unknown[]
-}
+  id: string;
+  args: unknown[];
+};
 
 /*
  * A step is a list of commands: one command → run alone (series);
@@ -64,212 +60,209 @@ type ScriptCommand = {
  * (`["a", "b"]`), or keyed objects (`{ "cmd": args }`, where multiple
  * keys are a parallel batch).
  */
-type ScriptStep = ScriptCommand[]
+type ScriptStep = ScriptCommand[];
 
 type ScriptDefinition = {
-  steps: ScriptStep[]
-  onError?: 'abort' | 'continue'
-}
+  steps: ScriptStep[];
+  onError?: "abort" | "continue";
+};
 
-type ParsedScripts = Record<string, ScriptDefinition>
+type ParsedScripts = Record<string, ScriptDefinition>;
 
 function parseCommand(id: unknown, argsValue: unknown = []): ScriptCommand | undefined {
-  if (typeof id !== 'string' || id.trim().length === 0) {
-    return undefined
+  if (typeof id !== "string" || id.trim().length === 0) {
+    return undefined;
   }
 
   /*
    * Args value is positional: an array spreads across
    * executeCommand(id, ...args); anything else passes as one argument.
    */
-  const args = Array.isArray(argsValue) ? argsValue : [argsValue]
+  const args = Array.isArray(argsValue) ? argsValue : [argsValue];
 
-  return { id, args }
+  return { id, args };
 }
 
 /** Parses one step entry into a (possibly parallel) command group. */
 function parseStep(entry: unknown): ScriptStep | undefined {
-  if (typeof entry === 'string') {
+  if (typeof entry === "string") {
     if (entry.trim().length === 0) {
-      return undefined
+      return undefined;
     }
 
-    return [{ id: entry, args: [] }]
+    return [{ id: entry, args: [] }];
   }
 
   if (Array.isArray(entry)) {
-    const group: ScriptCommand[] = []
+    const group: ScriptCommand[] = [];
 
     for (const command of entry) {
-      const parsed = parseStep(command)
+      const parsed = parseStep(command);
 
       if (parsed == null) {
-        return undefined
+        return undefined;
       }
 
-      group.push(...parsed)
+      group.push(...parsed);
     }
 
-    return group
+    return group;
   }
 
-  if (typeof entry === 'object' && entry !== null) {
-    const group: ScriptCommand[] = []
+  if (typeof entry === "object" && entry !== null) {
+    const group: ScriptCommand[] = [];
 
     for (const [id, argsValue] of Object.entries(entry)) {
-      const command = parseCommand(id, argsValue)
+      const command = parseCommand(id, argsValue);
 
       if (command == null || id.trim().length === 0) {
-        return undefined
+        return undefined;
       }
 
-      group.push(command)
+      group.push(command);
     }
 
-    return group.length > 0 ? group : undefined
+    return group.length > 0 ? group : undefined;
   }
 
-  return undefined
+  return undefined;
 }
 
 /** Parses the steps list from a script value (string, array, or object). */
 function parseSteps(value: unknown): ScriptStep[] | undefined {
   if (Array.isArray(value)) {
-    const steps: ScriptStep[] = []
+    const steps: ScriptStep[] = [];
 
     for (const entry of value) {
-      const step = parseStep(entry)
+      const step = parseStep(entry);
 
       if (step == null) {
-        return undefined
+        return undefined;
       }
 
-      steps.push(step)
+      steps.push(step);
     }
 
-    return steps
+    return steps;
   }
 
-  const step = parseStep(value)
+  const step = parseStep(value);
 
-  return step == null ? undefined : [step]
+  return step == null ? undefined : [step];
 }
 
 /*
  * Reads the setting. Returns the valid scripts plus a list of problems;
  * invalid entries are surfaced to the user instead of silently dropped.
  */
-function readScripts(
-  vscode: typeof vscodeType,
-): { scripts: ParsedScripts; problems: string[] } {
-  const scripts: ParsedScripts = {}
-  const problems: string[] = []
+function readScripts(vscode: typeof vscodeType): { scripts: ParsedScripts; problems: string[] } {
+  const scripts: ParsedScripts = {};
+  const problems: string[] = [];
 
-  const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
-  const raw = config.get<unknown>(SETTING_SCRIPTS)
+  const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+  const raw = config.get<unknown>(SETTING_SCRIPTS);
 
   if (raw == null) {
-    return { scripts, problems }
+    return { scripts, problems };
   }
 
-  if (typeof raw !== 'object' || Array.isArray(raw)) {
-    problems.push(
-      `${CONFIG_SECTION}.${SETTING_SCRIPTS} must be an object of named scripts.`,
-    )
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    problems.push(`${CONFIG_SECTION}.${SETTING_SCRIPTS} must be an object of named scripts.`);
 
-    return { scripts, problems }
+    return { scripts, problems };
   }
 
   for (const [name, value] of Object.entries(raw)) {
     if (name.trim().length === 0) {
-      problems.push('Script names cannot be empty.')
-      continue
+      problems.push("Script names cannot be empty.");
+      continue;
     }
 
-    let onError: 'abort' | 'continue' = 'abort'
-    let stepsValue: unknown = value
+    let onError: "abort" | "continue" = "abort";
+    let stepsValue: unknown = value;
 
-    if (
-      typeof value === 'object' &&
-      value !== null &&
-      !Array.isArray(value) &&
-      'steps' in value
-    ) {
-      const shaped = value as { steps?: unknown; onError?: unknown }
+    if (typeof value === "object" && value !== null && !Array.isArray(value) && "steps" in value) {
+      const shaped = value as { steps?: unknown; onError?: unknown };
 
-      stepsValue = shaped.steps
+      stepsValue = shaped.steps;
 
-      if (shaped.onError === 'continue') {
-        onError = 'continue'
-      } else if (shaped.onError !== undefined && shaped.onError !== 'abort') {
-        problems.push(
-          `Script "${name}": onError must be "abort" or "continue".`,
-        )
+      if (shaped.onError === "continue") {
+        onError = "continue";
+      } else if (shaped.onError !== undefined && shaped.onError !== "abort") {
+        problems.push(`Script "${name}": onError must be "abort" or "continue".`);
       }
     }
 
-    const steps = parseSteps(stepsValue)
+    const steps = parseSteps(stepsValue);
 
     if (steps == null) {
       problems.push(
         `Script "${name}": steps must be command ids, arrays of command ids, or keyed objects ({ "command": args }).`,
-      )
-      continue
+      );
+      continue;
     }
 
-    scripts[name] = { steps, onError }
+    scripts[name] = { steps, onError };
   }
 
-  return { scripts, problems }
+  return { scripts, problems };
 }
 
 function stepLabel(command: ScriptCommand): string {
   if (command.args.length === 0) {
-    return command.id
+    return command.id;
   }
 
-  const args = JSON.stringify(command.args).replaceAll('"', "'")
+  const args = JSON.stringify(command.args).replaceAll('"', "'");
 
-  return `${command.id} ${args}`
+  return `${command.id} ${args}`;
 }
 
 function stepGroupLabel(step: ScriptStep): string {
-  return step.map(stepLabel).join(', ')
+  return step.map(stepLabel).join(", ");
 }
 
 const extension: IdeExtension = {
-  id: 'scripts',
+  id: "scripts",
 
-  async activate(
-    context: ExtensionContext,
-  ): Promise<vscodeType.Disposable | void> {
-    const { vscode, outputChannel } = context
+  async activate(context: ExtensionContext): Promise<vscodeType.Disposable | void> {
+    const { vscode, outputChannel } = context;
+
+    const guideRegistration = registerGuide({
+      vscode,
+      extensionId: "scripts",
+      content: guideContent,
+    });
 
     await contributeExtensionManifest({
-      id: 'scripts',
-      displayName: 'Dataverse IDE Scripts',
-      description: 'Run user-defined series/parallel command scripts.',
+      id: "scripts",
+      displayName: "Dataverse IDE Scripts",
+      description: "Run user-defined series/parallel command scripts.",
       commands: [
         {
           command: COMMAND_RUN,
-          title: 'Scripts: Run Script',
+          title: "Scripts: Run Script",
+        },
+        {
+          command: "dataverseIde.scripts.openGuide",
+          title: "Scripts: How-to Guide",
         },
       ],
       configuration: {
-        title: 'Scripts',
+        title: "Scripts",
         properties: {
           [`${CONFIG_SECTION}.${SETTING_SCRIPTS}`]: {
-            type: 'object',
+            type: "object",
             default: {},
             markdownDescription:
-              'Named command scripts (like npm run scripts) that execute other IDE ' +
-              'extension commands. A script is a list of steps run in series; a step ' +
-              'that is an array runs its commands in parallel. A step can carry ' +
-              'arguments as a keyed object whose key is the command id ' +
+              "Named command scripts (like npm run scripts) that execute other IDE " +
+              "extension commands. A script is a list of steps run in series; a step " +
+              "that is an array runs its commands in parallel. A step can carry " +
+              "arguments as a keyed object whose key is the command id " +
               '(`{ "cmd": args }`); the value spreads as positional arguments to ' +
-              'executeCommand. Optional `onError` per script: `abort` (default) or ' +
-              '`continue`. Example:\n\n' +
-              '```json\n' +
+              "executeCommand. Optional `onError` per script: `abort` (default) or " +
+              "`continue`. Example:\n\n" +
+              "```json\n" +
               '"dataverseIde.scripts.scripts": {\n' +
               '  "web": {\n' +
               '    "steps": [\n' +
@@ -278,66 +271,66 @@ const extension: IdeExtension = {
               '      [ "dataverseIde.esbuild.startWatch",\n' +
               '        "dataverseIde.tailwind.startWatch",\n' +
               '        "dataverseIde.dataverse.startWatch" ]\n' +
-              '    ],\n' +
+              "    ],\n" +
               '    "onError": "abort"\n' +
-              '  }\n' +
-              '}\n' +
-              '```',
+              "  }\n" +
+              "}\n" +
+              "```",
           },
         },
       },
-    })
+    });
 
-    outputChannel.appendLine('[scripts] extension activated.')
+    outputChannel.appendLine("[scripts] extension activated.");
 
-    let running = false
+    let running = false;
 
     const status: WatchStatus = createWatchStatus(vscode, {
-      id: 'scripts',
-      label: 'script',
-      busyLabel: 'Running',
+      id: "scripts",
+      label: "script",
+      busyLabel: "Running",
       priority: 90,
       isRunning: () => running,
       start: () => {
-        void vscode.commands.executeCommand(COMMAND_RUN)
+        void vscode.commands.executeCommand(COMMAND_RUN);
       },
       showOutput: () => {
-        outputChannel.show(true)
+        outputChannel.show(true);
       },
       hideWhenStopped: true,
-    })
+    });
 
     async function runSeries(
       name: string,
       steps: ScriptStep[],
-      onError: 'abort' | 'continue',
+      onError: "abort" | "continue",
     ): Promise<boolean> {
-      running = true
-      status.update()
+      running = true;
+      status.update();
 
       outputChannel.appendLine(
         `[scripts] ▶ ${name} (${steps.length} step(s), onError: ${onError})`,
-      )
+      );
 
-      let failed = false
-      let aborted = false
+      let failed = false;
+      let aborted = false;
 
       for (let index = 0; index < steps.length; index++) {
         if (aborted) {
           outputChannel.appendLine(
             `[scripts] ✖ ${name}: aborted at step ${index + 1}/${steps.length} (onError: abort)`,
-          )
+          );
 
-          break
+          break;
         }
 
-        const step = steps[index]
-        const isBatch = step.length > 1
-        const label = stepGroupLabel(step)
+        const step = steps[index];
+        const isBatch = step.length > 1;
+        const label = stepGroupLabel(step);
 
         outputChannel.appendLine(
           `[scripts] ${name} step ${index + 1}/${steps.length}: ${isBatch ? `parallel (${label})` : label}`,
-        )
+        );
 
         /*
          * Parallel batches always run to completion (allSettled) so the
@@ -345,121 +338,109 @@ const extension: IdeExtension = {
          * mid-batch.
          */
         const results = await Promise.allSettled(
-          step.map((command) =>
-            vscode.commands.executeCommand(command.id, ...command.args),
-          ),
-        )
+          step.map((command) => vscode.commands.executeCommand(command.id, ...command.args)),
+        );
 
         const failures = results.filter(
-          (result) => result.status === 'rejected',
-        ) as PromiseRejectedResult[]
+          (result) => result.status === "rejected",
+        ) as PromiseRejectedResult[];
 
         for (const failure of failures) {
           const reason =
-            failure.reason instanceof Error
-              ? failure.reason.message
-              : String(failure.reason)
+            failure.reason instanceof Error ? failure.reason.message : String(failure.reason);
 
-          outputChannel.appendLine(
-            `[scripts] ${name} step failed (${label}): ${reason}`,
-          )
+          outputChannel.appendLine(`[scripts] ${name} step failed (${label}): ${reason}`);
         }
 
         if (failures.length > 0) {
-          failed = true
+          failed = true;
 
-          if (onError === 'abort') {
-            aborted = true
+          if (onError === "abort") {
+            aborted = true;
           }
         }
       }
 
       if (!failed) {
-        outputChannel.appendLine(`[scripts] ✔ ${name} finished.`)
+        outputChannel.appendLine(`[scripts] ✔ ${name} finished.`);
       }
 
-      running = false
-      status.update()
+      running = false;
+      status.update();
 
-      return !failed
+      return !failed;
     }
 
     const runCommand = vscode.commands.registerCommand(
       COMMAND_RUN,
       async (arg?: string | unknown) => {
-        const { scripts, problems } = readScripts(vscode)
+        const { scripts, problems } = readScripts(vscode);
 
         for (const problem of problems) {
-          outputChannel.appendLine(`[scripts] config: ${problem}`)
+          outputChannel.appendLine(`[scripts] config: ${problem}`);
         }
 
         if (problems.length > 0) {
-          outputChannel.show(true)
+          outputChannel.show(true);
         }
 
-        const names = Object.keys(scripts)
+        const names = Object.keys(scripts);
 
         if (names.length === 0) {
           outputChannel.appendLine(
-            '[scripts] no scripts configured; see the dataverseIde.scripts.scripts setting.',
-          )
+            "[scripts] no scripts configured; see the dataverseIde.scripts.scripts setting.",
+          );
 
           await vscode.window.showInformationMessage(
             'Scripts: none configured. Define scripts under the "dataverseIde.scripts.scripts" setting.',
-          )
+          );
 
-          return
+          return;
         }
 
-        let selected: string | undefined
+        let selected: string | undefined;
 
-        if (typeof arg === 'string' && scripts[arg] != null) {
-          selected = arg
+        if (typeof arg === "string" && scripts[arg] != null) {
+          selected = arg;
         } else {
           const entries = names.map((name) => {
-            const steps = scripts[name].steps
+            const steps = scripts[name].steps;
 
             return {
               label: `$(run) ${name}`,
-              description:
-                steps.length === 1
-                  ? stepGroupLabel(steps[0])
-                  : `${steps.length} steps`,
-              detail: steps.map(stepGroupLabel).join(' → '),
+              description: steps.length === 1 ? stepGroupLabel(steps[0]) : `${steps.length} steps`,
+              detail: steps.map(stepGroupLabel).join(" → "),
               name,
-            }
-          })
+            };
+          });
 
           const picked = await vscode.window.showQuickPick(entries, {
-            placeHolder: 'Run script',
+            placeHolder: "Run script",
             matchOnDescription: true,
             matchOnDetail: true,
-          })
+          });
 
-          selected = picked?.name
+          selected = picked?.name;
         }
 
         if (selected == null) {
-          return
+          return;
         }
 
-        const script = scripts[selected]
+        const script = scripts[selected];
 
-        await runSeries(
-          selected,
-          script.steps,
-          script.onError ?? 'abort',
-        )
+        await runSeries(selected, script.steps, script.onError ?? "abort");
       },
-    )
+    );
 
     return {
       dispose() {
-        runCommand.dispose()
-        status.dispose()
+        runCommand.dispose();
+        status.dispose();
+        guideRegistration.dispose();
       },
-    }
+    };
   },
-} satisfies IdeExtension
+} satisfies IdeExtension;
 
-export default extension
+export default extension;

@@ -5,7 +5,7 @@
  *   npx esbuild tests/esbuildBuildSession.sanity.mts --bundle --platform=node \
  *     --format=esm \
  *     --alias:esbuild-wasm=./tests/esbuildNativeShim.mjs \
- *     --alias:virtual:esbuild-wasm-binary=./tests/esbuildWasmBinaryMock.mjs \
+ *     --alias:virtual:esbuild-wasm-gzip-url=./tests/esbuildWasmBinaryMock.mjs \
  *     --external:esbuild --external:@babel/* --external:@solidjs/babel-plugin \
  *     --external:babel-preset-solid --external:@babel/preset-typescript \
  *     --external:typescript --external:@tagged-jsx/transform \

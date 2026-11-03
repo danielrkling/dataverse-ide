@@ -9,6 +9,11 @@ import { ContextKeyExpr } from "@codingame/monaco-vscode-api/vscode/vs/platform/
 import { IWorkbenchExtensionManagementService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensionManagement/common/extensionManagement.service";
 
 import { contributeExtensionManifest } from "../api.js";
+
+import guideContent from "./GUIDE.md?raw";
+
+import { registerGuide } from "../shared/guide.js";
+
 import {
   activeVsixIds,
   installVsixFromBytes,
@@ -239,6 +244,10 @@ export default {
           command: COMMAND_LIST,
           title: "VSIX: Show Installed Extensions",
         },
+        {
+          command: "dataverseIde.vsix.openGuide",
+          title: "VSIX: How-to Guide",
+        },
       ],
     });
 
@@ -247,6 +256,12 @@ export default {
      * container title. The built-in action is hidden on web because it is
      * gated on a local/remote extension management server.
      */
+    const guideRegistration = registerGuide({
+      vscode,
+      extensionId: "vsix",
+      content: guideContent,
+    });
+
     const menuDisposable = MenuRegistry.appendMenuItem(MenuId.ViewContainerTitle, {
       command: {
         id: COMMAND_INSTALL,
@@ -287,6 +302,7 @@ export default {
       vscode.commands.registerCommand(COMMAND_LIST, () => listCommand(vscode)),
       menuDisposable,
       managementListener,
+      guideRegistration,
     );
   },
 } satisfies IdeExtension;

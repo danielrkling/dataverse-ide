@@ -19,9 +19,15 @@ import { loadTailwindClassIndex, type TailwindClassIndex } from "./theme.js";
 
 import { contributeCommandManifest } from "../api.js";
 
+import guideContent from "./GUIDE.md?raw";
+
+import { registerGuide } from "../shared/guide.js";
+
 import { EsbuildWatcher } from "../esbuild/watcher.js";
 
 import { createWatchStatus } from "../watchStatus.js";
+
+import { ensureWorkspaceDirectory } from "../../workspace/workspaceFs.js";
 
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
@@ -109,6 +115,12 @@ export default {
 
   async activate(context: ExtensionContext): Promise<vscodeType.Disposable | void> {
     const { vscode, outputChannel } = context;
+
+    const guideRegistration = registerGuide({
+      vscode,
+      extensionId: "tailwind",
+      content: guideContent,
+    });
 
     /*
      * Main-thread esbuild compiler. It reads @plugin modules directly through
@@ -276,6 +288,10 @@ export default {
           command: "dataverseIde.tailwind.showOutput",
           title: "Tailwind: Show Output",
         },
+        {
+          command: "dataverseIde.tailwind.openGuide",
+          title: "Tailwind: How-to Guide",
+        },
       ],
       configuration: {
         title: "Dataverse IDE Tailwind",
@@ -412,7 +428,8 @@ export default {
 
         const parentParts = outputParts.slice(0, -1);
 
-        await vscode.workspace.fs.createDirectory(
+        await ensureWorkspaceDirectory(
+          vscode,
           parentParts.length > 0
             ? vscode.Uri.joinPath(context.workspaceRootUri, ...parentParts)
             : context.workspaceRootUri,
@@ -626,6 +643,8 @@ export default {
 
         completionProviderDisposable.dispose();
         hoverProviderDisposable.dispose();
+
+        guideRegistration.dispose();
       },
     };
   },

@@ -1,10 +1,10 @@
 /*
  * Ambient declaration for the virtual module provided by the
- * `dataverse-ide-esbuild-wasm-inline` plugin in vite.config.ts. It exports
- * the esbuild.wasm binary contents as a base64 string.
+ * `dataverse-ide-wasm-inline` plugin in vite.config.ts. It exports the URL of
+ * an emitted gzip-compressed, base64-encoded esbuild.wasm asset.
  */
-declare module 'virtual:esbuild-wasm-binary' {
-  const wasmBase64: string
+declare module "virtual:esbuild-wasm-gzip-url" {
+  const wasmGzipUrl: string;
 
-  export default wasmBase64
+  export default wasmGzipUrl;
 }

@@ -28,7 +28,7 @@
  */
 
 import * as esbuild from "esbuild-wasm";
-import wasmBase64 from "virtual:esbuild-wasm-binary";
+import esbuildWasmGzipUrl from "virtual:esbuild-wasm-gzip-url";
 
 import type * as vscodeType from "vscode";
 
@@ -392,10 +392,31 @@ function withVirtualFiles(
   };
 }
 
+async function loadEsbuildWasm(): Promise<ArrayBuffer> {
+  /*
+   * The wasm binary ships as a gzip-compressed base64 .txt web resource
+   * (~4.2MB) because Dataverse has no .wasm resource type and a 5MB default
+   * per-file limit. DecompressionStream keeps this dependency-free.
+   */
+  const response = await fetch(esbuildWasmGzipUrl);
+
+  if (!response.ok) {
+    throw new Error(`Failed to load esbuild.wasm (${response.status} ${response.statusText}).`);
+  }
+
+  const compressed = Uint8Array.from(atob((await response.text()).trim()), (character) =>
+    character.charCodeAt(0),
+  );
+
+  const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("gzip"));
+
+  return new Response(stream).arrayBuffer();
+}
+
 async function ensureInitialized(): Promise<void> {
   if (initialization == null) {
     initialization = (async () => {
-      const bytes = Uint8Array.from(atob(wasmBase64), (character) => character.charCodeAt(0));
+      const bytes = await loadEsbuildWasm();
 
       /*
        * Chrome rejects synchronous new WebAssembly.Module(...) compilation

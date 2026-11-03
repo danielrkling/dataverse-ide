@@ -174,10 +174,10 @@ export class WorkspaceFileSystemProvider implements IFileSystemProviderWithFileR
   /**
    * Emits change events for writes performed outside IFileService.
    *
-   * Extensions that call this provider directly (see workspaceFsFast.ts) skip
-   * the file service, so they must publish the change themselves. Ext-host
-   * watchers (createFileSystemWatcher) listen to this event through
-   * IFileService, so notifying here keeps them firing for direct writes.
+   * Normal `vscode.workspace.fs` writes are observed through the file service
+   * (or the browser FileSystemObserver). A caller that reaches the provider
+   * directly skips both, so it must publish the change through this method to
+   * keep `createFileSystemWatcher` subscribers in sync.
    */
   notifyFileChanges(changes: readonly IFileChange[]): void {
     if (changes.length > 0) {

@@ -2,6 +2,10 @@ import type * as vscodeType from "vscode";
 
 import { contributeExtensionManifest } from "../api.js";
 
+import guideContent from "./GUIDE.md?raw";
+
+import { registerGuide } from "../shared/guide.js";
+
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
 import { createDirectNodeEngine } from "./engine.js";
@@ -54,6 +58,10 @@ export default {
           command: COMMAND_RUN_ENTRY_WITH_PERMISSIONS,
           title: "Node: Run Active File with Permissions…",
         },
+        {
+          command: "dataverseIde.node-runtime.openGuide",
+          title: "Node: How-to Guide",
+        },
       ],
       configuration: {
         title: "Node Runtime",
@@ -69,6 +77,12 @@ export default {
           },
         },
       },
+    });
+
+    const guideRegistration = registerGuide({
+      vscode,
+      extensionId: "node-runtime",
+      content: guideContent,
     });
 
     const engine = createDirectNodeEngine(vscode, context.workspaceRootUri, outputChannel);
@@ -205,6 +219,7 @@ export default {
         runFileWithPermissionsCommand.dispose();
         runEntryCommand.dispose();
         runEntryWithPermissionsCommand.dispose();
+        guideRegistration.dispose();
         engine.dispose();
       },
     };

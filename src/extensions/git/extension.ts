@@ -3,6 +3,10 @@ import type { IExtensionManifest } from "@codingame/monaco-vscode-api/extensions
 
 import { registerExtensionReplacingPlaceholder } from "../api.js";
 
+import guideContent from "./GUIDE.md?raw";
+
+import { registerGuide } from "../shared/guide.js";
+
 import {
   addRemote,
   cloneRepository,
@@ -488,6 +492,10 @@ export async function installDataverseGitExtension(
         {
           command: "dataverseGit.forgetCredentials",
           title: "Git: Forget Stored Remote Credentials",
+        },
+        {
+          command: "dataverseIde.git.openGuide",
+          title: "Git: How-to Guide",
         },
       ],
 
@@ -2897,6 +2905,17 @@ export default {
   id: "git",
 
   async activate(context: ExtensionContext): Promise<vscodeType.Disposable | void> {
+    /*
+     * Register the guide before the workspace guard: the guide explains that
+     * Git needs a local folder, so it should still open in an OPFS workspace
+     * where activation stops below.
+     */
+    const guideRegistration = registerGuide({
+      vscode: context.vscode,
+      extensionId: "git",
+      content: guideContent,
+    });
+
     const handle = context.workspaceDirectoryHandle;
 
     if (handle == null) {
@@ -2920,6 +2939,7 @@ export default {
 
     return {
       dispose() {
+        guideRegistration.dispose();
         controller.dispose();
       },
     };
