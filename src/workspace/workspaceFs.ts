@@ -18,11 +18,11 @@ import type * as vscodeType from "vscode";
 export async function ensureWorkspaceDirectory(
   vscode: typeof vscodeType,
   directoryUri: vscodeType.Uri,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await vscode.workspace.fs.stat(directoryUri);
 
-    return;
+    return false;
   } catch {
     /*
      * Not present (or not readable as a directory). Fall through to the
@@ -31,4 +31,6 @@ export async function ensureWorkspaceDirectory(
   }
 
   await vscode.workspace.fs.createDirectory(directoryUri);
+
+  return true;
 }

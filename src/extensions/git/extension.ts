@@ -19,6 +19,7 @@ import {
   listRemoteBranches,
   createBranchFrom,
   getGitRepositorySnapshot,
+  getGitPathEntry,
   getHeadCommit,
   getRecentCommits,
   getSyncStatus,
@@ -41,6 +42,7 @@ import {
   type GitCredentialsProvider,
   type GitFileStatus,
   type GitRemote,
+  type GitRepositorySnapshot,
   type GitTreeEntry,
 } from "./service.js";
 
@@ -929,6 +931,88 @@ export async function installDataverseGitExtension(
   let refreshInProgress = false;
   let refreshQueued = false;
 
+  /*
+   * Snapshot from the last full scan. Targeted refreshes patch this cache in
+   * place so a single save does not have to rescan the whole workspace.
+   */
+  let lastSnapshot: GitRepositorySnapshot | undefined;
+
+  /*
+   * Paths queued for the next targeted refresh, and whether the next debounced
+   * run must fall back to a full scan (e.g. a .gitignore change can alter the
+   * visibility of unrelated untracked files).
+   */
+  const pendingRefreshPaths = new Set<string>();
+  let fullRefreshRequested = false;
+
+  const MAX_TARGETED_REFRESH_PATHS = 16;
+
+  function renderSnapshotEntries(snapshot: GitRepositorySnapshot): void {
+    /*
+     * A file modified after staging appears in both groups, which matches
+     * normal Git/VS Code behavior: one version is staged and another remains
+     * modified in the working tree.
+     */
+    const changedEntries = snapshot.entries.filter(
+      (entry) => entry.changed || entry.status === "untracked" || entry.status === "deleted",
+    );
+
+    const stagedEntries = snapshot.entries.filter((entry) => entry.staged);
+
+    changesGroup.resourceStates = changedEntries.map((entry) =>
+      createResourceState(vscode, rootUri, entry, "changes"),
+    );
+
+    stagedGroup.resourceStates = stagedEntries.map((entry) =>
+      createResourceState(vscode, rootUri, entry, "staged"),
+    );
+
+    sourceControl.count = changesGroup.resourceStates.length + stagedGroup.resourceStates.length;
+
+    /*
+     * Keep the Explorer decoration cache in sync with the index snapshot.
+     */
+    decorationStatuses.clear();
+
+    for (const entry of new Map(changedEntries.map((entry) => [entry.path, entry.status]))) {
+      decorationStatuses.set(entry[0], entry[1]);
+    }
+
+    for (const entry of stagedEntries) {
+      /*
+       * Staged-only states that are no longer modified in the worktree are
+       * still worth showing in Explorer (the file differs from HEAD).
+       */
+      if (!decorationStatuses.has(entry.path)) {
+        if (entry.status === "modified-and-staged") {
+          decorationStatuses.set(entry.path, "modified-and-staged");
+        } else if (entry.status === "added" || entry.status === "deleted-and-staged") {
+          decorationStatuses.set(entry.path, entry.status);
+        }
+      }
+    }
+
+    fileDecorationRefresh();
+  }
+
+  function finishRefresh(): void {
+    refreshInProgress = false;
+
+    if (refreshQueued) {
+      refreshQueued = false;
+      pendingRefreshPaths.clear();
+      fullRefreshRequested = false;
+      void refresh();
+      return;
+    }
+
+    if (pendingRefreshPaths.size > 0) {
+      const paths = [...pendingRefreshPaths];
+      pendingRefreshPaths.clear();
+      void refreshPaths(paths);
+    }
+  }
+
   async function refresh(): Promise<void> {
     if (refreshInProgress) {
       refreshQueued = true;
@@ -939,6 +1023,8 @@ export async function installDataverseGitExtension(
 
     try {
       const snapshot = await getGitRepositorySnapshot(workspaceHandle);
+
+      lastSnapshot = snapshot;
 
       await vscode.commands.executeCommand(
         "setContext",
@@ -972,51 +1058,7 @@ export async function installDataverseGitExtension(
           ? "Stage files and enter an initial commit message."
           : "Enter a commit message to commit staged changes.";
 
-      /*
-       * A file modified after staging appears in both groups, which matches
-       * normal Git/VS Code behavior: one version is staged and another remains
-       * modified in the working tree.
-       */
-      const changedEntries = snapshot.entries.filter(
-        (entry) => entry.changed || entry.status === "untracked" || entry.status === "deleted",
-      );
-
-      const stagedEntries = snapshot.entries.filter((entry) => entry.staged);
-
-      changesGroup.resourceStates = changedEntries.map((entry) =>
-        createResourceState(vscode, rootUri, entry, "changes"),
-      );
-
-      stagedGroup.resourceStates = stagedEntries.map((entry) =>
-        createResourceState(vscode, rootUri, entry, "staged"),
-      );
-
-      sourceControl.count = changesGroup.resourceStates.length + stagedGroup.resourceStates.length;
-
-      /*
-       * Keep the Explorer decoration cache in sync with the index snapshot.
-       */
-      decorationStatuses.clear();
-
-      for (const entry of new Map(changedEntries.map((entry) => [entry.path, entry.status]))) {
-        decorationStatuses.set(entry[0], entry[1]);
-      }
-
-      for (const entry of stagedEntries) {
-        /*
-         * Staged-only states that are no longer modified in the worktree are
-         * still worth showing in Explorer (the file differs from HEAD).
-         */
-        if (!decorationStatuses.has(entry.path)) {
-          if (entry.status === "modified-and-staged") {
-            decorationStatuses.set(entry.path, "modified-and-staged");
-          } else if (entry.status === "added" || entry.status === "deleted-and-staged") {
-            decorationStatuses.set(entry.path, entry.status);
-          }
-        }
-      }
-
-      fileDecorationRefresh();
+      renderSnapshotEntries(snapshot);
 
       const branchLabel = snapshot.branch ?? "DETACHED";
 
@@ -1120,23 +1162,97 @@ export async function installDataverseGitExtension(
         },
       ];
     } finally {
-      refreshInProgress = false;
-
-      if (refreshQueued) {
-        refreshQueued = false;
-        void refresh();
-      }
+      finishRefresh();
     }
   }
 
-  function scheduleRefresh(delayMs = 350): void {
+  /*
+   * Targeted refresh for a known set of changed files. Uses the cached
+   * snapshot from the last full scan, re-reads only those paths, and re-renders
+   * the SCM groups without recomputing branch/sync status (which a file save
+   * cannot change).
+   */
+  async function refreshPaths(filepaths: string[]): Promise<void> {
+    if (refreshInProgress) {
+      for (const filepath of filepaths) {
+        pendingRefreshPaths.add(filepath);
+      }
+
+      return;
+    }
+
+    if (filepaths.length > MAX_TARGETED_REFRESH_PATHS) {
+      await refresh();
+      return;
+    }
+
+    refreshInProgress = true;
+
+    try {
+      const snapshot = lastSnapshot;
+
+      if (snapshot == null || !snapshot.isRepository) {
+        // No usable cache: fall back to a full scan.
+        refreshQueued = true;
+        return;
+      }
+
+      const updatedPaths = new Set(filepaths);
+
+      const entries = snapshot.entries.filter((entry) => !updatedPaths.has(entry.path));
+
+      const updates = await Promise.all(
+        filepaths.map((filepath) => getGitPathEntry(workspaceHandle, filepath)),
+      );
+
+      for (const entry of updates) {
+        if (entry != null) {
+          entries.push(entry);
+        }
+      }
+
+      lastSnapshot = { ...snapshot, entries };
+
+      renderSnapshotEntries(lastSnapshot);
+    } catch (error) {
+      console.error("[Dataverse IDE] Unable to refresh Git status for changed files.", error);
+
+      // Targeted refresh failed: recover with a full scan.
+      refreshQueued = true;
+    } finally {
+      finishRefresh();
+    }
+  }
+
+  function scheduleRefresh(delayMs = 350, filepath?: string): void {
+    /*
+     * A full refresh (or a .gitignore change, which can affect unrelated
+     * untracked files) supersedes any queued targeted paths.
+     */
+    if (filepath == null || filepath.endsWith(".gitignore")) {
+      fullRefreshRequested = true;
+    } else {
+      pendingRefreshPaths.add(filepath);
+    }
+
     if (refreshTimer != null) {
       window.clearTimeout(refreshTimer);
     }
 
     refreshTimer = window.setTimeout(() => {
       refreshTimer = undefined;
-      void refresh();
+
+      const paths = [...pendingRefreshPaths];
+      pendingRefreshPaths.clear();
+
+      const needsFullRefresh = fullRefreshRequested;
+      fullRefreshRequested = false;
+
+      if (needsFullRefresh || paths.length === 0) {
+        void refresh();
+      } else {
+        void refreshPaths(paths);
+      }
     }, delayMs);
   }
 
@@ -2770,7 +2886,13 @@ export async function installDataverseGitExtension(
       document.uri.scheme === "file" &&
       vscode.workspace.getWorkspaceFolder(document.uri) != null
     ) {
-      scheduleRefresh();
+      const filepath = getFilepathFromCommandArgument(document.uri);
+
+      /*
+       * We know exactly which file was saved, so refresh just that path when
+       * possible instead of rescanning the whole workspace.
+       */
+      scheduleRefresh(350, filepath);
     }
   });
 

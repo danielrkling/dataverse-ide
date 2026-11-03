@@ -96,11 +96,11 @@ function uriFor(vscode: typeof vscodeType, rootUri: vscodeType.Uri, path: string
 async function ensureParentDirectory(
   vscode: typeof vscodeType,
   uri: vscodeType.Uri,
-): Promise<void> {
+): Promise<boolean> {
   const separatorIndex = uri.path.lastIndexOf("/");
 
   if (separatorIndex <= 0) {
-    return;
+    return false;
   }
 
   const parentUri = vscode.Uri.from({
@@ -109,7 +109,7 @@ async function ensureParentDirectory(
     path: uri.path.slice(0, separatorIndex),
   });
 
-  await ensureWorkspaceDirectory(vscode, parentUri);
+  return ensureWorkspaceDirectory(vscode, parentUri);
 }
 
 type WatchPair = {
@@ -307,6 +307,36 @@ export default {
 
     let dirtyDocuments: DirtyDocumentSnapshot = new Map();
 
+    /*
+     * Per-bundle I/O counters. HTML bundles can inline many files, so the
+     * total time is dominated by either the reads or the single output write;
+     * logging both separately makes that distinction obvious.
+     */
+    let bundleFileReads = 0;
+    let bundleReadMs = 0;
+    let bundleReadBytes = 0;
+
+    async function readWorkspaceDiskBytes(path: string): Promise<Uint8Array | undefined> {
+      const started = performance.now();
+
+      try {
+        const bytes = await vscode.workspace.fs.readFile(
+          uriFor(vscode, context.workspaceRootUri, path),
+        );
+
+        bundleFileReads += 1;
+        bundleReadBytes += bytes.length;
+
+        return bytes;
+      } catch {
+        bundleFileReads += 1;
+
+        return undefined;
+      } finally {
+        bundleReadMs += performance.now() - started;
+      }
+    }
+
     async function readWorkspaceText(path: string): Promise<string | undefined> {
       const live = dirtyDocumentText(dirtyDocuments, path);
 
@@ -314,15 +344,9 @@ export default {
         return live;
       }
 
-      try {
-        const bytes = await vscode.workspace.fs.readFile(
-          uriFor(vscode, context.workspaceRootUri, path),
-        );
+      const bytes = await readWorkspaceDiskBytes(path);
 
-        return DECODER.decode(bytes);
-      } catch {
-        return undefined;
-      }
+      return bytes != null ? DECODER.decode(bytes) : undefined;
     }
 
     async function readWorkspaceBytes(path: string): Promise<Uint8Array | undefined> {
@@ -332,11 +356,7 @@ export default {
         return new TextEncoder().encode(live);
       }
 
-      try {
-        return await vscode.workspace.fs.readFile(uriFor(vscode, context.workspaceRootUri, path));
-      } catch {
-        return undefined;
-      }
+      return readWorkspaceDiskBytes(path);
     }
 
     async function runBundle(
@@ -345,6 +365,10 @@ export default {
       options?: { silent?: boolean },
     ): Promise<boolean> {
       const started = Date.now();
+
+      bundleFileReads = 0;
+      bundleReadMs = 0;
+      bundleReadBytes = 0;
 
       const inputPath = normalizeWorkspacePath(requestedEntry.input);
 
@@ -402,6 +426,7 @@ export default {
 
         const inputUri = uriFor(vscode, context.workspaceRootUri, inputPath);
 
+        const entryStarted = performance.now();
         let sourceBytes: Uint8Array;
 
         try {
@@ -414,6 +439,12 @@ export default {
           );
         }
 
+        const entryMs = performance.now() - entryStarted;
+
+        bundleFileReads = 0;
+        bundleReadMs = 0;
+        bundleReadBytes = 0;
+
         const entry: HtmlEntry = {
           input: inputPath,
           ...(requestedEntry.output != null ? { output: requestedEntry.output } : {}),
@@ -424,6 +455,7 @@ export default {
         pair.outputPath = outputPath;
         pair.dependencies = new Set([inputPath, configRelativePath()]);
 
+        const bundleStarted = performance.now();
         const result = await bundleHtml({
           path: inputPath,
           html: DECODER.decode(sourceBytes),
@@ -446,15 +478,22 @@ export default {
           },
         });
 
+        const bundleMs = performance.now() - bundleStarted;
+
         for (const warning of result.warnings) {
           outputChannel.appendLine(`[html] warning: ${warning}`);
         }
 
         const outputUri = uriFor(vscode, context.workspaceRootUri, outputPath);
 
-        await ensureParentDirectory(vscode, outputUri);
+        const ensureStarted = performance.now();
+        const directoryCreated = await ensureParentDirectory(vscode, outputUri);
+        const ensureMs = performance.now() - ensureStarted;
 
-        await vscode.workspace.fs.writeFile(outputUri, new TextEncoder().encode(result.html));
+        const encoded = new TextEncoder().encode(result.html);
+        const writeStarted = performance.now();
+        await vscode.workspace.fs.writeFile(outputUri, encoded);
+        const writeMs = performance.now() - writeStarted;
 
         pair.builtVersions.clear();
 
@@ -474,6 +513,13 @@ export default {
           (result.warnings.length > 0 ? `, ${result.warnings.length} warning(s)` : "");
 
         outputChannel.appendLine(`[html] ${summary}`);
+        outputChannel.appendLine(
+          `[html] stages: entry ${Math.round(entryMs)}ms, bundle ${Math.round(bundleMs)}ms, ` +
+            `ensure ${Math.round(ensureMs)}ms${directoryCreated ? " (created)" : ""}, ` +
+            `write ${Math.round(writeMs)}ms ` +
+            `(${bundleFileReads} reads ${Math.round(bundleReadMs)}ms, ` +
+            `${bundleReadBytes} bytes read; ${encoded.length} bytes written)`,
+        );
 
         if (options?.silent !== true) {
           outputChannel.show(true);

@@ -31,6 +31,138 @@ const MAX_SLUG_LENGTH = 40;
  * don't fold earlier output back into the new bundle. */
 const FLATTEN_OUTPUT_PATTERN = /^~.*#(\d+)\.md$/;
 
+/* Keep a pathological selection from freezing the editor. */
+const MAX_FILES_PER_FOLDER = 500;
+
+/* Directories that are never flattened, even when selected as a folder. */
+const EXCLUDED_DIRECTORY_NAMES = new Set([".git", "node_modules", ".ide-build", "dist"]);
+
+function isUriLike(value: unknown): value is vscodeType.Uri {
+  return (
+    typeof value === "object" &&
+    value != null &&
+    "scheme" in value &&
+    typeof (value as { scheme?: unknown }).scheme === "string" &&
+    "path" in value &&
+    typeof (value as { path?: unknown }).path === "string"
+  );
+}
+
+/*
+ * Explorer context menus forward the selection in more than one shape:
+ * the focused resource is passed as the first command argument and the full
+ * multi-selection (an array of URIs) is appended after it. Some callers also
+ * pass `{ resourceUri }`, `{ resource }` or `{ uri }` wrappers, so normalize
+ * all of them here and flatten nested arrays.
+ */
+function toUris(value: unknown): vscodeType.Uri[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => toUris(entry));
+  }
+
+  if (isUriLike(value)) {
+    return [value];
+  }
+
+  if (typeof value === "object" && value != null) {
+    for (const key of ["resourceUri", "resource", "uri"] as const) {
+      const candidate = (value as Record<string, unknown>)[key];
+
+      if (isUriLike(candidate)) {
+        return [candidate];
+      }
+    }
+  }
+
+  return [];
+}
+
+/*
+ * Workspace-relative path derived from the workspace root instead of
+ * asRelativePath(): the local-folder and OPFS providers both expose `file`
+ * URIs, but their paths are not guaranteed to be reported the same way.
+ */
+function workspaceRelativePath(
+  vscode: typeof vscodeType,
+  workspaceRootUri: vscodeType.Uri,
+  uri: vscodeType.Uri,
+): string {
+  if (uri.scheme === "file") {
+    const rootPath = workspaceRootUri.path.replace(/\/+$/, "");
+    const uriPath = uri.path.replace(/\/+$/, "");
+
+    if (rootPath.length === 0 || uriPath === rootPath || uriPath.startsWith(`${rootPath}/`)) {
+      const relativePath = (rootPath.length > 0 ? uriPath.slice(rootPath.length) : uriPath)
+        .replace(/^\/+/, "")
+        .replaceAll("\\", "/");
+
+      if (relativePath.length > 0) {
+        return relativePath;
+      }
+    }
+  }
+
+  return vscode.workspace.asRelativePath(uri, false).replaceAll("\\", "/");
+}
+
+/*
+ * Walk a selected folder through the file system provider directly.
+ *
+ * vscode.workspace.findFiles() is backed by the workbench search service in
+ * this browser build, which can return cached or workspace-wide results
+ * depending on provider and timing. Recursing through workspace.fs works the
+ * same for local folders, OPFS workspaces and the OPFS overlay.
+ */
+async function collectDirectoryFiles(
+  vscode: typeof vscodeType,
+  directory: vscodeType.Uri,
+  outputChannel: vscodeType.OutputChannel,
+): Promise<vscodeType.Uri[]> {
+  const files: vscodeType.Uri[] = [];
+  const pending: vscodeType.Uri[] = [directory];
+
+  while (pending.length > 0 && files.length < MAX_FILES_PER_FOLDER) {
+    const current = pending.shift()!;
+
+    let entries: Array<[string, vscodeType.FileType]>;
+
+    try {
+      entries = await vscode.workspace.fs.readDirectory(current);
+    } catch {
+      outputChannel.appendLine(
+        `[flatten] could not read directory ${vscode.workspace.asRelativePath(current, false)}`,
+      );
+      continue;
+    }
+
+    entries.sort(([left], [right]) => left.localeCompare(right));
+
+    for (const [name, type] of entries) {
+      const child = vscode.Uri.joinPath(current, name);
+
+      if ((type & vscode.FileType.Directory) !== 0) {
+        if (!EXCLUDED_DIRECTORY_NAMES.has(name.toLowerCase())) {
+          pending.push(child);
+        }
+
+        continue;
+      }
+
+      if ((type & vscode.FileType.File) === 0 || isGeneratedFlattenFile(child)) {
+        continue;
+      }
+
+      files.push(child);
+
+      if (files.length >= MAX_FILES_PER_FOLDER) {
+        break;
+      }
+    }
+  }
+
+  return files;
+}
+
 /*
  * Extensions that are known-decodable as text. Everything else (images,
  * binaries) is skipped with a placeholder note.
@@ -241,13 +373,47 @@ export default {
 
     const flattenCommand = vscode.commands.registerCommand(
       COMMAND_FLATTEN_SELECTED,
-      async (arg?: vscodeType.Uri | vscodeType.Uri[]) => {
+      async (...args: unknown[]) => {
         /*
-         * The explorer passes a single URI when one item is selected and an
-         * array when several are (or when invoked from the parent of a
-         * multi-select).
+         * Context-menu invocations pass the focused resource *and* the full
+         * selection array as separate arguments, so merge every argument
+         * instead of reading only the first one (which collapsed a
+         * multi-selection to the single clicked file).
          */
-        const uris = Array.isArray(arg) ? arg : arg != null ? [arg] : [];
+        const uris: vscodeType.Uri[] = [];
+        const seenUris = new Set<string>();
+
+        for (const arg of args) {
+          for (const uri of toUris(arg)) {
+            const key = uri.toString();
+
+            if (!seenUris.has(key)) {
+              seenUris.add(key);
+              uris.push(uri);
+            }
+          }
+        }
+
+        /*
+         * Command-palette / welcome-page invocations have no selection; fall
+         * back to the active editor so the action still does something useful.
+         */
+        if (uris.length === 0) {
+          const activeUri = vscode.window.activeTextEditor?.document.uri;
+
+          if (activeUri != null && activeUri.scheme === "file") {
+            const rootPath = context.workspaceRootUri.path.replace(/\/+$/, "");
+            const activePath = activeUri.path.replace(/\/+$/, "");
+
+            if (
+              rootPath.length === 0 ||
+              activePath === rootPath ||
+              activePath.startsWith(`${rootPath}/`)
+            ) {
+              uris.push(activeUri);
+            }
+          }
+        }
 
         if (uris.length === 0) {
           await vscode.window.showWarningMessage(
@@ -259,11 +425,12 @@ export default {
 
         const sections: string[] = [];
         const selections: Array<{ path: string; isDirectory: boolean }> = [];
+        const seenFiles = new Set<string>();
         let included = 0;
         let skipped = 0;
 
         for (const uri of uris) {
-          const relativePath = vscode.workspace.asRelativePath(uri, false);
+          const relativePath = workspaceRelativePath(vscode, context.workspaceRootUri, uri);
 
           let stat: vscodeType.FileStat;
 
@@ -275,45 +442,31 @@ export default {
             continue;
           }
 
-          const isDirectory = stat.type === vscode.FileType.Directory;
+          const isDirectory = (stat.type & vscode.FileType.Directory) !== 0;
           selections.push({ path: relativePath, isDirectory });
 
-          if (isDirectory) {
+          const files = isDirectory
+            ? await collectDirectoryFiles(vscode, uri, outputChannel)
+            : [uri];
+
+          for (const file of files) {
             /*
-             * Include directory selections by flattening their text files
-             * recursively.
+             * A file can appear twice when the user selects a folder and one
+             * of its descendants, or when the same resource is forwarded as
+             * both the focused argument and part of the selection array.
              */
-            const children = await vscode.workspace.findFiles(
-              new vscode.RelativePattern(uri, "**/*"),
-              "{**/.git/**,**/node_modules/**,**/.ide-build/**,**/dist/**}",
-              500,
-            );
-
-            for (const child of children) {
-              if (isGeneratedFlattenFile(child)) {
-                continue;
-              }
-
-              const section = await readSection(vscode, child);
-
-              if (section != null) {
-                sections.push(section);
-                included++;
-              } else {
-                skipped++;
-              }
+            if (!seenFiles.add(file.toString())) {
+              continue;
             }
 
-            continue;
-          }
+            const section = await readSection(vscode, context.workspaceRootUri, file);
 
-          const section = await readSection(vscode, uri);
-
-          if (section != null) {
-            sections.push(section);
-            included++;
-          } else {
-            skipped++;
+            if (section != null) {
+              sections.push(section);
+              included++;
+            } else {
+              skipped++;
+            }
           }
         }
 
@@ -359,9 +512,10 @@ export default {
 
 async function readSection(
   vscode: typeof vscodeType,
+  workspaceRootUri: vscodeType.Uri,
   uri: vscodeType.Uri,
 ): Promise<string | undefined> {
-  const relativePath = vscode.workspace.asRelativePath(uri, false);
+  const relativePath = workspaceRelativePath(vscode, workspaceRootUri, uri);
 
   if (!TEXT_EXTENSIONS.has(extensionOf(uri))) {
     return `## ${relativePath}\n\n_(binary or unsupported file type - skipped)_`;

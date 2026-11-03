@@ -104,6 +104,23 @@ export type GitRemoteSyncResult = {
   pushedRef?: string
 }
 
+function toGitTreeEntry(
+  path: string,
+  head: number,
+  workdir: number,
+  stage: number,
+): GitTreeEntry {
+  return {
+    path,
+    status: getStatus(head, workdir, stage),
+    head,
+    workdir,
+    stage,
+    changed: workdir !== stage,
+    staged: head !== stage,
+  }
+}
+
 function getStatus(
   head: number,
   workdir: number,
@@ -257,28 +274,14 @@ function validateBranchName(branchName: string): string {
     ])
   
     const entries = matrix
-      .map(([path, headStatus, workdirStatus, stageStatus]) => {
-        const headNumber = headStatus as number
-        const workdirNumber = workdirStatus as number
-        const stageNumber = stageStatus as number
-  
-        return {
-          path: path as string,
-  
-          status: getStatus(
-            headNumber,
-            workdirNumber,
-            stageNumber,
-          ),
-  
-          head: headNumber,
-          workdir: workdirNumber,
-          stage: stageNumber,
-  
-          changed: workdirNumber !== stageNumber,
-          staged: headNumber !== stageNumber,
-        }
-      })
+      .map(([path, headStatus, workdirStatus, stageStatus]) =>
+        toGitTreeEntry(
+          path as string,
+          headStatus as number,
+          workdirStatus as number,
+          stageStatus as number,
+        ),
+      )
       .filter((entry) => entry.changed || entry.staged)
 
     /*
@@ -333,6 +336,70 @@ function validateBranchName(branchName: string): string {
     }
 
     return visible
+  }
+
+  /**
+   * Status for a single working-tree path. This is the targeted counterpart to
+   * getGitRepositorySnapshot(): it only walks the requested path instead of the
+   * whole workspace, which keeps save-triggered refreshes cheap.
+   *
+   * Returns undefined when the path is clean or ignored.
+   */
+  export async function getGitPathEntry(
+    workspaceHandle: FileSystemDirectoryHandle,
+    filepath: string,
+  ): Promise<GitTreeEntry | undefined> {
+    if (filepath.length === 0 || filepath === '.git' || filepath.startsWith('.git/')) {
+      return undefined
+    }
+
+    const fs = getFs(workspaceHandle)
+
+    const matrix = (await git.statusMatrix({
+      fs,
+      dir: GIT_DIR,
+      gitdir: GIT_METADATA_DIR,
+      refresh: true,
+
+      /*
+       * Restrict the tree walk as well as the emitted rows. `filter` alone
+       * would still visit every directory; `filepaths` prunes the walk to the
+       * requested file.
+       */
+      filepaths: [filepath],
+      filter: (candidate) => candidate === filepath,
+    })) as Array<[string, number, number, number]>
+
+    const row = matrix[0]
+
+    if (row == null) {
+      return undefined
+    }
+
+    const entry = toGitTreeEntry(row[0], row[1], row[2], row[3])
+
+    if (!entry.changed && !entry.staged) {
+      return undefined
+    }
+
+    if (entry.status === 'untracked') {
+      try {
+        const ignored = await git.isIgnored({
+          fs,
+          dir: GIT_DIR,
+          gitdir: GIT_METADATA_DIR,
+          filepath,
+        })
+
+        if (ignored) {
+          return undefined
+        }
+      } catch {
+        /* ignore rule evaluation failures do not hide the entry */
+      }
+    }
+
+    return entry
   }
 
 export async function stagePaths(
