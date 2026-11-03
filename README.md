@@ -110,6 +110,25 @@ Re-running the same tag re-uploads the assets with `--clobber`.
 
 Download page: <https://github.com/danielrkling/dataverse-ide/releases>
 
+### GitHub Pages demo
+
+The same `dist/` output can be served as a public demo from GitHub Pages:
+
+```powershell
+.\tools\deploy-pages.ps1              # build, then force-push dist/ to gh-pages
+.\tools\deploy-pages.ps1 -SkipBuild
+```
+
+The script publishes `dist/` as the root of the `gh-pages` branch (the branch
+history is replaced on every deploy), enables Pages on the first run, and waits
+until the site answers. It writes `.nojekyll` before deploying because Jekyll
+would otherwise drop Vite's `_*.js` chunks. The service worker supplies the
+COOP/COEP headers, so the first visit is not cross-origin isolated and the
+reload after the worker takes control is - the same two-phase behavior as the
+Dataverse deployment.
+
+Demo: <https://danielrkling.github.io/dataverse-ide/>
+
 ### Test the production build locally
 
 `vite preview` is not a Dataverse test: it does not use the web-resource path
