@@ -12,6 +12,7 @@ import {
   type OpfsWorkspaceRecent,
 } from "./recentWorkspaces.js";
 import { ensureWorkspacePermission, rootUri } from "./fsProvider.js";
+import { saveAllBeforeReload } from "./saveAll.js";
 import { localWorkspaceHash, opfsWorkspaceHash, setWorkspaceHash } from "./workspaceHash.js";
 import {
   deleteWorkspaceStateDatabase,
@@ -34,7 +35,15 @@ const COMMAND_NEW_BROWSER = "dataverseIde.workspace.newBrowserWorkspace";
 const COMMAND_CHOOSE_RECENT = "dataverseIde.workspace.chooseRecent";
 const COMMAND_CLEAR_STATE = "dataverseIde.workspace.clearState";
 
-function switchTo(hash: string): void {
+async function switchTo(hash: string): Promise<void> {
+  /*
+   * Autosave is debounced; flush dirty editors before reloading so an edit
+   * made just before switching workspaces is not lost.
+   */
+  if (!(await saveAllBeforeReload(vscode))) {
+    return;
+  }
+
   setWorkspaceHash(hash);
 
   window.location.reload();
@@ -89,7 +98,7 @@ export async function ensureWorkspaceSwitcher(): Promise<void> {
 
     const saved = await saveLocalWorkspace(directoryHandle);
 
-    switchTo(localWorkspaceHash(saved.id));
+    await switchTo(localWorkspaceHash(saved.id));
   });
 
   vscode.commands.registerCommand(COMMAND_NEW_BROWSER, async () => {
@@ -105,7 +114,7 @@ export async function ensureWorkspaceSwitcher(): Promise<void> {
     try {
       const { record: created } = await createOpfsWorkspace(requestedName.trim());
 
-      switchTo(opfsWorkspaceHash(created.opfsDirectoryName));
+      await switchTo(opfsWorkspaceHash(created.opfsDirectoryName));
       return;
     } catch (error) {
       void vscode.window.showErrorMessage(
@@ -141,7 +150,7 @@ export async function ensureWorkspaceSwitcher(): Promise<void> {
     const record = choice.record;
 
     if (record.kind === "opfs") {
-      switchTo(opfsWorkspaceHash((record as OpfsWorkspaceRecent).opfsDirectoryName));
+      await switchTo(opfsWorkspaceHash((record as OpfsWorkspaceRecent).opfsDirectoryName));
       return;
     }
 
@@ -154,7 +163,7 @@ export async function ensureWorkspaceSwitcher(): Promise<void> {
      */
     await runEnsureWorkspacePermission(local.handle);
 
-    switchTo(localWorkspaceHash(local.id));
+    await switchTo(localWorkspaceHash(local.id));
   });
 
   vscode.commands.registerCommand(COMMAND_CLEAR_STATE, async () => {

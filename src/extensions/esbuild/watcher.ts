@@ -179,17 +179,22 @@ export class EsbuildWatcher {
 
       /*
        * The buffer version was already built from the live document; don't
-       * rebuild just because autosave wrote the same bytes to disk.
+       * rebuild just because autosave wrote the same bytes to disk. Do not
+       * clear the debounce here: it is global, and another file may have a
+       * pending rebuild.
        */
       if (this.wasVersionBuilt(document)) {
-        this.clearDebounce();
         return;
       }
 
       this.schedule();
     });
 
-    const disposables: vscodeType.Disposable[] = [changeWatcher, saveWatcher];
+    const closeWatcher = this.vscode.workspace.onDidCloseTextDocument((document) => {
+      this.builtVersions.delete(document.uri.toString());
+    });
+
+    const disposables: vscodeType.Disposable[] = [changeWatcher, saveWatcher, closeWatcher];
 
     if (this.options.watchFileSystem === true) {
       const fileSystemWatcher = this.vscode.workspace.createFileSystemWatcher(
@@ -265,13 +270,12 @@ export class EsbuildWatcher {
 
     if (builtVersion === document.version) {
       /*
-       * The document is no longer dirty after a save. Drop the entry so a
-       * later unrelated change with a reused version cannot be skipped.
+       * Keep the entry: the built version is still current. Dropping it on
+       * the first save would make a second save event for the same version
+       * look like a new change and trigger a redundant build. The close
+       * listener clears entries when a document is reopened with a fresh
+       * version counter.
        */
-      if (!document.isDirty) {
-        this.builtVersions.delete(key);
-      }
-
       return true;
     }
 

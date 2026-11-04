@@ -23,6 +23,7 @@ import getSnippetServiceOverride from "@codingame/monaco-vscode-snippets-service
 import getTextmateServiceOverride from "@codingame/monaco-vscode-textmate-service-override";
 import getThemeServiceOverride from "@codingame/monaco-vscode-theme-service-override";
 import getStorageServiceOverride from "@codingame/monaco-vscode-storage-service-override";
+import getWorkingCopyServiceOverride from "@codingame/monaco-vscode-working-copy-service-override";
 import * as vscode from "vscode";
 import { rootUri } from "./workspace/fsProvider.js";
 import getBulkEditServiceOverride from "@codingame/monaco-vscode-bulk-edit-service-override";
@@ -236,98 +237,6 @@ function registerExtensionManageGuard(): vscode.Disposable {
   return new vscode.Disposable(() => guard.dispose());
 }
 
-function installDocumentAutoSave(delayMs = 1000): vscode.Disposable {
-  const timers = new Map<string, number>();
-
-  function clearTimer(uri: vscode.Uri): void {
-    const key = uri.toString();
-    const timer = timers.get(key);
-
-    if (timer != null) {
-      window.clearTimeout(timer);
-      timers.delete(key);
-    }
-  }
-
-  const changeSubscription = vscode.workspace.onDidChangeTextDocument((event) => {
-    const document = event.document;
-
-    /*
-     * Ignore non-file resources:
-     * - output channels
-     * - extension documents
-     * - virtual typings
-     * - untitled editors
-     */
-    if (document.uri.scheme !== "file" || document.isUntitled) {
-      return;
-    }
-
-    /*
-     * Only autosave files that belong to the currently opened workspace.
-     */
-    if (vscode.workspace.getWorkspaceFolder(document.uri) == null) {
-      return;
-    }
-
-    /*
-     * Ignore metadata-only change events.
-     */
-    if (event.contentChanges.length === 0 || !document.isDirty) {
-      return;
-    }
-
-    clearTimer(document.uri);
-
-    const timer = window.setTimeout(() => {
-      timers.delete(document.uri.toString());
-
-      void (async () => {
-        /*
-         * The document might have been manually saved, closed, or changed
-         * again while this timer waited.
-         */
-        if (!document.isDirty) {
-          return;
-        }
-
-        try {
-          const saved = await document.save();
-
-          console.info("[Dataverse IDE] Autosave attempted:", {
-            file: document.uri.fsPath,
-            saved,
-          });
-        } catch (error) {
-          console.error("[Dataverse IDE] Autosave failed:", document.uri.toString(), error);
-        }
-      })();
-    }, delayMs);
-
-    timers.set(document.uri.toString(), timer);
-  });
-
-  const saveSubscription = vscode.workspace.onDidSaveTextDocument((document) => {
-    clearTimer(document.uri);
-  });
-
-  const closeSubscription = vscode.workspace.onDidCloseTextDocument((document) => {
-    clearTimer(document.uri);
-  });
-
-  return new vscode.Disposable(() => {
-    changeSubscription.dispose();
-    saveSubscription.dispose();
-    closeSubscription.dispose();
-
-    for (const timer of timers.values()) {
-      window.clearTimeout(timer);
-    }
-
-    timers.clear();
-  });
-}
-
 /*
  * The workbench renders the top-left title bar app icon with the
  * `--product-icon` CSS variable (falling back to the stock VS Code logo).
@@ -480,6 +389,13 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
       ...getSnippetServiceOverride(),
 
       ...getStorageServiceOverride(),
+      /*
+       * The base monaco-vscode-api service set stubs IWorkingCopyService.
+       * Without the real service, built-in autosave never receives change
+       * events and the `dirtyWorkingCopies` context key stays false (which
+       * also leaves File > Save All permanently disabled).
+       */
+      ...getWorkingCopyServiceOverride(),
       ...getEnvironmentServiceOverride(),
       ...getBulkEditServiceOverride(),
       ...getWorkspaceTrustServiceOverride(),
@@ -558,8 +474,6 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
    */
   await ensureWorkspaceSwitcher();
 
-  const autoSaveDisposable = installDocumentAutoSave(1000);
-
   const extensionsDisposable = await activateExtensions({
     vscode,
     workspaceRootUri: rootUri,
@@ -569,7 +483,6 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
   window.addEventListener(
     "beforeunload",
     () => {
-      autoSaveDisposable.dispose();
       configSchemasDisposable.dispose();
       extensionManageGuard.dispose();
       extensionsDisposable.dispose();

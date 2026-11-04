@@ -405,6 +405,14 @@ export default {
 
     if (onWillSave) {
       const willSaveListener = onWillSave((event) => {
+        /*
+         * Match VS Code's built-in format-on-save participant: only format
+         * explicit saves. Autosave/focus saves should not trigger formatting.
+         */
+        if (event.reason !== vscode.TextDocumentSaveReason.Manual) {
+          return;
+        }
+
         const config = vscode.workspace.getConfiguration();
         const enabled = config.get<boolean>("dataverseIde.prettier.formatOnSave", false);
 
@@ -412,15 +420,12 @@ export default {
           return;
         }
 
-        void provider.formatText(event.document).then((edits) => {
-          if (!edits || edits.length === 0) {
-            return;
-          }
-
-          const edit = new vscode.WorkspaceEdit();
-          edit.set(event.document.uri, edits);
-          void vscode.workspace.applyEdit(edit);
-        });
+        /*
+         * Wait for formatting so the save pipeline writes the formatted text
+         * and version-checks the returned edits. Applying a separate edit
+         * after the save left formatted content unsaved.
+         */
+        event.waitUntil(provider.formatText(event.document));
       });
 
       if (willSaveListener) {

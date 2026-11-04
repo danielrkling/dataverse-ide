@@ -27,6 +27,7 @@ import type {
   IdeExtensionSecretStore,
 } from "./api.js";
 import { markPlaceholder } from "./placeholders.js";
+import { saveAllBeforeReload } from "../workspace/saveAll.js";
 
 /*
  * Manifest of every IDE extension. Each entry lazily imports its module so
@@ -458,8 +459,8 @@ export async function activateExtensions(
 
         void options.vscode.window
           .showInformationMessage("Reload to apply extension changes.", "Reload")
-          .then((choice) => {
-            if (choice === "Reload") {
+          .then(async (choice) => {
+            if (choice === "Reload" && (await saveAllBeforeReload(options.vscode))) {
               location.reload();
             }
           });

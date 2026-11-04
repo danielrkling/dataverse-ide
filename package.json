@@ -74,6 +74,7 @@
     "@codingame/monaco-vscode-typescript-language-features-default-extension": "^38.0.4",
     "@codingame/monaco-vscode-views-service-override": "^38.0.4",
     "@codingame/monaco-vscode-workbench-service-override": "^38.0.4",
+    "@codingame/monaco-vscode-working-copy-service-override": "38.0.4",
     "@codingame/monaco-vscode-workspace-trust-service-override": "^38.0.4",
     "@codingame/monaco-vscode-xml-default-extension": "^38.0.4",
     "@codingame/monaco-vscode-yaml-default-extension": "^38.0.4",

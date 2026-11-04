@@ -13,6 +13,7 @@ import { contributeExtensionManifest } from "../api.js";
 import guideContent from "./GUIDE.md?raw";
 
 import { registerGuide } from "../shared/guide.js";
+import { saveAllBeforeReload } from "../../workspace/saveAll.js";
 
 import {
   activeVsixIds,
@@ -92,7 +93,7 @@ function pickVsixFile(): Promise<PickedFile | undefined> {
 async function offerReload(vscode: typeof vscodeType, message: string): Promise<void> {
   const choice = await vscode.window.showInformationMessage(message, "Reload");
 
-  if (choice === "Reload") {
+  if (choice === "Reload" && (await saveAllBeforeReload(vscode))) {
     location.reload();
   }
 }
