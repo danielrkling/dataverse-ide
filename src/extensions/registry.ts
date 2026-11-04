@@ -49,6 +49,7 @@ export const extensionModules: Record<string, () => Promise<{ default: IdeExtens
   flatten: () => import("./flatten/extension.js"),
   scripts: () => import("./scripts/extension.js"),
   welcome: () => import("./welcome/extension.js"),
+  markdown: () => import("./markdown/extension.js"),
   vsix: () => import("./vsix/extension.js"),
   // taggedJsx: () => import("./taggedJsx/extension.js"), //gramer not working atm, disabling for now
 };
@@ -138,6 +139,12 @@ export const extensionManifests: Record<string, ExtensionManifestIdentity> = {
     name: "dataverse-ide-welcome",
     displayName: "Dataverse IDE Welcome",
     description: "Landing page describing the IDE's features and extensions.",
+  },
+  markdown: {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-markdown",
+    displayName: "Dataverse IDE Markdown",
+    description: "DOM-based Markdown preview that does not require webviews or service workers.",
   },
   vsix: {
     publisher: "dataverse-ide",

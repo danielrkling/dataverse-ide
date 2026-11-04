@@ -11,8 +11,14 @@ import {
   type LocalWorkspaceRecent,
   type OpfsWorkspaceRecent,
 } from "./recentWorkspaces.js";
-import { ensureWorkspacePermission } from "./fsProvider.js";
+import { ensureWorkspacePermission, rootUri } from "./fsProvider.js";
 import { localWorkspaceHash, opfsWorkspaceHash, setWorkspaceHash } from "./workspaceHash.js";
+import {
+  deleteWorkspaceStateDatabase,
+  listWorkspaceStateDatabases,
+  workspaceStateDatabaseName,
+  workspaceStateDatabaseNameForFolderName,
+} from "./workspaceStorage.js";
 
 /*
  * In-place workspace switching via URL hash + reload.
@@ -26,6 +32,7 @@ import { localWorkspaceHash, opfsWorkspaceHash, setWorkspaceHash } from "./works
 const COMMAND_OPEN_LOCAL = "dataverseIde.workspace.openLocalFolder";
 const COMMAND_NEW_BROWSER = "dataverseIde.workspace.newBrowserWorkspace";
 const COMMAND_CHOOSE_RECENT = "dataverseIde.workspace.chooseRecent";
+const COMMAND_CLEAR_STATE = "dataverseIde.workspace.clearState";
 
 function switchTo(hash: string): void {
   setWorkspaceHash(hash);
@@ -59,6 +66,10 @@ export async function ensureWorkspaceSwitcher(): Promise<void> {
       {
         command: COMMAND_CHOOSE_RECENT,
         title: "Dataverse IDE: Choose Recent Workspace…",
+      },
+      {
+        command: COMMAND_CLEAR_STATE,
+        title: "Dataverse IDE: Clear Workspace State…",
       },
     ],
   });
@@ -146,6 +157,99 @@ export async function ensureWorkspaceSwitcher(): Promise<void> {
     switchTo(localWorkspaceHash(local.id));
   });
 
+  vscode.commands.registerCommand(COMMAND_CLEAR_STATE, async () => {
+    try {
+      const records = await listRecentWorkspaces();
+      const current = workspaceStateDatabaseName(rootUri);
+      const known = new Set([
+        current,
+        ...records.map((record) => workspaceStateDatabaseNameForFolderName(record.name)),
+      ]);
+
+      const databases = await listWorkspaceStateDatabases();
+      const orphaned = databases.filter((name) => !known.has(name));
+      const allExceptCurrent = databases.filter((name) => name !== current);
+
+      if (allExceptCurrent.length === 0) {
+        void vscode.window.showInformationMessage("There is no workspace state to clear.");
+        return;
+      }
+
+      const choice = await vscode.window.showQuickPick(
+        [
+          {
+            label: "Orphaned workspaces",
+            description: `${orphaned.length} database${orphaned.length === 1 ? "" : "s"}`,
+            databases: orphaned,
+          },
+          {
+            label: "All workspaces except the current one",
+            description: `${allExceptCurrent.length} database${
+              allExceptCurrent.length === 1 ? "" : "s"
+            }`,
+            databases: allExceptCurrent,
+          },
+        ],
+        {
+          title: "Clear Workspace State",
+          placeHolder: "Choose the workspace state databases to delete",
+        },
+      );
+
+      if (choice == null) {
+        return;
+      }
+
+      if (choice.databases.length === 0) {
+        void vscode.window.showInformationMessage("There is no orphaned workspace state to clear.");
+        return;
+      }
+
+      const confirmed = await vscode.window.showWarningMessage(
+        `Delete ${choice.databases.length} workspace state database${
+          choice.databases.length === 1 ? "" : "s"
+        }? This resets the affected workspaces' editor layout, open editors, and workspace settings.`,
+        { modal: true },
+        "Delete",
+      );
+
+      if (confirmed !== "Delete") {
+        return;
+      }
+
+      let deleted = 0;
+      let failed = 0;
+
+      for (const name of choice.databases) {
+        try {
+          await deleteWorkspaceStateDatabase(name);
+          deleted += 1;
+        } catch (error) {
+          failed += 1;
+          console.warn(`[Dataverse IDE] Could not delete workspace state "${name}".`, error);
+        }
+      }
+
+      if (failed > 0) {
+        void vscode.window.showWarningMessage(
+          `Cleared ${deleted} workspace state database${
+            deleted === 1 ? "" : "s"
+          }; ${failed} could not be deleted. Close other IDE tabs and try again.`,
+        );
+      } else {
+        void vscode.window.showInformationMessage(
+          `Cleared ${deleted} workspace state database${deleted === 1 ? "" : "s"}.`,
+        );
+      }
+    } catch (error) {
+      void vscode.window.showErrorMessage(
+        `Could not clear workspace state: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  });
+
   /*
    * Surface the commands in the File menu. This build of vscode exposes no
    * `menubar/fileMenu` manifest contribution point (`menusExtensionPoint`
@@ -169,6 +273,11 @@ export async function ensureWorkspaceSwitcher(): Promise<void> {
       command: COMMAND_NEW_BROWSER,
       title: "New Browser Workspace…",
       order: 2,
+    },
+    {
+      command: COMMAND_CLEAR_STATE,
+      title: "Clear Workspace State…",
+      order: 3,
     },
   ];
 

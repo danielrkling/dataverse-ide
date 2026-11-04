@@ -183,6 +183,15 @@ export type SubmenuContribution = {
   icon?: string;
 };
 
+export type KeybindingContribution = {
+  command: string;
+  key: string;
+  mac?: string;
+  linux?: string;
+  win?: string;
+  when?: string;
+};
+
 export async function contributeExtensionManifest(input: {
   id: string;
   displayName: string;
@@ -192,6 +201,7 @@ export async function contributeExtensionManifest(input: {
     title: string;
     icon?: string;
   }[];
+  keybindings?: KeybindingContribution[];
   views?: ViewContribution;
   configuration?: ConfigurationContribution;
   menus?: MenuContribution[];
@@ -200,6 +210,10 @@ export async function contributeExtensionManifest(input: {
   const contributes: Record<string, unknown> = {
     commands: input.commands,
   };
+
+  if (input.keybindings != null && input.keybindings.length > 0) {
+    contributes.keybindings = input.keybindings;
+  }
 
   if (input.configuration != null) {
     contributes.configuration = input.configuration;

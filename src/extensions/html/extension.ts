@@ -3,7 +3,6 @@ import type * as vscodeType from "vscode";
 import { contributeExtensionManifest } from "../api.js";
 import { registerGuide } from "../shared/guide.js";
 import { createWatchStatus } from "../watchStatus.js";
-import { diagnoseOutputWrites } from "../../workspace/writeDiagnostics.js";
 
 import guideContent from "./GUIDE.md?raw";
 import {
@@ -56,7 +55,6 @@ const COMMAND_TOGGLE_WATCH = "dataverseIde.html.toggleWatch";
 const COMMAND_OPEN_CONFIG = "dataverseIde.html.openConfig";
 const COMMAND_SHOW_OUTPUT = "dataverseIde.html.showOutput";
 const COMMAND_RELOAD_CONFIG = "dataverseIde.html.reloadConfig";
-const COMMAND_DIAGNOSE_WRITES = "dataverseIde.html.diagnoseWrites";
 
 const WATCH_DEBOUNCE_MS = 300;
 
@@ -175,10 +173,6 @@ export default {
         {
           command: COMMAND_RELOAD_CONFIG,
           title: "HTML: Reload Config",
-        },
-        {
-          command: COMMAND_DIAGNOSE_WRITES,
-          title: "HTML: Diagnose Output Writes",
         },
         {
           command: "dataverseIde.html.openGuide",
@@ -991,56 +985,6 @@ export default {
       await vscode.window.showInformationMessage("HTML: configuration reloaded.");
     });
 
-    const diagnoseWritesCommand = vscode.commands.registerCommand(
-      COMMAND_DIAGNOSE_WRITES,
-      async () => {
-        const workspace = context.workspaceDirectoryHandle;
-
-        if (workspace == null) {
-          await vscode.window.showWarningMessage(
-            "HTML: open a local folder to diagnose output writes.",
-          );
-
-          return;
-        }
-
-        outputChannel.show(true);
-        outputChannel.appendLine("[html-write] diagnostics starting…");
-
-        try {
-          const entry = currentConfig.entryPoints[0];
-          const outputPath = normalizeWorkspacePath(
-            entry?.output ??
-              (entry != null ? defaultOutputPath(entry.input, currentConfig.outdir) : ""),
-          );
-          const outputUri = uriFor(vscode, context.workspaceRootUri, outputPath);
-          const lastHtml = lastWrittenHtml.get(outputUri.toString());
-          const outputBytes = lastHtml != null ? new TextEncoder().encode(lastHtml) : undefined;
-          const lines = await diagnoseOutputWrites(
-            vscode,
-            context.workspaceRootUri,
-            workspace,
-            currentConfig.outdir,
-            outputPath,
-            outputBytes,
-          );
-
-          for (const line of lines) {
-            outputChannel.appendLine(`[html-write] ${line}`);
-          }
-
-          await vscode.window.showInformationMessage(
-            "HTML output write diagnostics finished — see the HTML output channel.",
-          );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-
-          outputChannel.appendLine(`[html-write] diagnostics failed: ${message}`);
-          await vscode.window.showErrorMessage(`HTML write diagnostics failed: ${message}`);
-        }
-      },
-    );
-
     /*
      * Rebuild while the user types (debounced) instead of waiting for a save.
      * runBundle() snapshots dirty editor buffers, so the rebuild sees the
@@ -1114,7 +1058,6 @@ export default {
         openConfigCommand.dispose();
         showOutputCommand.dispose();
         reloadConfigCommand.dispose();
-        diagnoseWritesCommand.dispose();
 
         guideRegistration.dispose();
       },

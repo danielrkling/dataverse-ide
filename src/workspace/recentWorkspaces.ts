@@ -1,7 +1,6 @@
-import { openDB } from "../util/db.js";
+import { dataverseDB, WORKSPACE_STORE } from "../util/dataverseDb.js";
 
-const DB_NAME = "dataverse-ide-recents";
-const STORE = "workspaces";
+const STORE = WORKSPACE_STORE;
 
 export type LocalWorkspaceRecent = {
   id: string;
@@ -51,7 +50,7 @@ function normalizeOpfsDirectoryName(name: string): string {
 }
 
 export async function listRecentWorkspaces(): Promise<RecentWorkspace[]> {
-  const db = await openDB(DB_NAME, STORE);
+  const db = await dataverseDB();
 
   const records = (await db.getAll(STORE)) as RecentWorkspace[];
 
@@ -59,7 +58,7 @@ export async function listRecentWorkspaces(): Promise<RecentWorkspace[]> {
 }
 
 export async function removeRecentWorkspace(id: string): Promise<void> {
-  const db = await openDB(DB_NAME, STORE);
+  const db = await dataverseDB();
 
   await db.delete(STORE, id);
 }
@@ -67,7 +66,7 @@ export async function removeRecentWorkspace(id: string): Promise<void> {
 export async function saveLocalWorkspace(
   handle: FileSystemDirectoryHandle,
 ): Promise<LocalWorkspaceRecent> {
-  const db = await openDB(DB_NAME, STORE);
+  const db = await dataverseDB();
   const existingRecords = await listRecentWorkspaces();
 
   /*
@@ -115,7 +114,7 @@ export async function saveLocalWorkspace(
 }
 
 export async function saveOpfsWorkspace(name: string): Promise<OpfsWorkspaceRecent> {
-  const db = await openDB(DB_NAME, STORE);
+  const db = await dataverseDB();
 
   const opfsDirectoryName = normalizeOpfsDirectoryName(name);
   const id = `opfs:${opfsDirectoryName}`;

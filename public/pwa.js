@@ -104,6 +104,14 @@ if ('serviceWorker' in navigator && !isDevEnvironment) {
       serviceWorkerUrl.href,
       {
         scope: appScopeUrl.pathname,
+        updateViaCache: 'none',
       },
     )
+
+  /*
+   * Check for a new worker on every load. The default update check can be
+   * satisfied from the HTTP cache, which keeps an older app shell after a
+   * solution import.
+   */
+  void registration.then((worker) => worker.update()).catch(() => undefined)
 }

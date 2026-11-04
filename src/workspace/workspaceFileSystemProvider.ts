@@ -171,20 +171,6 @@ export class WorkspaceFileSystemProvider implements IFileSystemProviderWithFileR
       : this.real.writeFile(uri, content, opts);
   }
 
-  /**
-   * Emits change events for writes performed outside IFileService.
-   *
-   * Normal `vscode.workspace.fs` writes are observed through the file service
-   * (or the browser FileSystemObserver). A caller that reaches the provider
-   * directly skips both, so it must publish the change through this method to
-   * keep `createFileSystemWatcher` subscribers in sync.
-   */
-  notifyFileChanges(changes: readonly IFileChange[]): void {
-    if (changes.length > 0) {
-      this.changeEmitter.fire(changes);
-    }
-  }
-
   mkdir(uri: vscodeType.Uri): Promise<void> {
     return this.isOverlay(uri) ? this.overlay.mkdir(uri) : this.real.mkdir(uri);
   }

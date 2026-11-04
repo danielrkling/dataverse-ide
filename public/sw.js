@@ -1,4 +1,4 @@
-const CACHE_NAME = 'dataverse-ide-runtime-v3'
+const CACHE_NAME = 'dataverse-ide-runtime-v4'
 
 const scopeUrl = new URL(self.registration.scope)
 const indexUrl = new URL('./index.html', scopeUrl).href
@@ -40,6 +40,7 @@ async function precacheIfAvailable(cache, url) {
   try {
     const response = await fetch(url, {
       credentials: 'same-origin',
+      cache: 'reload',
     })
 
     if (!response.ok) {
@@ -61,9 +62,34 @@ async function precacheIfAvailable(cache, url) {
   }
 }
 
+async function networkFirstResource(request) {
+  const cache = await caches.open(CACHE_NAME)
+
+  try {
+    const response = await fetch(request, {
+      cache: 'no-store',
+    })
+
+    if (isCacheableResponse(response)) {
+      await cache.put(request, response.clone())
+    }
+
+    return response
+  } catch {
+    return (await cache.match(request)) ?? Response.error()
+  }
+}
+
 async function networkFirstNavigation(request) {
   try {
-    const response = await fetch(request)
+    /*
+     * Bypass the browser HTTP cache. Dataverse web resources can be served
+     * with long-lived cache headers, and a cached index.html would keep
+     * pointing at the previous hashed assets after a solution import.
+     */
+    const response = await fetch(request, {
+      cache: 'no-store',
+    })
 
     if (isCacheableResponse(response)) {
       await putInCache(request, response)
@@ -174,6 +200,15 @@ self.addEventListener('fetch', (event) => {
    */
   if (request.mode === 'navigate') {
     event.respondWith(networkFirstNavigation(request))
+    return
+  }
+
+  /*
+   * pwa.js is not content-hashed, so a cached copy can keep registering an
+   * old worker after a deployment. Fetch it from the network first.
+   */
+  if (url.pathname.endsWith('/pwa.js')) {
+    event.respondWith(networkFirstResource(request))
     return
   }
 

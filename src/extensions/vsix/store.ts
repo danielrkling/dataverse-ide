@@ -1,4 +1,4 @@
-import { openDB } from "../../util/db.js";
+import { dataverseDB, VSIX_STORE } from "../../util/dataverseDb.js";
 
 /*
  * Persistent store for installed VSIX packages.
@@ -9,8 +9,7 @@ import { openDB } from "../../util/db.js";
  * also makes uninstall/export a simple IndexedDB delete/get.
  */
 
-const DATABASE_NAME = "dataverse-ide-vsix";
-const STORE_NAME = "vsix";
+const STORE_NAME = VSIX_STORE;
 
 export type StoredVsix = {
   id: string;
@@ -22,16 +21,6 @@ export type StoredVsix = {
   installedAt: number;
   data: Uint8Array;
 };
-
-type Database = Awaited<ReturnType<typeof openDB>>;
-
-let databasePromise: Promise<Database> | undefined;
-
-function database(): Promise<Database> {
-  databasePromise ??= openDB(DATABASE_NAME, STORE_NAME);
-
-  return databasePromise;
-}
 
 function toUint8Array(value: unknown): Uint8Array {
   if (value instanceof Uint8Array) {
@@ -50,7 +39,7 @@ function toUint8Array(value: unknown): Uint8Array {
 }
 
 export async function listStoredVsix(): Promise<StoredVsix[]> {
-  const values = await (await database()).getAll(STORE_NAME);
+  const values = await (await dataverseDB()).getAll(STORE_NAME);
   const stored: StoredVsix[] = [];
 
   for (const value of values) {
@@ -70,9 +59,9 @@ export async function listStoredVsix(): Promise<StoredVsix[]> {
 }
 
 export async function saveStoredVsix(entry: StoredVsix): Promise<void> {
-  await (await database()).put(STORE_NAME, entry, entry.id);
+  await (await dataverseDB()).put(STORE_NAME, entry, entry.id);
 }
 
 export async function deleteStoredVsix(id: string): Promise<void> {
-  await (await database()).delete(STORE_NAME, id);
+  await (await dataverseDB()).delete(STORE_NAME, id);
 }
