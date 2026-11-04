@@ -3,6 +3,7 @@ import type * as vscodeType from "vscode";
 import { contributeExtensionManifest } from "../api.js";
 import { registerGuide } from "../shared/guide.js";
 import { createWatchStatus } from "../watchStatus.js";
+import { diagnoseOutputWrites } from "../../workspace/writeDiagnostics.js";
 
 import guideContent from "./GUIDE.md?raw";
 import {
@@ -55,6 +56,7 @@ const COMMAND_TOGGLE_WATCH = "dataverseIde.html.toggleWatch";
 const COMMAND_OPEN_CONFIG = "dataverseIde.html.openConfig";
 const COMMAND_SHOW_OUTPUT = "dataverseIde.html.showOutput";
 const COMMAND_RELOAD_CONFIG = "dataverseIde.html.reloadConfig";
+const COMMAND_DIAGNOSE_WRITES = "dataverseIde.html.diagnoseWrites";
 
 const WATCH_DEBOUNCE_MS = 300;
 
@@ -175,6 +177,10 @@ export default {
           title: "HTML: Reload Config",
         },
         {
+          command: COMMAND_DIAGNOSE_WRITES,
+          title: "HTML: Diagnose Output Writes",
+        },
+        {
           command: "dataverseIde.html.openGuide",
           title: "HTML: How-to Guide",
         },
@@ -214,6 +220,14 @@ export default {
     let fileSystemWatcher: vscodeType.FileSystemWatcher | undefined;
 
     const watchPairs = new Map<string, WatchPair>();
+
+    /*
+     * Last HTML successfully written per output URI. Watch rebuilds often
+     * produce identical output (especially when a dependency changed but the
+     * inlined result did not). Writing it again costs a full File System
+     * Access commit, so skip it when the file still exists.
+     */
+    const lastWrittenHtml = new Map<string, string>();
 
     let pendingInputs: string[] = [];
 
@@ -486,14 +500,49 @@ export default {
 
         const outputUri = uriFor(vscode, context.workspaceRootUri, outputPath);
 
-        const ensureStarted = performance.now();
-        const directoryCreated = await ensureParentDirectory(vscode, outputUri);
-        const ensureMs = performance.now() - ensureStarted;
+        /*
+         * Same guard as the esbuild writer: if another watch-triggered bundle
+         * for this entry is already queued, this result is stale. The next
+         * loop iteration will write the newer result, so don't spend a slow
+         * File System Access commit on this one.
+         */
+        if (options?.silent === true && pendingInputs.includes(inputPath)) {
+          outputChannel.appendLine(
+            `[html] write skipped: a newer bundle is queued (${outputPath}).`,
+          );
+
+          return true;
+        }
 
         const encoded = new TextEncoder().encode(result.html);
-        const writeStarted = performance.now();
-        await vscode.workspace.fs.writeFile(outputUri, encoded);
-        const writeMs = performance.now() - writeStarted;
+        const outputKey = outputUri.toString();
+
+        let writeSkipped = false;
+
+        if (lastWrittenHtml.get(outputKey) === result.html) {
+          try {
+            await vscode.workspace.fs.stat(outputUri);
+            writeSkipped = true;
+          } catch {
+            // The file was deleted externally; write it again.
+          }
+        }
+
+        let ensureMs = 0;
+        let directoryCreated = false;
+        let writeMs = 0;
+
+        if (!writeSkipped) {
+          const ensureStarted = performance.now();
+          directoryCreated = await ensureParentDirectory(vscode, outputUri);
+          ensureMs = performance.now() - ensureStarted;
+
+          const writeStarted = performance.now();
+          await vscode.workspace.fs.writeFile(outputUri, encoded);
+          writeMs = performance.now() - writeStarted;
+
+          lastWrittenHtml.set(outputKey, result.html);
+        }
 
         pair.builtVersions.clear();
 
@@ -516,9 +565,9 @@ export default {
         outputChannel.appendLine(
           `[html] stages: entry ${Math.round(entryMs)}ms, bundle ${Math.round(bundleMs)}ms, ` +
             `ensure ${Math.round(ensureMs)}ms${directoryCreated ? " (created)" : ""}, ` +
-            `write ${Math.round(writeMs)}ms ` +
+            `write ${Math.round(writeMs)}ms${writeSkipped ? " (unchanged)" : ""} ` +
             `(${bundleFileReads} reads ${Math.round(bundleReadMs)}ms, ` +
-            `${bundleReadBytes} bytes read; ${encoded.length} bytes written)`,
+            `${bundleReadBytes} bytes read; ${encoded.length} bytes output)`,
         );
 
         if (options?.silent !== true) {
@@ -942,6 +991,56 @@ export default {
       await vscode.window.showInformationMessage("HTML: configuration reloaded.");
     });
 
+    const diagnoseWritesCommand = vscode.commands.registerCommand(
+      COMMAND_DIAGNOSE_WRITES,
+      async () => {
+        const workspace = context.workspaceDirectoryHandle;
+
+        if (workspace == null) {
+          await vscode.window.showWarningMessage(
+            "HTML: open a local folder to diagnose output writes.",
+          );
+
+          return;
+        }
+
+        outputChannel.show(true);
+        outputChannel.appendLine("[html-write] diagnostics starting…");
+
+        try {
+          const entry = currentConfig.entryPoints[0];
+          const outputPath = normalizeWorkspacePath(
+            entry?.output ??
+              (entry != null ? defaultOutputPath(entry.input, currentConfig.outdir) : ""),
+          );
+          const outputUri = uriFor(vscode, context.workspaceRootUri, outputPath);
+          const lastHtml = lastWrittenHtml.get(outputUri.toString());
+          const outputBytes = lastHtml != null ? new TextEncoder().encode(lastHtml) : undefined;
+          const lines = await diagnoseOutputWrites(
+            vscode,
+            context.workspaceRootUri,
+            workspace,
+            currentConfig.outdir,
+            outputPath,
+            outputBytes,
+          );
+
+          for (const line of lines) {
+            outputChannel.appendLine(`[html-write] ${line}`);
+          }
+
+          await vscode.window.showInformationMessage(
+            "HTML output write diagnostics finished — see the HTML output channel.",
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+
+          outputChannel.appendLine(`[html-write] diagnostics failed: ${message}`);
+          await vscode.window.showErrorMessage(`HTML write diagnostics failed: ${message}`);
+        }
+      },
+    );
+
     /*
      * Rebuild while the user types (debounced) instead of waiting for a save.
      * runBundle() snapshots dirty editor buffers, so the rebuild sees the
@@ -1015,6 +1114,7 @@ export default {
         openConfigCommand.dispose();
         showOutputCommand.dispose();
         reloadConfigCommand.dispose();
+        diagnoseWritesCommand.dispose();
 
         guideRegistration.dispose();
       },

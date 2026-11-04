@@ -10,23 +10,22 @@ import { gzipSync } from "node:zlib";
  *
  *   <serviceWorkerUri>?v=<version>&vscode-resource-base-authority=...&...
  *
- * Dataverse answers that query-stringed web-resource URL with a redirect, and
- * service-worker script fetches use redirect: "error", so registration fails:
+ * Dataverse redirects that web-resource URL, and service-worker script fetches
+ * use redirect: "error", so registration fails:
  *
  *   Could not register service worker: SecurityError: Failed to register a
  *   ServiceWorker for scope ... The script resource is behind a redirect,
  *   which is disallowed.
  *
- * Serve the webview pre assets from a stable, query-free /webview/ folder
- * instead. The worker keeps its own ("/webview/") scope, so it does not
- * replace the app-wide PWA service worker, and it still covers both the shell
- * and the fake content page so webview resource URLs resolve.
+ * A query-free URL under the webview folder is redirected too. Dataverse serves
+ * the app's own `sw.js` fine, so the trigger is the `service-worker…` file name.
+ * Serve the worker from the app root under a neutral name (with an explicit
+ * /webview/ scope) and host the shell/fake pages in a stable /webview/ folder.
  *
  * The worker read its configuration (resource base authority, remote
- * authority, platform) from the query string. Since the query string is what
- * triggers the Dataverse redirect, bake the browser defaults into the served
- * copy instead. The shell's inline script is covered by a CSP hash, so the
- * hash is recomputed whenever the registration line is patched.
+ * authority, platform) from the query string. Bake the browser defaults into
+ * the served copy instead. The shell's inline script is covered by a CSP hash,
+ * so the hash is recomputed whenever the registration code is patched.
  */
 const WEBVIEW_PRE_DIR = path.join(
   import.meta.dirname,
@@ -97,16 +96,27 @@ function patchWebviewServiceWorker(source: string): string {
 }
 
 function patchWebviewShell(source: string): string {
-  const patched = source.replace(
+  const registrationMarker = "navigator.serviceWorker.register(swPath, { type: 'module' })";
+  let patched = source.replace(
     /\t\t\tconst swPath = encodeURI\([^\n]*\);/,
     "\t\t\tconst swPath = serviceWorkerUri;",
   );
 
-  if (patched === source) {
+  if (patched === source || !patched.includes(registrationMarker)) {
     throw new Error(
       "monaco-vscode-api webview index.html changed; update the service-worker registration patch in vite.config.ts.",
     );
   }
+
+  /*
+   * The worker lives at the app root (so Dataverse serves it) but must only
+   * control the /webview/ pages. The scope is within the script's own directory
+   * (the app root), so no Service-Worker-Allowed header is required.
+   */
+  patched = patched.replace(
+    registrationMarker,
+    "navigator.serviceWorker.register(swPath, { type: 'module', scope: new URL('./', location.href).pathname })",
+  );
 
   const inlineScript = patched.match(/<script async type="module">([\s\S]*?)<\/script>/);
 
@@ -127,9 +137,10 @@ function patchWebviewShell(source: string): string {
 
 function buildWebviewPreAssets(): Record<string, string> {
   return {
-    "index.html": patchWebviewShell(readWebviewPre("index.html")),
-    "fake.html": readWebviewPre("fake.html"),
-    "service-worker.js": patchWebviewServiceWorker(readWebviewPre("service-worker.js")),
+    "webview/index.html": patchWebviewShell(readWebviewPre("index.html")),
+    "webview/fake.html": readWebviewPre("fake.html"),
+    // Deliberately not named "service-worker.js": Dataverse redirects that name.
+    "vscode-webview-runtime.js": patchWebviewServiceWorker(readWebviewPre("service-worker.js")),
   };
 }
 
@@ -139,14 +150,7 @@ const webviewPreAssetsServe: Plugin = {
   configureServer(server) {
     server.middlewares.use((req, res, next) => {
       const pathname = new URL(req.originalUrl ?? "/", "http://localhost").pathname;
-      const prefix = "/webview/";
-
-      if (!pathname.startsWith(prefix)) {
-        next();
-        return;
-      }
-
-      const name = pathname.slice(prefix.length);
+      const name = pathname.replace(/^\/+/, "");
       const assets = buildWebviewPreAssets();
 
       if (assets[name] == null) {
@@ -178,8 +182,8 @@ const webviewPreAssetsBuild: Plugin = {
   apply: "build",
   buildStart() {
     // fileName (not name) keeps these URLs stable and free of a content hash.
-    for (const [name, source] of Object.entries(buildWebviewPreAssets())) {
-      this.emitFile({ type: "asset", fileName: `webview/${name}`, source });
+    for (const [fileName, source] of Object.entries(buildWebviewPreAssets())) {
+      this.emitFile({ type: "asset", fileName, source });
     }
   },
 };

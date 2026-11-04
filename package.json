@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc && node --max-old-space-size=5120 node_modules/vite/bin/vite.js build",
     "preview": "vite preview",
     "serve:dataverse": "node tools/serve-dataverse-like.mjs",
     "package:solution": "node tools/package-solution.mjs",

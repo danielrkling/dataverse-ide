@@ -343,18 +343,21 @@ function applyProductIcon(): void {
 /*
  * The workbench normally registers the stock webview pre assets (hashed
  * assets under /assets/, with a query string appended to the service-worker
- * URL). Dataverse redirects that query-stringed URL and service-worker
- * scripts may not follow redirects, so vite.config.ts emits patched copies
- * under a stable /webview/ folder. Point the webview host at those instead.
+ * URL). Dataverse redirects that worker URL and service-worker scripts may not
+ * follow redirects, so vite.config.ts emits patched copies: shell/fake pages
+ * under /webview/ and the worker at the app root under a name Dataverse does
+ * not redirect. Point the webview host at those instead.
  */
 function registerWebviewAssets(): void {
-  const base = new URL("./webview/", document.baseURI);
+  const base = new URL("./", document.baseURI);
 
   registerAssets({
-    "vs/workbench/contrib/webview/browser/pre/index.html": new URL("index.html", base).href,
-    "vs/workbench/contrib/webview/browser/pre/fake.html": new URL("fake.html", base).href,
-    "vs/workbench/contrib/webview/browser/pre/service-worker.js": new URL("service-worker.js", base)
-      .href,
+    "vs/workbench/contrib/webview/browser/pre/index.html": new URL("webview/index.html", base).href,
+    "vs/workbench/contrib/webview/browser/pre/fake.html": new URL("webview/fake.html", base).href,
+    "vs/workbench/contrib/webview/browser/pre/service-worker.js": new URL(
+      "vscode-webview-runtime.js",
+      base,
+    ).href,
   });
 }
 
