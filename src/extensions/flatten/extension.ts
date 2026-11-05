@@ -3,6 +3,7 @@ import type * as vscodeType from "vscode";
 import { contributeExtensionManifest } from "../api.js";
 
 import guideContent from "./GUIDE.md?raw";
+import { createGlobMatcher, globBaseSegments, globStartsInside, isGlobPattern } from "./glob.js";
 
 import { registerGuide } from "../shared/guide.js";
 
@@ -45,8 +46,15 @@ const FLATTEN_OUTPUT_PATTERN = /^#(?:.*#)?(\d+)\.md$/;
  * flattens don't include them and numbering continues from them. */
 const LEGACY_FLATTEN_OUTPUT_PATTERN = /^~(?:.*#)?(\d+)\.md$/;
 
-/* Keep a pathological selection from freezing the editor. */
+/* Keep a pathological selection from freezing the editor. Folders stay
+ * conservative; globs are meant to reach across large trees such as
+ * node_modules, where a `.d.ts` pattern alone can match thousands of files. */
 const MAX_FILES_PER_FOLDER = 500;
+const MAX_FILES_PER_GLOB = 10000;
+
+/* Glob traversal starts at the pattern's literal prefix. `**` can still cover
+ * a large tree, so cap visited directories separately from matched files. */
+const MAX_DIRECTORIES_PER_GLOB = 20000;
 
 /* Directories that are never flattened, even when selected as a folder. */
 const EXCLUDED_DIRECTORY_NAMES = new Set([".git", "node_modules", ".ide-build", "dist"]);
@@ -172,6 +180,102 @@ async function collectDirectoryFiles(
         break;
       }
     }
+  }
+
+  return files;
+}
+
+/*
+ * Expand one configured glob. Traversal is the same provider-direct walk used
+ * for folders, but every candidate file is matched against the workspace
+ * relative path instead of being included wholesale.
+ *
+ * A glob whose literal prefix lives inside a normally excluded directory
+ * (`node_modules`, `dist`, ...) opts into that subtree, so exclusions are
+ * disabled below it - otherwise a type-definition glob rooted at
+ * `node_modules` would miss every package that publishes types from a `dist`
+ * folder. Globs rooted elsewhere keep the normal exclusions.
+ */
+async function collectGlobFiles(
+  vscode: typeof vscodeType,
+  workspaceRootUri: vscodeType.Uri,
+  pattern: string,
+  baseUri: vscodeType.Uri,
+  outputChannel: vscodeType.OutputChannel,
+): Promise<vscodeType.Uri[]> {
+  const matches = createGlobMatcher(pattern);
+  const insideExcludedTree = globStartsInside(pattern, EXCLUDED_DIRECTORY_NAMES);
+  const files: vscodeType.Uri[] = [];
+  const pending: vscodeType.Uri[] = [baseUri];
+  const visited = new Set<string>();
+  let directoriesVisited = 0;
+
+  while (pending.length > 0) {
+    if (files.length >= MAX_FILES_PER_GLOB || directoriesVisited >= MAX_DIRECTORIES_PER_GLOB) {
+      break;
+    }
+
+    const current = pending.shift()!;
+    const key = current.toString();
+
+    if (visited.has(key)) {
+      continue;
+    }
+
+    visited.add(key);
+    directoriesVisited++;
+
+    let entries: Array<[string, vscodeType.FileType]>;
+
+    try {
+      entries = await vscode.workspace.fs.readDirectory(current);
+    } catch {
+      outputChannel.appendLine(
+        `[flatten] could not read directory ${vscode.workspace.asRelativePath(current, false)}`,
+      );
+      continue;
+    }
+
+    entries.sort(([left], [right]) => left.localeCompare(right));
+
+    for (const [name, type] of entries) {
+      const child = vscode.Uri.joinPath(current, name);
+
+      if ((type & vscode.FileType.Directory) !== 0) {
+        if (insideExcludedTree || !EXCLUDED_DIRECTORY_NAMES.has(name.toLowerCase())) {
+          pending.push(child);
+        }
+
+        continue;
+      }
+
+      if ((type & vscode.FileType.File) === 0 || isGeneratedFlattenFile(child)) {
+        continue;
+      }
+
+      if (matches(workspaceRelativePath(vscode, workspaceRootUri, child))) {
+        files.push(child);
+
+        if (files.length >= MAX_FILES_PER_GLOB) {
+          break;
+        }
+      }
+    }
+  }
+
+  files.sort((left, right) =>
+    workspaceRelativePath(vscode, workspaceRootUri, left).localeCompare(
+      workspaceRelativePath(vscode, workspaceRootUri, right),
+    ),
+  );
+
+  if (files.length === 0) {
+    outputChannel.appendLine(`[flatten] glob "${pattern}" matched no files.`);
+  } else if (files.length >= MAX_FILES_PER_GLOB || directoriesVisited >= MAX_DIRECTORIES_PER_GLOB) {
+    outputChannel.appendLine(
+      `[flatten] glob "${pattern}" stopped after ${files.length} file(s) ` +
+        `(${MAX_FILES_PER_GLOB} file / ${MAX_DIRECTORIES_PER_GLOB} directory limit).`,
+    );
   }
 
   return files;
@@ -352,6 +456,14 @@ function fencedBlock(language: string, content: string): string {
 
 type FlattenSelection = { path: string; isDirectory: boolean };
 
+/*
+ * A configured include is either a concrete path or a glob rooted at its
+ * literal prefix. Selected-file invocations only ever use `path`.
+ */
+type FlattenSource =
+  | { kind: "path"; uri: vscodeType.Uri }
+  | { kind: "glob"; pattern: string; baseUri: vscodeType.Uri };
+
 type FlattenResult = {
   sections: string[];
   selections: FlattenSelection[];
@@ -360,13 +472,14 @@ type FlattenResult = {
 };
 
 /*
- * Read every selected file (or every file below a selected folder) and build
- * the markdown sections. Shared by the interactive and configured commands.
+ * Read every selected file (or every file below a selected folder/glob) and
+ * build the markdown sections. Shared by the interactive and configured
+ * commands.
  */
 async function collectSections(
   vscode: typeof vscodeType,
   workspaceRootUri: vscodeType.Uri,
-  uris: vscodeType.Uri[],
+  sources: FlattenSource[],
   outputChannel: vscodeType.OutputChannel,
 ): Promise<FlattenResult> {
   const sections: string[] = [];
@@ -375,7 +488,43 @@ async function collectSections(
   let included = 0;
   let skipped = 0;
 
-  for (const uri of uris) {
+  const addFiles = async (files: vscodeType.Uri[]): Promise<void> => {
+    for (const file of files) {
+      /*
+       * A file can appear twice when the user selects a folder and one of its
+       * descendants, when a glob overlaps another include, or when the same
+       * resource is forwarded twice.
+       */
+      if (!seenFiles.add(file.toString())) {
+        continue;
+      }
+
+      const section = await readSection(vscode, workspaceRootUri, file);
+
+      if (section != null) {
+        sections.push(section);
+        included++;
+      } else {
+        skipped++;
+      }
+    }
+  };
+
+  for (const source of sources) {
+    if (source.kind === "glob") {
+      const files = await collectGlobFiles(
+        vscode,
+        workspaceRootUri,
+        source.pattern,
+        source.baseUri,
+        outputChannel,
+      );
+
+      await addFiles(files);
+      continue;
+    }
+
+    const uri = source.uri;
     const relativePath = workspaceRelativePath(vscode, workspaceRootUri, uri);
 
     let stat: vscodeType.FileStat;
@@ -391,26 +540,7 @@ async function collectSections(
     const isDirectory = (stat.type & vscode.FileType.Directory) !== 0;
     selections.push({ path: relativePath, isDirectory });
 
-    const files = isDirectory ? await collectDirectoryFiles(vscode, uri, outputChannel) : [uri];
-
-    for (const file of files) {
-      /*
-       * A file can appear twice when the user selects a folder and one of its
-       * descendants, or when the same resource is forwarded twice.
-       */
-      if (!seenFiles.add(file.toString())) {
-        continue;
-      }
-
-      const section = await readSection(vscode, workspaceRootUri, file);
-
-      if (section != null) {
-        sections.push(section);
-        included++;
-      } else {
-        skipped++;
-      }
-    }
+    await addFiles(isDirectory ? await collectDirectoryFiles(vscode, uri, outputChannel) : [uri]);
   }
 
   return { sections, selections, included, skipped };
@@ -458,14 +588,23 @@ function configuredFileName(value: string | undefined): string {
   return `${safe.length > 0 ? safe : DEFAULT_CONFIGURED_NAME}.md`;
 }
 
-function resolveConfiguredIncludes(
+async function resolveConfiguredIncludes(
   vscode: typeof vscodeType,
   workspaceRootUri: vscodeType.Uri,
   includes: string[],
-): { uris: vscodeType.Uri[]; problems: string[] } {
-  const uris: vscodeType.Uri[] = [];
+): Promise<{ sources: FlattenSource[]; problems: string[] }> {
+  const sources: FlattenSource[] = [];
   const problems: string[] = [];
   const seen = new Set<string>();
+
+  const addPath = (uri: vscodeType.Uri): void => {
+    const key = uri.toString();
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      sources.push({ kind: "path", uri });
+    }
+  };
 
   for (const include of includes) {
     const normalized = include
@@ -486,16 +625,42 @@ function resolveConfiguredIncludes(
       continue;
     }
 
-    const uri = vscode.Uri.joinPath(workspaceRootUri, ...segments);
-    const key = uri.toString();
+    if (isGlobPattern(normalized)) {
+      /*
+       * A literal path wins over the glob interpretation. This keeps folders
+       * such as `src/app/[slug]` or `src/{draft}` working even though their
+       * names contain glob syntax.
+       */
+      const literalUri = vscode.Uri.joinPath(workspaceRootUri, ...segments);
 
-    if (!seen.has(key)) {
-      seen.add(key);
-      uris.push(uri);
+      try {
+        await vscode.workspace.fs.stat(literalUri);
+        addPath(literalUri);
+        continue;
+      } catch {
+        // Not a real path; expand it as a glob below.
+      }
+
+      /*
+       * Start traversal at the literal prefix (`node_modules` for a markdown
+       * glob rooted there). Matching still uses the full pattern against the
+       * workspace-relative path.
+       */
+      const baseUri = vscode.Uri.joinPath(workspaceRootUri, ...globBaseSegments(normalized));
+      const key = `glob:${normalized}`;
+
+      if (!seen.has(key)) {
+        seen.add(key);
+        sources.push({ kind: "glob", pattern: normalized, baseUri });
+      }
+
+      continue;
     }
+
+    addPath(vscode.Uri.joinPath(workspaceRootUri, ...segments));
   }
 
-  return { uris, problems };
+  return { sources, problems };
 }
 
 export default {
@@ -547,10 +712,11 @@ export default {
             default: [],
             scope: "window",
             markdownDescription:
-              "Workspace-relative files and folders included by " +
+              "Workspace-relative files, folders and glob patterns included by " +
               "`Flatten: Combine Configured Files into Markdown`. Folders are expanded " +
-              "recursively; `.git`, `node_modules`, `.ide-build` and `dist` are skipped. " +
-              'Example: `["src", "package.json"]`.',
+              "recursively; `.git`, `node_modules`, `.ide-build` and `dist` are skipped unless " +
+              "a glob starts inside them. Globs use picomatch syntax (`*`, `**`, `?`, " +
+              '`{a,b}`, `[...]`). Example: `["src", "node_modules/**/*.{md,d.ts}"]`.',
           },
         },
       },
@@ -615,7 +781,12 @@ export default {
           return;
         }
 
-        const result = await collectSections(vscode, context.workspaceRootUri, uris, outputChannel);
+        const result = await collectSections(
+          vscode,
+          context.workspaceRootUri,
+          uris.map((uri) => ({ kind: "path" as const, uri })),
+          outputChannel,
+        );
 
         if (result.sections.length === 0) {
           await vscode.window.showWarningMessage(
@@ -661,13 +832,17 @@ export default {
           return;
         }
 
-        const resolved = resolveConfiguredIncludes(vscode, context.workspaceRootUri, includes);
+        const resolved = await resolveConfiguredIncludes(
+          vscode,
+          context.workspaceRootUri,
+          includes,
+        );
 
         problems.push(...resolved.problems);
 
-        if (resolved.uris.length === 0) {
+        if (resolved.sources.length === 0) {
           await vscode.window.showWarningMessage(
-            `Flatten: no valid paths in "${CONFIG_SECTION}.${SETTING_INCLUDE}".`,
+            `Flatten: no valid paths or globs in "${CONFIG_SECTION}.${SETTING_INCLUDE}".`,
           );
 
           return;
@@ -680,7 +855,7 @@ export default {
         const result = await collectSections(
           vscode,
           context.workspaceRootUri,
-          resolved.uris,
+          resolved.sources,
           outputChannel,
         );
 

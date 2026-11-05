@@ -29,12 +29,14 @@ const textFiles: Record<string, string> = {
     <img src="img/photo.png" srcset="img/photo.png 1x, img/photo@2x.png 2x">
     <img src="img/missing.png" alt="missing">
     <img src="img/kept.png" alt="kept">
+    <img src="img/brace.png" alt="brace">
   </body>
 </html>`,
   "css/app.css": `@import "./base.css";\n@import "./external.css";\nbody { background: url("../img/photo.png"); }\n.kept { background: url("../img/kept.png"); }`,
   "css/base.css": `.base { color: red; }`,
   "js/app.js": `console.log("</script>");`,
   "img/logo.svg": `<svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></svg>`,
+  "img/brace.png": `external`,
 };
 
 const binaryFiles: Record<string, Uint8Array> = {
@@ -52,7 +54,7 @@ const options: HtmlInlineOptions = {
   maxInlineBytes: 0,
   minify: false,
   removeComments: true,
-  external: ["**/vendor.js", "external.css", "**/kept.png"],
+  external: ["**/vendor.js", "external.css", "**/kept.png", "**/{brace,other}.png"],
 };
 
 const touched: string[] = [];
@@ -116,8 +118,12 @@ assert.ok(
 assert.ok(result.html.includes('@import "./external.css";'), "external @import is preserved");
 assert.ok(result.html.includes('url("../img/kept.png")'), "external CSS url() is preserved");
 assert.ok(result.html.includes('src="img/kept.png"'), "external img src is preserved");
+assert.ok(
+  result.html.includes('src="img/brace.png"'),
+  "brace alternatives in external patterns are preserved",
+);
 
-for (const external of ["js/vendor.js", "css/external.css", "img/kept.png"]) {
+for (const external of ["js/vendor.js", "css/external.css", "img/kept.png", "img/brace.png"]) {
   assert.ok(
     !result.dependencies.includes(external),
     `external ${external} was not read or recorded as a dependency`,

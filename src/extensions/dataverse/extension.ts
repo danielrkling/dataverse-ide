@@ -197,14 +197,14 @@ export async function installDataverseUploadExtension(
               type: "string",
               default: "",
               description:
-                "IDE user identity full name (populated by Dataverse: Load User Identity).",
+                "IDE user identity full name (populated automatically at startup and by Dataverse: Load User Identity).",
             },
 
             "dataverseIde.user.email": {
               type: "string",
               default: "",
               description:
-                "IDE user identity email address (populated by Dataverse: Load User Identity).",
+                "IDE user identity email address (populated automatically at startup and by Dataverse: Load User Identity).",
             },
           },
         },
@@ -914,78 +914,110 @@ export default {
      * Identity: WhoAmI + systemusers -> git commit author + IDE user.
      * Written to dataverseIde.git.authorName/authorEmail (git extension
      * reads those to skip the prompts) and dataverseIde.user.*.
+     *
+     * Activation loads this silently so commits use the signed-in user
+     * without a manual step. The command reruns it with UI feedback when
+     * the user wants to refresh a changed name or email.
      */
-    const loadUserIdentityCommand = vscodeBottom.commands.registerCommand(
-      "dataverseIde.dataverse.loadUserIdentity",
-      async () => {
-        try {
-          const client = new DataverseWebResourceClient({
-            apiBaseUrl: (await readDataverseConfig(vscodeBottom, context.workspaceRootUri)).config
-              .apiBaseUrl,
-          });
+    async function loadUserIdentity(options: { silent?: boolean } = {}): Promise<void> {
+      const silent = options.silent === true;
 
-          const user = await vscodeBottom.window.withProgress(
-            {
-              location: vscodeBottom.ProgressLocation.Notification,
-              title: "Dataverse: loading user identity…",
-              cancellable: false,
-            },
-            () => client.getCurrentUser(),
-          );
+      try {
+        const client = new DataverseWebResourceClient({
+          apiBaseUrl: (await readDataverseConfig(vscodeBottom, context.workspaceRootUri)).config
+            .apiBaseUrl,
+        });
 
-          if (user.fullName.length === 0 || user.email.length === 0) {
+        const user = silent
+          ? await client.getCurrentUser()
+          : await vscodeBottom.window.withProgress(
+              {
+                location: vscodeBottom.ProgressLocation.Notification,
+                title: "Dataverse: loading user identity…",
+                cancellable: false,
+              },
+              () => client.getCurrentUser(),
+            );
+
+        if (user.fullName.length === 0 || user.email.length === 0) {
+          if (!silent) {
             await vscodeBottom.window.showWarningMessage(
               "Dataverse: the user record has no full name or email; identity not applied.",
             );
+          }
 
+          return;
+        }
+
+        /*
+         * Identity is user-scoped (global): it describes the signed-in
+         * person, not the project, so it follows the user across
+         * workspaces.
+         */
+        const gitConfig = vscodeBottom.workspace.getConfiguration(
+          "dataverseIde.git",
+          context.workspaceRootUri,
+        );
+
+        const userConfig = vscodeBottom.workspace.getConfiguration(
+          "dataverseIde.user",
+          context.workspaceRootUri,
+        );
+
+        /*
+         * Skip unchanged values so repeated startup loads do not fire
+         * configuration change events for every affected extension.
+         */
+        async function apply(
+          config: vscodeType.WorkspaceConfiguration,
+          key: string,
+          value: string,
+        ): Promise<void> {
+          if (config.get<string>(key, "").trim() === value) {
             return;
           }
 
-          /*
-           * Identity is user-scoped (global): it describes the signed-in
-           * person, not the project, so it follows the user across
-           * workspaces.
-           */
-          const gitConfig = vscodeBottom.workspace.getConfiguration(
-            "dataverseIde.git",
-            context.workspaceRootUri,
-          );
+          await config.update(key, value, vscodeBottom.ConfigurationTarget.Global);
+        }
 
-          await gitConfig.update(
-            "authorName",
-            user.fullName,
-            vscodeBottom.ConfigurationTarget.Global,
-          );
+        await apply(gitConfig, "authorName", user.fullName);
+        await apply(gitConfig, "authorEmail", user.email);
+        await apply(userConfig, "name", user.fullName);
+        await apply(userConfig, "email", user.email);
 
-          await gitConfig.update(
-            "authorEmail",
-            user.email,
-            vscodeBottom.ConfigurationTarget.Global,
-          );
-
-          const userConfig = vscodeBottom.workspace.getConfiguration(
-            "dataverseIde.user",
-            context.workspaceRootUri,
-          );
-
-          await userConfig.update("name", user.fullName, vscodeBottom.ConfigurationTarget.Global);
-
-          await userConfig.update("email", user.email, vscodeBottom.ConfigurationTarget.Global);
-
+        if (!silent) {
           await vscodeBottom.window.showInformationMessage(
             `Dataverse: identity applied — ${user.fullName} <${user.email}>. Git commits now use this author automatically.`,
           );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-
-          await vscodeBottom.window.showErrorMessage(
-            `Dataverse: loading user identity failed: ${message}`,
-          );
         }
-      },
+      } catch (error) {
+        /*
+         * Startup runs outside a Dataverse org or before sign-in in many
+         * deployments; that is expected, so only log it. An explicit
+         * command still reports failures to the user.
+         */
+        if (silent) {
+          console.debug("[Dataverse IDE] User identity was not loaded on startup:", error);
+
+          return;
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+
+        await vscodeBottom.window.showErrorMessage(
+          `Dataverse: loading user identity failed: ${message}`,
+        );
+      }
+    }
+
+    const loadUserIdentityCommand = vscodeBottom.commands.registerCommand(
+      "dataverseIde.dataverse.loadUserIdentity",
+      () => loadUserIdentity(),
     );
 
     await installDataverseUploadExtension(context.workspaceRootUri);
+
+    void loadUserIdentity({ silent: true });
 
     return guideRegistration;
   },

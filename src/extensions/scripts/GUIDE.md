@@ -45,7 +45,7 @@ A script can be a steps array on its own:
 ```json
 {
   "dataverseIde.scripts.scripts": {
-    "format": ["dataverseIde.prettier.formatDocument"]
+    "format": ["editor.action.formatDocument"]
   }
 }
 ```

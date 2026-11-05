@@ -606,15 +606,17 @@ export default defineConfig({
   ],
   optimizeDeps: {
     /*
-     * Solid's Babel compilers are lazily imported by the esbuild extension.
-     * Vite only discovers dynamic imports at runtime, so pre-bundle them to
-     * avoid a dep-optimizer reload in the middle of the first Solid build.
+     * Solid's Babel compilers are lazily imported by the esbuild extension,
+     * and picomatch is imported by the lazily loaded flatten extension. Vite
+     * only discovers dynamic imports at runtime, so pre-bundle them to avoid a
+     * dep-optimizer reload in the middle of the first build or flatten run.
      */
     include: [
       "@babel/core",
       "@babel/preset-typescript",
       "@solidjs/babel-plugin",
       "babel-preset-solid",
+      "picomatch",
     ],
     // brotli-wasm's wasm URL reference breaks the dev pre-bundler's
     // import.meta.resolve; excluded so vite serves/patches it directly

@@ -95,6 +95,7 @@
     "monaco-editor": "npm:@codingame/monaco-vscode-editor-api@^38.0.4",
     "parse5": "^8.0.1",
     "path-browserify": "^1.0.1",
+    "picomatch": "^4.0.7",
     "process": "^0.11.10",
     "semver": "^7.8.5",
     "tailwindcss": "^4.3.3",
@@ -103,7 +104,6 @@
   },
   "devDependencies": {
     "@codingame/esbuild-import-meta-url-plugin": "^1.0.3",
-    "@tagged-jsx/prettier-plugin": "^1.2.0",
     "@tailwindcss/oxide": "^4.3.3",
     "@types/babel__core": "^7.20.5",
     "@types/semver": "^7.8.0",

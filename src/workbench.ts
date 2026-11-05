@@ -1,5 +1,7 @@
 import { initialize, IWorkbenchConstructionOptions, LogLevel } from "@codingame/monaco-vscode-api";
 import { registerAssets } from "@codingame/monaco-vscode-api/assets";
+import type { IProductConfiguration } from "@codingame/monaco-vscode-api/vscode/vs/base/common/product";
+import { createIndexedDBProviders } from "@codingame/monaco-vscode-files-service-override";
 import getWorkbenchServiceOverride from "@codingame/monaco-vscode-workbench-service-override";
 import getQuickAccessServiceOverride from "@codingame/monaco-vscode-quickaccess-service-override";
 import getConfigurationServiceOverride from "@codingame/monaco-vscode-configuration-service-override";
@@ -289,6 +291,21 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
    */
   await restoreInstalledVsixExtensions();
 
+  /*
+   * User settings are stored in `vscodeUserData:/User/settings.json`. The
+   * files service defaults that scheme to an in-memory provider, which makes
+   * every setting change (including files.autoSave) disappear on reload.
+   * Replace it with the IndexedDB-backed provider before initialize().
+   */
+  try {
+    await createIndexedDBProviders();
+  } catch (error) {
+    console.warn(
+      "[Dataverse IDE] Could not open persistent user settings storage; settings will not persist.",
+      error,
+    );
+  }
+
   console.info("[Dataverse IDE] Starting workbench services.");
 
   // Existing startWorkbench code follows...
@@ -307,6 +324,26 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
     iframeAlternateDomain = extensionHostLocation.href;
   }
 
+  /*
+   * Open VSX implements the VS Code gallery protocol. Without this product
+   * configuration the gallery service exists but is disabled, so the
+   * Extensions view cannot search for or install anything.
+   *
+   * `controlUrl` is intentionally empty: Open VSX has no extension control
+   * manifest, and the falsy value makes the gallery service use its empty
+   * defaults instead of failing on a 404.
+   */
+  const openVsxGallery: NonNullable<IProductConfiguration["extensionsGallery"]> & {
+    itemUrl: string;
+  } = {
+    serviceUrl: "https://open-vsx.org/vscode/gallery",
+    itemUrl: "https://open-vsx.org/vscode/item",
+    resourceUrlTemplate: "https://open-vsx.org/vscode/unpkg/{publisher}/{name}/{version}/{path}",
+    extensionUrlTemplate: "https://open-vsx.org/vscode/unpkg/{publisher}/{name}/{version}/{path}",
+    controlUrl: "",
+    nlsBaseUrl: "https://open-vsx.org/vscode/nls",
+  };
+
   const constructOptions: IWorkbenchConstructionOptions = {
     windowIndicator: {
       label: "Dataverse IDE",
@@ -315,6 +352,9 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
     },
     developmentOptions: {
       logLevel: LogLevel.Error,
+    },
+    productConfiguration: {
+      extensionsGallery: openVsxGallery,
     },
     configurationDefaults: {
       "workbench.colorTheme": "Default Dark Modern",

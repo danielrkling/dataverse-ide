@@ -27,6 +27,8 @@ import { defaultTreeAdapter, parse, serialize } from "parse5";
 
 import type { DefaultTreeAdapterTypes } from "parse5";
 
+import { createGlobMatcher } from "../shared/glob.js";
+
 export type HtmlInlineOptions = {
   inlineScripts: boolean;
   inlineStyles: boolean;
@@ -205,14 +207,7 @@ export function resolveWorkspaceReference(fromPath: string, reference: string): 
   return resolved;
 }
 
-type ExternalMatcher = {
-  regex: RegExp;
-  basename: boolean;
-};
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+type ExternalMatcher = (path: string) => boolean;
 
 function normalizeExternalPattern(pattern: string): string {
   const normalized = pattern.trim().replaceAll("\\", "/").replace(/^\.\//, "").replace(/^\/+/, "");
@@ -225,47 +220,11 @@ function normalizeExternalPattern(pattern: string): string {
   return normalized.endsWith("/") ? `${normalized}**` : normalized;
 }
 
-/**
- * Minimal glob support for external patterns:
- *   *   matches within one path segment
- *   **  matches across segments
- *   ?   matches one non-slash character
- * Patterns are case-insensitive; patterns without a slash match the file name.
+/*
+ * External patterns use picomatch syntax. Patterns without a slash match the
+ * file name (`matchBase`), and the shared defaults keep matching
+ * case-insensitive and dotfile-friendly.
  */
-function globToRegExp(pattern: string): RegExp {
-  let source = "^";
-
-  for (let index = 0; index < pattern.length; index++) {
-    const character = pattern[index];
-
-    if (character === "*") {
-      if (pattern[index + 1] === "*") {
-        index++;
-
-        if (pattern[index + 1] === "/") {
-          index++;
-          source += "(?:.*/)?";
-        } else {
-          source += ".*";
-        }
-      } else {
-        source += "[^/]*";
-      }
-
-      continue;
-    }
-
-    if (character === "?") {
-      source += "[^/]";
-      continue;
-    }
-
-    source += escapeRegExp(character);
-  }
-
-  return new RegExp(`${source}$`, "i");
-}
-
 function createExternalMatchers(patterns: string[]): ExternalMatcher[] {
   const matchers: ExternalMatcher[] = [];
 
@@ -276,10 +235,7 @@ function createExternalMatchers(patterns: string[]): ExternalMatcher[] {
       continue;
     }
 
-    matchers.push({
-      regex: globToRegExp(normalized),
-      basename: !normalized.includes("/"),
-    });
+    matchers.push(createGlobMatcher(normalized, { matchBase: true }));
   }
 
   return matchers;
@@ -296,23 +252,10 @@ function matchesExternal(
 
   const referencePath = reference.trim().replaceAll("\\", "/").replace(/^\.\//, "");
   const referenceWithoutQuery = referencePath.split(/[?#]/, 1)[0] ?? referencePath;
-  const basename = resolved.split("/").pop() ?? resolved;
-  const referenceBasename = referenceWithoutQuery.split("/").pop() ?? referenceWithoutQuery;
 
-  for (const matcher of matchers) {
-    if (matcher.regex.test(resolved) || matcher.regex.test(referencePath)) {
-      return true;
-    }
-
-    if (
-      matcher.basename &&
-      (matcher.regex.test(basename) || matcher.regex.test(referenceBasename))
-    ) {
-      return true;
-    }
-  }
-
-  return false;
+  return matchers.some(
+    (matches) => matches(resolved) || matches(referencePath) || matches(referenceWithoutQuery),
+  );
 }
 
 function isElementNode(node: ChildNode): node is Element {

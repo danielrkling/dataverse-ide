@@ -26,8 +26,31 @@ import {
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
 const COMMAND_INSTALL = "dataverseIde.vsix.install";
+const COMMAND_INSTALL_URL = "dataverseIde.vsix.installFromUrl";
 const COMMAND_UNINSTALL = "dataverseIde.vsix.uninstall";
 const COMMAND_LIST = "dataverseIde.vsix.list";
+
+const MAX_VSIX_BYTES = 64 * 1024 * 1024;
+
+function parseVsixUrl(value: string): URL | undefined {
+  try {
+    const url = new URL(value.trim());
+
+    return url.protocol === "https:" || url.protocol === "http:" ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function fileNameFromUrl(value: string): string {
+  try {
+    const name = decodeURIComponent(new URL(value).pathname.split("/").at(-1) ?? "");
+
+    return name.endsWith(".vsix") ? name : "extension.vsix";
+  } catch {
+    return "extension.vsix";
+  }
+}
 
 type PickedFile = {
   fileName: string;
@@ -98,16 +121,11 @@ async function offerReload(vscode: typeof vscodeType, message: string): Promise<
   }
 }
 
-async function installCommand(
+async function installPicked(
   vscode: typeof vscodeType,
   output: vscodeType.OutputChannel,
+  picked: PickedFile,
 ): Promise<void> {
-  const picked = await pickVsixFile();
-
-  if (picked == null) {
-    return;
-  }
-
   try {
     const installed = await vscode.window.withProgress(
       {
@@ -141,6 +159,120 @@ async function installCommand(
     }
 
     await vscode.window.showErrorMessage(`Could not install VSIX: ${message}`);
+  }
+}
+
+async function installCommand(
+  vscode: typeof vscodeType,
+  output: vscodeType.OutputChannel,
+): Promise<void> {
+  const picked = await pickVsixFile();
+
+  if (picked == null) {
+    return;
+  }
+
+  await installPicked(vscode, output, picked);
+}
+
+async function promptVsixUrl(
+  vscode: typeof vscodeType,
+  initialUrl?: string,
+): Promise<string | undefined> {
+  if (initialUrl != null) {
+    const parsed = parseVsixUrl(initialUrl);
+
+    if (parsed == null) {
+      await vscode.window.showErrorMessage("The recommended VSIX URL is invalid.");
+
+      return;
+    }
+
+    return parsed.toString();
+  }
+
+  const value = await vscode.window.showInputBox({
+    title: "Install VSIX from URL",
+    prompt: "Enter a direct http(s) URL to a web-compatible .vsix file.",
+    placeHolder: "https://open-vsx.org/api/…/file/….vsix",
+    validateInput: (input) => {
+      if (input.trim().length === 0) {
+        return "Enter a URL.";
+      }
+
+      return parseVsixUrl(input) == null ? "Enter an http(s) URL to a .vsix file." : undefined;
+    },
+  });
+
+  if (value == null) {
+    return;
+  }
+
+  return parseVsixUrl(value)?.toString();
+}
+
+async function downloadVsix(vscode: typeof vscodeType, url: string): Promise<PickedFile> {
+  return vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: "Downloading VSIX…",
+    },
+    async (progress) => {
+      progress.report({ message: url });
+
+      const response = await fetch(url, { redirect: "follow" });
+
+      if (!response.ok) {
+        throw new Error(`Download failed: HTTP ${response.status} ${response.statusText}`);
+      }
+
+      const declaredLength = Number(response.headers.get("content-length") ?? "");
+
+      if (Number.isFinite(declaredLength) && declaredLength > MAX_VSIX_BYTES) {
+        throw new Error("The VSIX is larger than the 64 MiB limit.");
+      }
+
+      const data = new Uint8Array(await response.arrayBuffer());
+
+      if (data.byteLength > MAX_VSIX_BYTES) {
+        throw new Error("The VSIX is larger than the 64 MiB limit.");
+      }
+
+      return {
+        fileName: fileNameFromUrl(response.url || url),
+        data,
+      };
+    },
+  );
+}
+
+async function installFromUrlCommand(
+  vscode: typeof vscodeType,
+  output: vscodeType.OutputChannel,
+  initialUrl?: string,
+): Promise<void> {
+  const url = await promptVsixUrl(vscode, initialUrl);
+
+  if (url == null) {
+    return;
+  }
+
+  try {
+    const picked = await downloadVsix(vscode, url);
+
+    output.appendLine(`Downloaded ${picked.fileName} from ${url}.`);
+
+    await installPicked(vscode, output, picked);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+
+    output.appendLine(`Failed to download ${url}: ${message}`);
+
+    if (error instanceof Error && error.stack != null) {
+      output.appendLine(error.stack);
+    }
+
+    await vscode.window.showErrorMessage(`Could not download VSIX: ${message}`);
   }
 }
 
@@ -238,6 +370,10 @@ export default {
           title: "VSIX: Install Extension from File…",
         },
         {
+          command: COMMAND_INSTALL_URL,
+          title: "VSIX: Install Extension from URL…",
+        },
+        {
           command: COMMAND_UNINSTALL,
           title: "VSIX: Uninstall Extension…",
         },
@@ -297,6 +433,9 @@ export default {
 
     return vscode.Disposable.from(
       vscode.commands.registerCommand(COMMAND_INSTALL, () => installCommand(vscode, outputChannel)),
+      vscode.commands.registerCommand(COMMAND_INSTALL_URL, (initialUrl?: string) =>
+        installFromUrlCommand(vscode, outputChannel, initialUrl),
+      ),
       vscode.commands.registerCommand(COMMAND_UNINSTALL, () =>
         uninstallCommand(vscode, outputChannel),
       ),

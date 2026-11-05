@@ -85,10 +85,11 @@ Runtime tuning lives in settings:
 Local references are rewritten to inline content or `data:` URIs. `http:`, `https:`, `//`,
 `data:`, `blob:`, `mailto:`, `javascript:` and fragment-only references are left untouched.
 
-`external` patterns support `*`, `**` and `?`; a pattern without a slash matches the file
-name. External files are **not copied** to the output, so they must be deployed or served
-separately. Inside an inlined stylesheet, external `@import`/`url()` references stay
-verbatim, so prefer absolute or root-relative URLs there.
+`external` patterns use [picomatch](https://github.com/micromatch/picomatch) syntax, so
+`*`, `**`, `?`, `{a,b}`, character classes and extglobs all work; a pattern without a slash
+matches the file name. External files are **not copied** to the output, so they must be
+deployed or served separately. Inside an inlined stylesheet, external `@import`/`url()`
+references stay verbatim, so prefer absolute or root-relative URLs there.
 
 ## How watch behaves
 

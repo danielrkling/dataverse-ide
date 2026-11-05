@@ -17,6 +17,7 @@ import type { IEditorGroup } from "@codingame/monaco-vscode-api/vscode/vs/workbe
 import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service";
 
 import { contributeExtensionManifest } from "../api.js";
+import { RECOMMENDED_EXTENSIONS } from "../vsix/recommended.js";
 
 import guideContent from "./GUIDE.md?raw";
 
@@ -129,7 +130,7 @@ const SECTIONS: WelcomeSection[] = [
       {
         title: "Install VSIX extensions",
         description:
-          "Bring browser-ready extensions into the IDE from local .vsix files. Packages persist in browser storage and are restored alongside the built-in extension toggles.",
+          "Bring browser-ready extensions into the IDE from local .vsix files or a direct URL. Packages persist in browser storage and are restored alongside the built-in extension toggles.",
         icon: "cloud-download",
         guide: "dataverseIde.vsix.openGuide",
         actions: [
@@ -137,6 +138,10 @@ const SECTIONS: WelcomeSection[] = [
             label: "Install from VSIX…",
             command: "dataverseIde.vsix.install",
             primary: true,
+          },
+          {
+            label: "Install from URL…",
+            command: "dataverseIde.vsix.installFromUrl",
           },
         ],
       },
@@ -184,7 +189,7 @@ const SECTIONS: WelcomeSection[] = [
       {
         title: "Dataverse identity",
         description:
-          "Resolve the signed-in Dataverse user and use their name and email for file metadata and commit authorship.",
+          "Resolves the signed-in Dataverse user at startup and uses their name and email for file metadata and commit authorship.",
         icon: "person",
         guide: "dataverseIde.dataverse.openGuide",
         actions: [
@@ -343,20 +348,6 @@ const SECTIONS: WelcomeSection[] = [
     title: "Utilities & automation",
     features: [
       {
-        title: "Prettier",
-        description:
-          "Format the active document with the browser build of Prettier and the bundled Babel, TypeScript, HTML, PostCSS, YAML, Markdown and GraphQL parsers — including Tagged JSX templates.",
-        icon: "wand",
-        guide: "dataverseIde.prettier.openGuide",
-        actions: [
-          {
-            label: "Format Document",
-            command: "dataverseIde.prettier.formatDocument",
-            primary: true,
-          },
-        ],
-      },
-      {
         title: "Flatten files",
         description:
           "Right-click one or more files or folders in the explorer to combine their text into a numbered markdown bundle, or run the configured variant to collect paths from `dataverseIde.flatten.include` — handy as LLM context or for a quick review.",
@@ -388,6 +379,28 @@ const SECTIONS: WelcomeSection[] = [
         ],
       },
     ],
+  },
+  {
+    id: "recommended",
+    title: "Recommended extensions",
+    features: RECOMMENDED_EXTENSIONS.map((extension) => ({
+      title: extension.displayName,
+      description: `${extension.description} Recommended version: ${extension.version}.`,
+      icon: "extensions",
+      actions: [
+        {
+          label: "Install from Open VSX…",
+          command: "workbench.extensions.installExtension",
+          args: [extension.id],
+          primary: true,
+        },
+        {
+          label: "Install from URL…",
+          command: "dataverseIde.vsix.installFromUrl",
+          args: [extension.url],
+        },
+      ],
+    })),
   },
 ];
 

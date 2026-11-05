@@ -217,7 +217,7 @@ export const CONFIG_JSON_SCHEMAS: ConfigJsonSchemaEntry[] = [
     minify: "Collapse HTML whitespace while preserving script/style/pre/textarea content.",
     removeComments: "Remove non-conditional HTML comments.",
     external:
-      "Glob patterns of workspace paths or original references to leave un-inlined (for example vendor/**, *.min.js). Patterns without a slash match the file name.",
+      "Glob patterns (picomatch syntax) of workspace paths or original references to leave un-inlined (for example vendor/**, *.min.js, **/*.{png,svg}). Patterns without a slash match the file name.",
   }),
 
   schemaEntry(

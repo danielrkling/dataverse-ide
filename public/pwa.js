@@ -18,7 +18,7 @@ const manifest = {
   scope: appScopeUrl.href,
   display: 'standalone',
   background_color: '#1f1f1f',
-  theme_color: '#0078d4',
+  theme_color: '#0f3b5e',
 
   icons: [
     {

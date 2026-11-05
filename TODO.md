@@ -233,8 +233,10 @@ Permissions…` / `Node: Run Active File with Permissions…` commands. FS write
       disposes + re-registers from current tags.
   - Settings under `tagged-jsx.*` (customTags, preferredTag, useCallbacks, registeredComponents)
     contributed identically to upstream defaults.
-  - Formatting inside templates was ALREADY covered by the prettier extension
-    (@tagged-jsx/prettier-plugin, embeddedJsxTags).
+  - Formatting inside templates was covered by the removed in-house prettier
+    extension (@tagged-jsx/prettier-plugin, embeddedJsxTags); that dependency
+    is no longer bundled. The official Prettier extension is now recommended
+    through the Open VSX gallery.
   - NOT ported yet: ts-plugin TypeScript diagnostics inside templates (upstream uses a
     typescriptServerPlugins package; would need a monaco-vscode TS plugin bridge),
     toggleComment command, exemplified keybindings (commands are palette-only for now).

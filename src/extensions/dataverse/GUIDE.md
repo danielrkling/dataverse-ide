@@ -113,9 +113,11 @@ Right-click the file in the explorer and choose
 
 ### Commit with the Dataverse identity
 
-Run `Dataverse: Load User Identity` once. It writes `dataverseIde.git.authorName`,
-`dataverseIde.git.authorEmail`, `dataverseIde.user.name` and `dataverseIde.user.email`, so
-Git stops prompting for an author and commits carry the Dataverse user.
+The IDE loads the signed-in Dataverse user automatically at startup and writes
+`dataverseIde.git.authorName`, `dataverseIde.git.authorEmail`, `dataverseIde.user.name` and
+`dataverseIde.user.email`, so Git stops prompting for an author and commits carry the Dataverse
+user. Run `Dataverse: Load User Identity` to refresh those values after your name or email
+changes in Dataverse.
 
 ## Troubleshooting
 

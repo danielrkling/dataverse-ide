@@ -43,9 +43,9 @@ import {
  * an explicit `output`. When `output` is omitted the file is written to
  * `<outdir>/<entry file name>`.
  *
- * `external` is a list of glob patterns for local sources that should keep
- * their original reference instead of being inlined. Patterns without a slash
- * match the file name; `*`, `**` and `?` are supported.
+ * `external` is a list of glob patterns (picomatch syntax) for local sources
+ * that should keep their original reference instead of being inlined. Patterns
+ * without a slash match the file name.
  */
 
 const CONFIG_FILE_NAME = "html.config.json";

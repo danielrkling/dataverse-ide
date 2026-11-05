@@ -23,8 +23,9 @@ import {
  *    tagged templates. The primary grammar is regenerated from the
  *    `tagged-jsx.customTags` setting (also available as the Regenerate
  *    Grammar command); the embedded JSX + string-substitution grammars are
- *    vendored from upstream. Formatting inside templates comes from the
- *    prettier extension (@tagged-jsx/prettier-plugin is already wired there).
+ *    vendored from upstream. The removed in-house prettier extension handled
+ *    formatting inside templates; install the official Prettier extension from
+ *    the gallery for normal document formatting.
  *
  * Everything is contributed by a single LocalProcess extension: commands +
  * configuration + `contributes.grammars` + `contributes.languages`. The

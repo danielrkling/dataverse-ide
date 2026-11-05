@@ -40,7 +40,6 @@ import { saveAllBeforeReload } from "../workspace/saveAll.js";
 export const extensionModules: Record<string, () => Promise<{ default: IdeExtension }>> = {
   git: () => import("./git/extension.js"),
   dataverse: () => import("./dataverse/extension.js"),
-  prettier: () => import("./prettier/extension.js"),
   esbuild: () => import("./esbuild/extension.js"),
   html: () => import("./html/extension.js"),
   "node-runtime": () => import("./node-runtime/extension.js"),
@@ -80,12 +79,6 @@ export const extensionManifests: Record<string, ExtensionManifestIdentity> = {
     name: "dataverse-ide-dataverse",
     displayName: "Dataverse IDE Dataverse",
     description: "Web resource upload and settings management.",
-  },
-  prettier: {
-    publisher: "dataverse-ide",
-    name: "dataverse-ide-prettier",
-    displayName: "Dataverse IDE Prettier",
-    description: "Format documents with Prettier.",
   },
   esbuild: {
     publisher: "dataverse-ide",
