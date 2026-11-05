@@ -70,6 +70,17 @@ if (-not (Test-Path "dist/index.html")) {
     Fail "dist/index.html is missing (run without -SkipBuild)."
 }
 
+# Handle on the exact entry chunk so a stale CDN copy of the old index.html is
+# not mistaken for a finished deploy.
+$indexHtml = Get-Content "dist/index.html" -Raw
+$entry = [regex]::Match($indexHtml, 'type="module"[^>]*src="\./(assets/[^"]+)"').Groups[1].Value
+if (-not $entry) {
+    $entry = [regex]::Match($indexHtml, "(assets/index-[^`"]+\.js)").Groups[1].Value
+}
+if (-not $entry) {
+    Fail "Could not find the entry script in dist/index.html."
+}
+
 # Jekyll must be disabled: dist/assets contains _*.js chunks.
 $noJekyll = Join-Path "dist" ".nojekyll"
 if (-not (Test-Path $noJekyll)) {
@@ -113,16 +124,16 @@ $owner = ($repo -split "/")[0]
 $name = ($repo -split "/")[1]
 $url = "https://$owner.github.io/$name/"
 
-Write-Host "Waiting for $url ..."
+Write-Host "Waiting for $url to serve $entry ..."
 $lastStatus = "no response"
-for ($attempt = 0; $attempt -lt 36; $attempt += 1) {
+for ($attempt = 0; $attempt -lt 60; $attempt += 1) {
     try {
-        $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 20
-        if ($response.StatusCode -eq 200 -and $response.Content -match "Dataverse IDE") {
+        $response = Invoke-WebRequest -Uri ($url + "?deploy=" + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) -UseBasicParsing -TimeoutSec 20
+        if ($response.StatusCode -eq 200 -and $response.Content -match [regex]::Escape($entry)) {
             $lastStatus = "200 OK"
             break
         }
-        $lastStatus = "HTTP $($response.StatusCode)"
+        $lastStatus = "serving an older build"
     } catch {
         $lastStatus = $_.Exception.Message
     }
@@ -130,7 +141,7 @@ for ($attempt = 0; $attempt -lt 36; $attempt += 1) {
 }
 
 if ($lastStatus -ne "200 OK") {
-    Fail "Pages did not come up yet ($lastStatus). Check Actions/build status in Settings -> Pages, then open $url"
+    Fail "Pages did not serve $entry yet ($lastStatus). The Pages build may still be running, or the CDN copy is stale; open $url in a few minutes."
 }
 
 Write-Host ""
