@@ -24,6 +24,7 @@ Dataverse web resource.
    {
      "input": "src/tailwind.css",
      "output": "dist/tailwind.css",
+     "files": ["src/**/*", "*.html"],
      "minify": true
    }
    ```
@@ -49,11 +50,18 @@ attributes.
 `tailwind.config.json` lives at the workspace root. Point elsewhere with
 `dataverseIde.tailwind.configPath` (workspace-relative).
 
-| Key      | Default               | Notes                                                                  |
-| -------- | --------------------- | ---------------------------------------------------------------------- |
-| `input`  | `""`                  | Workspace-relative CSS entry. Empty compiles `@import "tailwindcss";`. |
-| `output` | `"dist/tailwind.css"` | Workspace-relative output path.                                        |
-| `minify` | `false`               | Minify the compiled CSS through the esbuild CSS minifier.              |
+| Key      | Default               | Notes                                                                                                             |
+| -------- | --------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `input`  | `""`                  | Workspace-relative CSS entry. Empty compiles `@import "tailwindcss";`.                                            |
+| `output` | `"dist/tailwind.css"` | Workspace-relative output path.                                                                                   |
+| `files`  | `["**/*"]`            | Workspace-relative glob patterns (picomatch syntax) scanned for class names. Narrow this to skip generated files. |
+| `minify` | `false`               | Minify the compiled CSS through the esbuild CSS minifier.                                                         |
+
+`files` uses the same glob syntax as the other extensions (for example
+`src/**/*.{html,ts,tsx}`, `*.html`, or `app/**/*.php`). Directories such as
+`node_modules`, `.git`, `.ide-build`, `dist` and `out` are skipped unless a
+pattern explicitly starts inside one of them (for example `dist/**/*`). A bare
+directory entry such as `src` is treated as `src/**/*`.
 
 Settings:
 

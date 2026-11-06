@@ -16,6 +16,8 @@ export type ConfigPathOptions = {
   section: string;
   /** Default workspace-relative file name, e.g. "esbuild.config.json". */
   defaultPath: string;
+  /** Settings key holding the configured path. Defaults to "configPath". */
+  settingKey?: string;
 };
 
 /** Normalized workspace-relative config path (may include subdirectories). */
@@ -26,7 +28,7 @@ export function configRelativePath(
 ): string {
   const configPath = vscode.workspace
     .getConfiguration(options.section, rootUri)
-    .get<string>("configPath", options.defaultPath)
+    .get<string>(options.settingKey ?? "configPath", options.defaultPath)
     .trim()
     .replaceAll("\\", "/")
     .replace(/^\/+/, "")

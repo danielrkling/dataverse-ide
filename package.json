@@ -10,7 +10,8 @@
     "serve:dataverse": "node tools/serve-dataverse-like.mjs",
     "package:solution": "node tools/package-solution.mjs",
     "test:tailwind": "node --experimental-strip-types tests/tailwindCandidates.sanity.mts",
-    "test:vsix": "node --experimental-strip-types tests/vsixZip.sanity.mts"
+    "test:vsix": "node --experimental-strip-types tests/vsixZip.sanity.mts",
+    "test:dataverse-schema": "node --experimental-strip-types tests/dataverseSchema.sanity.mts"
   },
   "dependencies": {
     "@babel/core": "^7.29.7",
@@ -91,6 +92,7 @@
     "dompurify": "^3.4.15",
     "esbuild-wasm": "^0.25.12",
     "isomorphic-git": "^1.44.4",
+    "just-bash": "^2.14.5",
     "marked": "^14.0.0",
     "monaco-editor": "npm:@codingame/monaco-vscode-editor-api@^38.0.4",
     "parse5": "^8.0.1",

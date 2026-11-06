@@ -9,7 +9,19 @@ import {
   type DataverseConfig,
 } from "./config.js";
 
+import { configFilePathFor, type ConfigPathOptions } from "../shared/configPath.js";
+
 import { DataverseWebResourceClient, type DataverseWebResource } from "./webResourceClient.js";
+import { DataverseMetadataClient } from "./metadataClient.js";
+import {
+  DATAVERSE_SCHEMA_FILE_NAME,
+  DATAVERSE_SCHEMA_PATH_SETTING,
+  parseDataverseSchema,
+  resolveDataverseSchema,
+  type ResolvedSchema,
+} from "./schema.js";
+import { buildSchemaPlan, formatSchemaPlan, type SchemaPlan } from "./schemaPlan.js";
+import { applySchemaPlan } from "./provisioner.js";
 
 import guideContent from "./GUIDE.md?raw";
 
@@ -21,6 +33,12 @@ export type DataverseUploadController = {
 };
 
 type UploadSettings = DataverseConfig;
+
+const SCHEMA_PATH_OPTIONS: ConfigPathOptions = {
+  section: "dataverseIde.dataverse",
+  defaultPath: DATAVERSE_SCHEMA_FILE_NAME,
+  settingKey: DATAVERSE_SCHEMA_PATH_SETTING,
+};
 
 const DEFAULT_INCLUDE_PATTERN = "**/*";
 
@@ -302,6 +320,14 @@ export async function installDataverseUploadExtension(
                 "Milliseconds to wait before batching file changes for Dataverse watch upload.",
             },
 
+            "dataverseIde.dataverse.schemaPath": {
+              type: "string",
+              default: DATAVERSE_SCHEMA_FILE_NAME,
+              scope: "window",
+              description:
+                "Workspace-relative path of the Dataverse schema provisioning file. Example: config/dataverse.schema.json.",
+            },
+
             "dataverseIde.user.name": {
               type: "string",
               default: "",
@@ -348,6 +374,22 @@ export async function installDataverseUploadExtension(
             title: "Dataverse: Load User Identity",
           },
           {
+            command: "dataverseIde.dataverse.openSchema",
+            title: "Dataverse: Open dataverse.schema.json",
+          },
+          {
+            command: "dataverseIde.dataverse.previewSchema",
+            title: "Dataverse: Preview Schema Plan",
+          },
+          {
+            command: "dataverseIde.dataverse.provisionSchema",
+            title: "Dataverse: Provision Schema (Create Only)",
+          },
+          {
+            command: "dataverseIde.dataverse.publishSchema",
+            title: "Dataverse: Publish Schema Tables",
+          },
+          {
             command: "dataverseIde.dataverse.openConfig",
             title: "Dataverse: Open dataverse.config.json",
           },
@@ -376,6 +418,18 @@ export async function installDataverseUploadExtension(
             },
             {
               command: "dataverseIde.dataverse.stopWatch",
+            },
+            {
+              command: "dataverseIde.dataverse.openSchema",
+            },
+            {
+              command: "dataverseIde.dataverse.previewSchema",
+            },
+            {
+              command: "dataverseIde.dataverse.provisionSchema",
+            },
+            {
+              command: "dataverseIde.dataverse.publishSchema",
             },
             {
               command: "dataverseIde.dataverse.openConfig",
@@ -412,7 +466,7 @@ export async function installDataverseUploadExtension(
 
   const vscode = await getApi();
 
-  const output = vscode.window.createOutputChannel("Dataverse Web Resource Upload");
+  const output = vscode.window.createOutputChannel("Dataverse");
 
   let fileWatcher: vscodeType.FileSystemWatcher | undefined;
   let saveWatcher: vscodeType.Disposable | undefined;
@@ -435,14 +489,17 @@ export async function installDataverseUploadExtension(
   const pendingPublishResources = new Map<string, DataverseWebResource>();
   let publishTimer: number | undefined;
   let publishInProgress = false;
+  let manualPublishInProgress = false;
   let publishQueued = false;
+  let lastWatchDetail = "";
 
   const watchStatus = createWatchStatus(vscode, {
     id: "dataverse",
     label: "dataverse",
-    busyLabel: "Uploading",
+    busyLabel: () => (publishInProgress || manualPublishInProgress ? "Publishing…" : "Uploading…"),
     isRunning: () => fileWatcher != null,
-    isBusy: () => watchUploadInProgress,
+    isBusy: () => watchUploadInProgress || publishInProgress || manualPublishInProgress,
+    detail: () => lastWatchDetail,
     start: () => {
       startWatchUpload();
     },
@@ -478,28 +535,92 @@ export async function installDataverseUploadExtension(
     });
   }
 
+  function schemaFilePath(): vscodeType.Uri {
+    return configFilePathFor(vscode, workspaceRootUri, SCHEMA_PATH_OPTIONS);
+  }
+
+  async function readSchema(): Promise<{ schema: ResolvedSchema; settings: DataverseConfig }> {
+    const settings = (await readDataverseConfig(vscode, workspaceRootUri)).config;
+
+    let text: string;
+
+    try {
+      text = new TextDecoder().decode(await vscode.workspace.fs.readFile(schemaFilePath()));
+    } catch {
+      throw new Error(
+        `No ${DATAVERSE_SCHEMA_FILE_NAME} found. Run "Dataverse: Open dataverse.schema.json" to create one.`,
+      );
+    }
+
+    const document = parseDataverseSchema(text);
+
+    const schema = resolveDataverseSchema(document, {
+      prefix: document.prefix?.trim() || settings.prefix,
+      solution: document.solution?.trim() || settings.solution,
+    });
+
+    return { schema, settings };
+  }
+
+  function createMetadataClient(
+    settings: DataverseConfig,
+    schema: ResolvedSchema,
+  ): DataverseMetadataClient {
+    return new DataverseMetadataClient({
+      apiBaseUrl: settings.apiBaseUrl,
+      solutionUniqueName: schema.solution,
+    });
+  }
+
+  function apiBaseUrl(settings: DataverseConfig): string {
+    return settings.apiBaseUrl?.trim().replace(/\/+$/, "") || window.location.origin;
+  }
+
+  async function showSchemaPlan(
+    plan: SchemaPlan,
+    schema: ResolvedSchema,
+    settings: DataverseConfig,
+  ): Promise<void> {
+    const content = formatSchemaPlan(plan, {
+      apiBaseUrl: apiBaseUrl(settings),
+      solution: schema.solution,
+      prefix: schema.prefix,
+    });
+
+    output.appendLine("");
+    output.appendLine(content);
+    output.show(true);
+
+    try {
+      const document = await vscode.workspace.openTextDocument({
+        content,
+        language: "markdown",
+      });
+
+      await vscode.window.showTextDocument(document, { preview: true });
+    } catch (error) {
+      output.appendLine(
+        `Unable to open the plan preview: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   async function publishResources(
     client: DataverseWebResourceClient,
     resources: DataverseWebResource[],
-    location: vscodeType.ProgressLocation,
     label: string,
-  ): Promise<void> {
+  ): Promise<number> {
     output.appendLine(`${label} ${resources.length} web resource(s)...`);
 
-    await vscode.window.withProgress(
-      {
-        location,
-        title: "Publishing Dataverse web resources",
-        cancellable: false,
-      },
-      async (progress) => {
-        progress.report({ message: "Dataverse can take 20+ seconds…" });
+    const startedAt = Date.now();
 
-        await client.publishWebResources(resources);
-      },
-    );
+    await client.publishWebResources(resources);
 
-    output.appendLine("Publish completed.");
+    const elapsedMs = Date.now() - startedAt;
+
+    output.appendLine(`Publish completed in ${elapsedMs} ms.`);
+
+    return elapsedMs;
   }
 
   function enqueueBackgroundPublish(resources: DataverseWebResource[]): void {
@@ -523,7 +644,7 @@ export async function installDataverseUploadExtension(
   }
 
   async function flushBackgroundPublish(): Promise<void> {
-    if (publishInProgress) {
+    if (publishInProgress || manualPublishInProgress) {
       publishQueued = true;
       return;
     }
@@ -533,37 +654,48 @@ export async function installDataverseUploadExtension(
     }
 
     publishInProgress = true;
+    lastWatchDetail = `Publishing ${pendingPublishResources.size} web resource(s). Dataverse can take 20+ seconds…`;
 
     const resources = [...pendingPublishResources.values()];
     pendingPublishResources.clear();
     let failed = false;
 
     try {
+      watchStatus.update();
+
       const settings = await getSettings(vscode, workspaceRootUri);
 
       if (!settings.publishAfterUpload) {
         output.appendLine("[watch] publishAfterUpload is disabled; skipping publish.");
+        lastWatchDetail = "Publish skipped: publishAfterUpload is disabled.";
+
         return;
       }
 
-      await publishResources(
+      const elapsedMs = await publishResources(
         createWebResourceClient(settings),
         resources,
-        vscode.ProgressLocation.Window,
         "[watch] Publishing",
       );
+
+      lastWatchDetail = `Published ${resources.length} web resource(s) in ${(
+        elapsedMs / 1000
+      ).toFixed(1)}s.`;
     } catch (error) {
       failed = true;
 
       const message = error instanceof Error ? error.message : String(error);
 
+      lastWatchDetail = `Publish failed: ${message}`;
+
       output.appendLine(`[watch] Publish failed: ${message}`);
 
-      await vscode.window.showErrorMessage(
+      void vscode.window.showErrorMessage(
         `Dataverse publish failed: ${message}. It will be retried with the next watch upload.`,
       );
     } finally {
       publishInProgress = false;
+      watchStatus.update();
 
       /*
        * Keep failed resources for the next upload trigger instead of retrying
@@ -586,7 +718,12 @@ export async function installDataverseUploadExtension(
 
   async function uploadFiles(
     selectedUris: vscodeType.Uri[],
-    options: { backgroundPublish?: boolean } = {},
+    options: {
+      backgroundPublish?: boolean;
+      clearOutput?: boolean;
+      showProgress?: boolean;
+      silent?: boolean;
+    } = {},
   ): Promise<void> {
     const settings = await getSettings(vscode, workspaceRootUri);
 
@@ -604,7 +741,9 @@ export async function installDataverseUploadExtension(
     ];
 
     if (files.length === 0) {
-      await vscode.window.showWarningMessage("No files were selected for Dataverse upload.");
+      if (options.silent !== true) {
+        void vscode.window.showWarningMessage("No files were selected for Dataverse upload.");
+      }
 
       return;
     }
@@ -614,52 +753,63 @@ export async function installDataverseUploadExtension(
     const uploaded: DataverseWebResource[] = [];
     const failures: string[] = [];
 
-    output.clear();
+    if (options.clearOutput !== false) {
+      output.clear();
+    }
+
     output.show(true);
 
-    await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: "Uploading Dataverse web resources",
-        cancellable: false,
-      },
-      async (progress) => {
-        for (let index = 0; index < files.length; index += 1) {
-          const fileUri = files[index];
+    const uploadBatch = async (
+      progress?: vscodeType.Progress<{ message?: string; increment?: number }>,
+    ): Promise<void> => {
+      for (let index = 0; index < files.length; index += 1) {
+        const fileUri = files[index];
 
-          try {
-            const relativePath = getRelativePath(uploadRootUri, fileUri);
+        try {
+          const relativePath = getRelativePath(uploadRootUri, fileUri);
 
-            const resourceName = buildWebResourceName(settings, relativePath);
+          const resourceName = buildWebResourceName(settings, relativePath);
 
-            progress.report({
-              increment: 100 / files.length,
-              message: `${index + 1}/${files.length}: ${relativePath}`,
-            });
+          progress?.report({
+            increment: 100 / files.length,
+            message: `${index + 1}/${files.length}: ${relativePath}`,
+          });
 
-            output.appendLine(`Uploading ${relativePath} -> ${resourceName}`);
+          output.appendLine(`Uploading ${relativePath} -> ${resourceName}`);
 
-            const content = await vscode.workspace.fs.readFile(fileUri);
+          const content = await vscode.workspace.fs.readFile(fileUri);
 
-            const resource = await client.uploadWebResource(resourceName, content);
+          const resource = await client.uploadWebResource(resourceName, content);
 
-            uploaded.push(resource);
+          uploaded.push(resource);
 
-            output.appendLine(`  Success: ${resource.webresourceid}`);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
+          output.appendLine(`  Success: ${resource.webresourceid}`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
 
-            failures.push(`${fileUri.path}: ${message}`);
+          failures.push(`${fileUri.path}: ${message}`);
 
-            output.appendLine(`  Failed: ${fileUri.path}`);
-            output.appendLine(`  ${message}`);
-          }
+          output.appendLine(`  Failed: ${fileUri.path}`);
+          output.appendLine(`  ${message}`);
         }
-      },
-    );
+      }
+    };
+
+    if (options.showProgress === false) {
+      await uploadBatch();
+    } else {
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: "Uploading Dataverse web resources",
+          cancellable: false,
+        },
+        uploadBatch,
+      );
+    }
 
     if (failures.length > 0) {
-      await vscode.window.showErrorMessage(
+      void vscode.window.showErrorMessage(
         `${failures.length} of ${files.length} Dataverse web resource upload(s) failed. See Output for details.`,
       );
 
@@ -686,18 +836,40 @@ export async function installDataverseUploadExtension(
 
         publishMessage = " Uploaded; publishing in the background.";
       } else {
-        await publishResources(
-          client,
-          uploaded,
-          vscode.ProgressLocation.Notification,
-          "Publishing",
-        );
+        manualPublishInProgress = true;
+        lastWatchDetail = `Publishing ${uploaded.length} web resource(s). Dataverse can take 20+ seconds…`;
+        watchStatus.update();
+
+        try {
+          const elapsedMs = await publishResources(client, uploaded, "Publishing");
+
+          lastWatchDetail = `Published ${uploaded.length} web resource(s) in ${(
+            elapsedMs / 1000
+          ).toFixed(1)}s.`;
+        } catch (error) {
+          lastWatchDetail = `Publish failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+
+          throw error;
+        } finally {
+          manualPublishInProgress = false;
+          watchStatus.update();
+
+          if (publishQueued || pendingPublishResources.size > 0) {
+            publishQueued = false;
+
+            enqueueBackgroundPublish([]);
+          }
+        }
       }
     }
 
-    await vscode.window.showInformationMessage(
-      `${uploaded.length} Dataverse web resource(s) uploaded.${publishMessage}`,
-    );
+    if (options.silent !== true) {
+      void vscode.window.showInformationMessage(
+        `${uploaded.length} Dataverse web resource(s) uploaded.${publishMessage}`,
+      );
+    }
   }
 
   function getUploadRootUri(settings: UploadSettings): vscodeType.Uri {
@@ -752,7 +924,6 @@ export async function installDataverseUploadExtension(
     }
 
     watchUploadInProgress = true;
-    watchStatus.update();
 
     /*
      * Snapshot and clear first. File changes that occur during upload populate
@@ -761,7 +932,13 @@ export async function installDataverseUploadExtension(
     const changedFiles = new Map(pendingWatchFiles);
     pendingWatchFiles.clear();
 
+    lastWatchDetail = `Uploading ${changedFiles.size} changed file(s)…`;
+
     try {
+      watchStatus.update();
+
+      output.appendLine(`[watch] Processing ${changedFiles.size} changed file(s).`);
+
       const settings = await getSettings(vscode, workspaceRootUri);
 
       /*
@@ -790,24 +967,47 @@ export async function installDataverseUploadExtension(
       });
 
       if (filesToUpload.length === 0) {
-        output.appendLine("[watch] No changed files matched configured upload patterns.");
+        const changedPaths = [...changedFiles.values()].slice(0, 10).map((uri) => {
+          try {
+            return getRelativePath(uploadRootUri, uri);
+          } catch {
+            return uri.path;
+          }
+        });
+
+        output.appendLine(
+          `[watch] No changed files matched configured upload patterns: ${changedPaths.join(", ")}`,
+        );
+
+        lastWatchDetail = `No changed files matched the configured upload patterns: ${changedPaths.join(", ")}`;
 
         return;
       }
 
       output.appendLine(`[watch] Uploading ${filesToUpload.length} changed file(s).`);
 
-      await uploadFiles(filesToUpload, { backgroundPublish: true });
+      lastWatchDetail = `Uploading ${filesToUpload.length} changed file(s)…`;
+
+      await uploadFiles(filesToUpload, {
+        backgroundPublish: true,
+        clearOutput: false,
+        showProgress: false,
+        silent: true,
+      });
 
       output.appendLine(`[watch] Completed upload of ${filesToUpload.length} file(s).`);
+
+      lastWatchDetail = `Uploaded ${filesToUpload.length} file(s).`;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+
+      lastWatchDetail = `Watch upload failed: ${message}`;
 
       console.error("[Dataverse IDE] Watch upload failed.", error);
 
       output.appendLine(`[watch] Failed: ${message}`);
 
-      await vscode.window.showErrorMessage(`Dataverse watch upload failed: ${message}`);
+      void vscode.window.showErrorMessage(`Dataverse watch upload failed: ${message}`);
     } finally {
       watchUploadInProgress = false;
       watchStatus.update();
@@ -837,6 +1037,8 @@ export async function installDataverseUploadExtension(
     fileWatcher?.dispose();
     fileWatcher = undefined;
 
+    lastWatchDetail = "Watch stopped.";
+
     watchStatus.update();
   }
 
@@ -854,12 +1056,14 @@ export async function installDataverseUploadExtension(
         const uploadRootUri = getUploadRootUri(settings);
 
         /*
-         * Watch the configured upload root broadly. The flush operation applies the
-         * configured include/exclude globs through getConfiguredUploadFiles().
+         * Watch the configured upload root broadly. The flush operation applies
+         * the configured include/exclude globs to each changed path.
          */
         fileWatcher = vscode.workspace.createFileSystemWatcher(
           new vscode.RelativePattern(uploadRootUri, "**/*"),
         );
+
+        lastWatchDetail = `Watching ${uploadRootUri.path}.`;
 
         watchStatus.update();
 
@@ -900,12 +1104,20 @@ export async function installDataverseUploadExtension(
 
         output.appendLine(`[watch] Started for ${uploadRootUri.path}`);
 
+        output.appendLine(
+          `[watch] Patterns: files=[${settings.files.join(", ")}] exclude=[${settings.exclude.join(
+            ", ",
+          )}]`,
+        );
+
         /*
          * Start-of-watch initial upload: run every configured file
          * through the normal debounced watch pipeline once, so the
          * remote state matches local at watch start.
          */
         const configuredFiles = await getConfiguredUploadFiles(vscode, workspaceRootUri, settings);
+
+        output.appendLine(`[watch] Initial upload: ${configuredFiles.length} configured file(s).`);
 
         for (const uri of configuredFiles) {
           await scheduleWatchUpload(uri);
@@ -978,6 +1190,216 @@ export async function installDataverseUploadExtension(
       }
 
       await vscode.window.showTextDocument(uri);
+    },
+  );
+
+  const openSchemaCommand = vscode.commands.registerCommand(
+    "dataverseIde.dataverse.openSchema",
+    async () => {
+      const uri = schemaFilePath();
+
+      try {
+        await vscode.workspace.fs.stat(uri);
+      } catch {
+        /*
+         * Scaffold an empty schema. It cannot create anything until the user
+         * adds tables, so opening the file is always safe.
+         */
+        const template = `${JSON.stringify({ tables: [] }, null, 2)}\n`;
+
+        await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(template));
+      }
+
+      await vscode.window.showTextDocument(uri);
+    },
+  );
+
+  const previewSchemaCommand = vscode.commands.registerCommand(
+    "dataverseIde.dataverse.previewSchema",
+    async () => {
+      try {
+        const { schema, settings } = await readSchema();
+        const client = createMetadataClient(settings, schema);
+
+        const plan = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: "Dataverse: reading schema metadata…",
+            cancellable: false,
+          },
+          () => buildSchemaPlan(schema, client),
+        );
+
+        await showSchemaPlan(plan, schema, settings);
+
+        if (plan.conflicts > 0) {
+          await vscode.window.showWarningMessage(
+            `Dataverse schema plan has ${plan.conflicts} conflict(s); provisioning is blocked until they are resolved.`,
+          );
+        }
+      } catch (error) {
+        await vscode.window.showErrorMessage(
+          error instanceof Error
+            ? `Dataverse schema plan failed: ${error.message}`
+            : "Dataverse schema plan failed.",
+        );
+      }
+    },
+  );
+
+  const provisionSchemaCommand = vscode.commands.registerCommand(
+    "dataverseIde.dataverse.provisionSchema",
+    async () => {
+      try {
+        const { schema, settings } = await readSchema();
+        const client = createMetadataClient(settings, schema);
+
+        const plan = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: "Dataverse: reading schema metadata…",
+            cancellable: false,
+          },
+          () => buildSchemaPlan(schema, client),
+        );
+
+        await showSchemaPlan(plan, schema, settings);
+
+        if (plan.conflicts > 0) {
+          await vscode.window.showErrorMessage(
+            `Dataverse schema has ${plan.conflicts} conflict(s). Delete the existing table or column in Dataverse, or change dataverse.schema.json, then run provisioning again.`,
+          );
+
+          return;
+        }
+
+        const creates = plan.tableCreates + plan.columnCreates + plan.lookupCreates;
+
+        if (creates === 0) {
+          await vscode.window.showInformationMessage(
+            "Dataverse schema is already up to date; nothing to create.",
+          );
+
+          return;
+        }
+
+        const confirmation = await vscode.window.showWarningMessage(
+          `Create ${creates} new component(s) in ${apiBaseUrl(settings)}? This only creates; existing tables and columns are never updated or deleted.`,
+          { modal: true },
+          "Provision",
+        );
+
+        if (confirmation !== "Provision") {
+          return;
+        }
+
+        const result = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: "Dataverse: provisioning schema",
+            cancellable: false,
+          },
+          async (progress) =>
+            applySchemaPlan(client, schema, plan, (message) => {
+              output.appendLine(message);
+              progress.report({ message });
+            }),
+        );
+
+        const created =
+          result.createdTables.length +
+          result.createdColumns.length +
+          result.createdRelationships.length;
+
+        if (result.failures.length > 0) {
+          output.appendLine("");
+          output.appendLine("Failures:");
+
+          for (const failure of result.failures) {
+            output.appendLine(`- ${failure.item}: ${failure.message}`);
+          }
+
+          await vscode.window.showErrorMessage(
+            `Dataverse schema provisioning created ${created} component(s) but ${result.failures.length} item(s) failed. See Output. Re-run to finish; already-created items are skipped.`,
+          );
+
+          return;
+        }
+
+        if (created === 0) {
+          await vscode.window.showInformationMessage(
+            "Dataverse schema provisioning finished; nothing new was created.",
+          );
+
+          return;
+        }
+
+        const published = result.publishedEntities.length;
+        const publishMessage =
+          published > 0 ? ` Published ${published} table(s).` : " Nothing was published.";
+
+        await vscode.window.showInformationMessage(
+          `Dataverse schema provisioned: ${result.createdTables.length} table(s), ${result.createdColumns.length} column(s), ${result.createdRelationships.length} lookup(s).${publishMessage}`,
+        );
+      } catch (error) {
+        await vscode.window.showErrorMessage(
+          error instanceof Error
+            ? `Dataverse schema provisioning failed: ${error.message}`
+            : "Dataverse schema provisioning failed.",
+        );
+      }
+    },
+  );
+
+  const publishSchemaCommand = vscode.commands.registerCommand(
+    "dataverseIde.dataverse.publishSchema",
+    async () => {
+      try {
+        const { schema, settings } = await readSchema();
+
+        if (schema.tables.length === 0) {
+          await vscode.window.showInformationMessage(
+            "dataverse.schema.json declares no tables; nothing to publish.",
+          );
+
+          return;
+        }
+
+        const confirmation = await vscode.window.showWarningMessage(
+          `Publish ${schema.tables.length} table(s) in ${apiBaseUrl(settings)}? Publishing can take 20+ seconds.`,
+          { modal: true },
+          "Publish",
+        );
+
+        if (confirmation !== "Publish") {
+          return;
+        }
+
+        const client = createMetadataClient(settings, schema);
+        const logicalNames = schema.tables.map((table) => table.logicalName);
+
+        await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: "Dataverse: publishing schema tables",
+            cancellable: false,
+          },
+          async (progress) => {
+            progress.report({ message: "Dataverse can take 20+ seconds…" });
+            await client.publishEntities(logicalNames);
+          },
+        );
+
+        await vscode.window.showInformationMessage(
+          `Published ${logicalNames.length} Dataverse table(s).`,
+        );
+      } catch (error) {
+        await vscode.window.showErrorMessage(
+          error instanceof Error
+            ? `Dataverse schema publish failed: ${error.message}`
+            : "Dataverse schema publish failed.",
+        );
+      }
     },
   );
 
@@ -1128,6 +1550,10 @@ export async function installDataverseUploadExtension(
       startWatchCommand.dispose();
       stopWatchCommand.dispose();
       openConfigCommand.dispose();
+      openSchemaCommand.dispose();
+      previewSchemaCommand.dispose();
+      provisionSchemaCommand.dispose();
+      publishSchemaCommand.dispose();
 
       watchStatus.dispose();
 
@@ -1177,7 +1603,7 @@ export default {
     await contributeExtensionManifest({
       id: "dataverse",
       displayName: "Dataverse IDE Dataverse",
-      description: "Web resource upload and settings management.",
+      description: "Web resource upload, schema provisioning, and settings management.",
       commands: [],
     });
 

@@ -26,6 +26,12 @@ import type * as vscodeType from "vscode";
 
 import { EsbuildBuildRunner } from "../esbuild/buildRunner.js";
 import {
+  createGlobMatcher,
+  globBaseSegments,
+  globStartsInside,
+  isGlobPattern,
+} from "../shared/glob.js";
+import {
   captureDirtyDocuments,
   dirtyDocumentText,
   type DirtyDocumentSnapshot,
@@ -44,8 +50,19 @@ const SCANNABLE_EXTENSIONS =
 
 const DEFAULT_CSS_INPUT = '@import "tailwindcss";';
 
+const DEFAULT_SCAN_PATTERNS = ["**/*"];
+
 const MAX_SCANNED_FILES = 4000;
+const MAX_SCANNED_DIRECTORIES = 20000;
 const MAX_TOKENS_PER_FILE = 20000;
+
+/*
+ * Dependency/generated directories are never walked unless a configured
+ * pattern explicitly starts inside one of them (for example a glob rooted at
+ * `dist`). This mirrors the old findFiles exclude list, but the browser
+ * search provider ignored that argument, so the walk applies it itself.
+ */
+const EXCLUDED_SCAN_DIRECTORIES = new Set(["node_modules", ".git", ".ide-build", "dist", "out"]);
 
 function fileExtension(path: string): string {
   const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
@@ -109,31 +126,72 @@ const scanCache = new Map<
   }
 >();
 
+function normalizeScanPattern(pattern: string): string {
+  const normalized = pattern
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/^(?:\.\/)+/, "")
+    .replace(/^\/+/, "")
+    .replace(/^\.$/, "");
+
+  /* Never let a configured pattern walk outside the workspace root. */
+  return normalized.split("/").includes("..") ? "" : normalized;
+}
+
+function configuredScanPatterns(patterns: readonly string[]): string[] {
+  const normalized = patterns.map(normalizeScanPattern).filter((pattern) => pattern.length > 0);
+
+  return normalized.length > 0 ? normalized : [...DEFAULT_SCAN_PATTERNS];
+}
+
+function workspaceRelativePath(rootUri: vscodeType.Uri, uri: vscodeType.Uri): string | undefined {
+  const rootPath = rootUri.path.replace(/\/+$/, "");
+  const uriPath = uri.path;
+
+  if (rootPath.length > 0 && uriPath !== rootPath && !uriPath.startsWith(`${rootPath}/`)) {
+    return undefined;
+  }
+
+  const relative = rootPath.length > 0 ? uriPath.slice(rootPath.length) : uriPath;
+
+  return relative.replace(/^\/+/, "");
+}
+
 async function scanWorkspaceCandidates(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
   dirtyDocuments: DirtyDocumentSnapshot,
+  patterns: readonly string[],
+  outputChannel?: vscodeType.OutputChannel,
 ): Promise<Set<string>> {
-  const uris = await vscode.workspace.findFiles(
-    "**/*",
-    "{**/node_modules/**,**/.git/**,**/.ide-build/**,**/dist/**,**/out/**}",
-    MAX_SCANNED_FILES,
-  );
-
+  const includePatterns = configuredScanPatterns(patterns);
   const candidates = new Set<string>();
+  const scannedFiles = new Set<string>();
+  let scannedDirectories = 0;
 
-  for (const uri of uris) {
-    if (!SCANNABLE_EXTENSIONS.test(uri.path)) {
-      continue;
+  const processFile = async (uri: vscodeType.Uri): Promise<void> => {
+    if (scannedFiles.size >= MAX_SCANNED_FILES) {
+      return;
     }
+
+    const relativePath = workspaceRelativePath(rootUri, uri);
+
+    if (relativePath == null || relativePath.length === 0) {
+      return;
+    }
+
+    if (!SCANNABLE_EXTENSIONS.test(relativePath) || scannedFiles.has(uri.path)) {
+      return;
+    }
+
+    scannedFiles.add(uri.path);
 
     /*
      * Unsaved buffers win over the stat/read cache: mtime does not change
      * until autosave writes the document, so class names typed a moment ago
      * would otherwise be missing from the generated CSS.
      */
-    const relativePath = vscode.workspace.asRelativePath(uri, false).replaceAll("\\", "/");
-    const extension = fileExtension(uri.path);
+    const extension = fileExtension(relativePath);
     const live = dirtyDocumentText(dirtyDocuments, relativePath);
 
     if (live != null) {
@@ -141,7 +199,7 @@ async function scanWorkspaceCandidates(
         candidates.add(candidate);
       }
 
-      continue;
+      return;
     }
 
     let mtime: number;
@@ -149,7 +207,7 @@ async function scanWorkspaceCandidates(
     try {
       mtime = (await vscode.workspace.fs.stat(uri)).mtime;
     } catch {
-      continue;
+      return;
     }
 
     const cached = scanCache.get(uri.path);
@@ -159,7 +217,7 @@ async function scanWorkspaceCandidates(
         candidates.add(candidate);
       }
 
-      continue;
+      return;
     }
 
     try {
@@ -181,6 +239,144 @@ async function scanWorkspaceCandidates(
        * Binary and unreadable files are irrelevant to class scanning.
        */
     }
+  };
+
+  const walkDirectory = async (
+    baseUri: vscodeType.Uri,
+    matches: (relativePath: string) => boolean,
+    allowExcludedDirectories: boolean,
+  ): Promise<void> => {
+    const pending: vscodeType.Uri[] = [baseUri];
+    const visitedDirectories = new Set<string>();
+
+    while (
+      pending.length > 0 &&
+      scannedFiles.size < MAX_SCANNED_FILES &&
+      scannedDirectories < MAX_SCANNED_DIRECTORIES
+    ) {
+      const current = pending.shift()!;
+      const key = current.toString();
+
+      if (visitedDirectories.has(key)) {
+        continue;
+      }
+
+      visitedDirectories.add(key);
+      scannedDirectories++;
+
+      let entries: Array<[string, vscodeType.FileType]>;
+
+      try {
+        entries = await vscode.workspace.fs.readDirectory(current);
+      } catch {
+        continue;
+      }
+
+      entries.sort(([left], [right]) => left.localeCompare(right));
+
+      for (const [name, type] of entries) {
+        const child = vscode.Uri.joinPath(current, name);
+
+        if ((type & vscode.FileType.Directory) !== 0) {
+          if (allowExcludedDirectories || !EXCLUDED_SCAN_DIRECTORIES.has(name.toLowerCase())) {
+            pending.push(child);
+          }
+
+          continue;
+        }
+
+        if ((type & vscode.FileType.File) === 0) {
+          continue;
+        }
+
+        const relativePath = workspaceRelativePath(rootUri, child);
+
+        if (relativePath == null || relativePath.length === 0 || !matches(relativePath)) {
+          continue;
+        }
+
+        await processFile(child);
+      }
+    }
+  };
+
+  for (const rawPattern of includePatterns) {
+    if (scannedFiles.size >= MAX_SCANNED_FILES) {
+      break;
+    }
+
+    const pattern = normalizeScanPattern(rawPattern);
+
+    if (pattern.length === 0) {
+      continue;
+    }
+
+    if (!isGlobPattern(pattern)) {
+      const literalUri = vscode.Uri.joinPath(rootUri, ...pattern.split("/").filter(Boolean));
+
+      let stat: vscodeType.FileStat;
+
+      try {
+        stat = await vscode.workspace.fs.stat(literalUri);
+      } catch {
+        continue;
+      }
+
+      if ((stat.type & vscode.FileType.File) !== 0) {
+        await processFile(literalUri);
+        continue;
+      }
+
+      if ((stat.type & vscode.FileType.Directory) === 0) {
+        continue;
+      }
+
+      /*
+       * A bare directory entry is a convenience for "everything below this
+       * directory", mirroring how people write upload globs.
+       */
+      const directoryPattern = `${pattern.replace(/\/+$/, "")}/**/*`;
+
+      await walkDirectory(
+        literalUri,
+        createGlobMatcher(directoryPattern),
+        globStartsInside(directoryPattern, EXCLUDED_SCAN_DIRECTORIES),
+      );
+
+      continue;
+    }
+
+    await walkDirectory(
+      vscode.Uri.joinPath(rootUri, ...globBaseSegments(pattern)),
+      createGlobMatcher(pattern),
+      globStartsInside(pattern, EXCLUDED_SCAN_DIRECTORIES),
+    );
+  }
+
+  /*
+   * Drop cache entries for files that no longer match the configured
+   * patterns, so narrowing `files` releases the old candidate arrays.
+   */
+  for (const key of scanCache.keys()) {
+    if (!scannedFiles.has(key)) {
+      scanCache.delete(key);
+    }
+  }
+
+  outputChannel?.appendLine(
+    `[tailwind] Scanned ${scannedFiles.size} file(s) matching ${includePatterns.join(", ")}.`,
+  );
+
+  if (scannedFiles.size >= MAX_SCANNED_FILES) {
+    outputChannel?.appendLine(
+      `[tailwind] Scan stopped at ${MAX_SCANNED_FILES} files; ` +
+        `narrow "files" in tailwind.config.json to include fewer files.`,
+    );
+  } else if (scannedDirectories >= MAX_SCANNED_DIRECTORIES) {
+    outputChannel?.appendLine(
+      `[tailwind] Scan stopped after ${MAX_SCANNED_DIRECTORIES} directories; ` +
+        `narrow "files" in tailwind.config.json.`,
+    );
   }
 
   return candidates;
@@ -423,6 +619,8 @@ export async function compileTailwindCss(
   rootUri: vscodeType.Uri,
   options: {
     input?: string;
+    /** Workspace-relative glob patterns scanned for class names. */
+    files?: readonly string[];
     pluginRunner?: EsbuildBuildRunner;
     minify?: boolean;
     outputChannel?: vscodeType.OutputChannel;
@@ -459,7 +657,13 @@ export async function compileTailwindCss(
     base = inputPath.includes("/") ? inputPath.slice(0, inputPath.lastIndexOf("/")) : "/";
   }
 
-  const candidates = await scanWorkspaceCandidates(vscode, rootUri, dirtyDocuments);
+  const candidates = await scanWorkspaceCandidates(
+    vscode,
+    rootUri,
+    dirtyDocuments,
+    options.files ?? [],
+    options.outputChannel,
+  );
 
   const pluginInputs: string[] = [];
 

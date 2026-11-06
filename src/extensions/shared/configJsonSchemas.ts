@@ -4,6 +4,7 @@ import { ExtensionHostKind, registerExtension } from "@codingame/monaco-vscode-a
 import type { BaseIssue, BaseSchema } from "valibot";
 
 import { DATAVERSE_CONFIG_SCHEMA } from "../dataverse/config.js";
+import { DATAVERSE_SCHEMA_SCHEMA } from "../dataverse/schema.js";
 import { ESBUILD_CONFIG_SCHEMA } from "../esbuild/config.js";
 import { HTML_CONFIG_SCHEMA } from "../html/config.js";
 import { TAILWIND_CONFIG_SCHEMA } from "../tailwind/config.js";
@@ -161,6 +162,21 @@ export const CONFIG_JSON_SCHEMAS: ConfigJsonSchemaEntry[] = [
   ),
 
   schemaEntry(
+    "dataverse.schema.json",
+    ["dataverse.schema.json"],
+    jsonSchemaFor(DATAVERSE_SCHEMA_SCHEMA),
+    {
+      prefix:
+        "Publisher prefix for these tables/columns (for example new_). Defaults to the prefix in dataverse.config.json.",
+      solution:
+        "Solution unique name to add new metadata to. Defaults to the solution in dataverse.config.json.",
+      languageCode: "Locale ID used for labels. Defaults to 1033 (English).",
+      tables:
+        "Tables to create. Provisioning is additive only: existing tables and columns are skipped, never updated or deleted.",
+    },
+  ),
+
+  schemaEntry(
     "esbuild.config.json",
     ["esbuild.config.json"],
     jsonSchemaFor(ESBUILD_CONFIG_SCHEMA),
@@ -227,6 +243,8 @@ export const CONFIG_JSON_SCHEMAS: ConfigJsonSchemaEntry[] = [
     {
       input: 'Workspace CSS entry. Empty uses the default @import "tailwindcss"; entry.',
       output: "Workspace-relative compiled CSS output path.",
+      files:
+        "Workspace-relative glob patterns (picomatch syntax) scanned for class names. Defaults to **/*. Narrow this to skip generated or vendored files.",
       minify: "Minify the compiled CSS.",
     },
   ),

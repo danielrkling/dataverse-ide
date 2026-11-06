@@ -435,6 +435,18 @@ async function ensureInitialized(): Promise<void> {
   await initialization;
 }
 
+/**
+ * Warm the shared esbuild-wasm instance.
+ *
+ * The node runtime calls this before installing its network guard: the wasm
+ * asset is fetched over HTTP(S) on first use, so a workspace-level run that
+ * transpiles TypeScript would otherwise fail with a network-permission
+ * error before any user code executes.
+ */
+export async function ensureEsbuildCompilerReady(): Promise<void> {
+  await ensureInitialized();
+}
+
 function ensureTaggedJsxTransformers(): Promise<TaggedJsxTransformers> {
   taggedJsxTransformersPromise ??= Promise.all([
     import("@tagged-jsx/transform"),

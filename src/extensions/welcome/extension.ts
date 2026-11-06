@@ -170,6 +170,24 @@ const SECTIONS: WelcomeSection[] = [
         ],
       },
       {
+        title: "Table & column provisioning",
+        description:
+          "Declare tables and columns in dataverse.schema.json, preview a +/=/! plan, and create only what is missing. Existing metadata is never updated or deleted.",
+        icon: "database",
+        guide: "dataverseIde.dataverse.openGuide",
+        actions: [
+          {
+            label: "Preview Schema Plan",
+            command: "dataverseIde.dataverse.previewSchema",
+            primary: true,
+          },
+          {
+            label: "Open dataverse.schema.json",
+            command: "dataverseIde.dataverse.openSchema",
+          },
+        ],
+      },
+      {
         title: "Watch & publish",
         description:
           "Start a debounced watch on the configured files. Uploads and publishing are driven entirely by dataverse.config.json, which has inline JSON Schema validation.",
@@ -280,6 +298,24 @@ const SECTIONS: WelcomeSection[] = [
           {
             label: "Run Active File",
             command: "dataverseIde.nodeRuntime.runEntry",
+          },
+        ],
+      },
+      {
+        title: "Terminal",
+        description:
+          "A just-bash shell in the native terminal panel, backed directly by the workspace filesystem. No virtual filesystem mirror or sync-back step; node and npm run through the same direct runtime.",
+        icon: "terminal",
+        guide: "dataverseIde.terminal.openGuide",
+        actions: [
+          {
+            label: "New Shell",
+            command: "dataverseIde.terminal.new",
+            primary: true,
+          },
+          {
+            label: "Run Command…",
+            command: "dataverseIde.terminal.run",
           },
         ],
       },

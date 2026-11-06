@@ -87,7 +87,7 @@ type RuntimeModule = {
 };
 
 export type ModuleLoader = {
-  run: (entry: string) => Promise<unknown>;
+  run: (entry: string, args?: string[]) => Promise<unknown>;
   dispose: () => void;
 };
 
@@ -593,11 +593,11 @@ ${record.code}
   });
 
   return {
-    async run(entry: string): Promise<unknown> {
+    async run(entry: string, args: string[] = []): Promise<unknown> {
       const resolved = await prepare(entry);
       const attempted = new Set<string>();
 
-      process.argv = ["node", resolved];
+      process.argv = ["node", resolved, ...args];
 
       for (let attempt = 0; attempt < 200; attempt += 1) {
         for (const key of Object.keys(moduleCache)) {

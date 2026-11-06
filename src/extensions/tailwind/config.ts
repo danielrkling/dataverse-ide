@@ -9,6 +9,7 @@ import {
 } from "../shared/configPath.js";
 import {
   parseConfig,
+  stringListSchema,
   withDefault,
   workspacePathAllowEmptySchema,
   workspacePathSchema,
@@ -25,6 +26,7 @@ import {
  *   {
  *     "input": "",                   // empty: @import "tailwindcss"; + theme/plugin setup
  *     "output": "dist/tailwind.css",
+ *     "files": ["**\/*"],            // workspace globs scanned for class names
  *     "minify": false                // minify via the esbuild CSS minifier
  *   }
  *
@@ -40,12 +42,30 @@ export const CONFIG_PATH_OPTIONS: ConfigPathOptions = {
   defaultPath: CONFIG_FILE_NAME,
 };
 
+/** Workspace-relative glob patterns scanned for class names (picomatch syntax). */
+const scanFilePatternsSchema = v.pipe(
+  stringListSchema,
+  v.transform((patterns) =>
+    patterns
+      .map((pattern) =>
+        pattern
+          .replaceAll("\\", "/")
+          .replace(/^(?:\.\/)+/, "")
+          .replace(/^\/+/, ""),
+      )
+      .filter((pattern) => pattern.length > 0),
+  ),
+  v.check((patterns) => patterns.length > 0, "Expected at least one file pattern."),
+);
+
 /** Valibot schema for tailwind.config.json. */
 export const TAILWIND_CONFIG_SCHEMA = v.object({
   /** Workspace CSS entry. When unset, `@import "tailwindcss";` is used. */
   input: withDefault(workspacePathAllowEmptySchema, ""),
   /** Workspace-relative output path. */
   output: withDefault(workspacePathSchema, "dist/tailwind.css"),
+  /** Workspace-relative glob patterns scanned for class names. */
+  files: withDefault(scanFilePatternsSchema, ["**/*"]),
   /** Minify the compiled CSS through the esbuild worker. */
   minify: withDefault(v.boolean(), false),
 });
@@ -110,6 +130,7 @@ export async function updateTailwindConfig(
     ...document,
     input: merged.input,
     output: merged.output,
+    files: merged.files,
     minify: merged.minify,
   };
 

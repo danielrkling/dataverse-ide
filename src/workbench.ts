@@ -34,7 +34,7 @@ import getWorkspaceTrustServiceOverride from "@codingame/monaco-vscode-workspace
 // below; it conflicts with the workbench override's own part rendering.
 import getEmmetServiceOverride from "@codingame/monaco-vscode-emmet-service-override";
 import getSecretStorageServiceOverride from "@codingame/monaco-vscode-secret-storage-service-override";
-// import getTerminalServiceOverride from '@codingame/monaco-vscode-terminal-service-override'
+import getTerminalServiceOverride from "@codingame/monaco-vscode-terminal-service-override";
 import getSCMServiceOverride from "@codingame/monaco-vscode-scm-service-override";
 // import getDebugServiceOverride from '@codingame/monaco-vscode-debug-service-override'
 
@@ -447,9 +447,12 @@ export async function startWorkbench(container: HTMLElement): Promise<void> {
       ...getEmmetServiceOverride(),
       ...getSecretStorageServiceOverride(),
 
-      // heavy: features that expect a real backend (pty/git/debug adapter/
-      // LLM endpoints) - present for completeness, mostly inert in-browser
-      // ...getTerminalServiceOverride(),
+      // The terminal service provides the panel + xterm UI. The Dataverse
+      // shell supplies its own extension-owned pseudoterminal, so no pty
+      // backend is registered.
+      ...getTerminalServiceOverride(),
+      // heavy: features that expect a real backend (git/debug adapter/LLM
+      // endpoints) - present for completeness, mostly inert in-browser
       ...getSCMServiceOverride(),
       // ...getDebugServiceOverride(),
 

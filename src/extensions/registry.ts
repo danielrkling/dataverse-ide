@@ -43,6 +43,7 @@ export const extensionModules: Record<string, () => Promise<{ default: IdeExtens
   esbuild: () => import("./esbuild/extension.js"),
   html: () => import("./html/extension.js"),
   "node-runtime": () => import("./node-runtime/extension.js"),
+  terminal: () => import("./terminal/extension.js"),
   npm: () => import("./npm/extension.js"),
   gitlab: () => import("./gitlab/extension.js"),
   tailwind: () => import("./tailwind/extension.js"),
@@ -78,7 +79,7 @@ export const extensionManifests: Record<string, ExtensionManifestIdentity> = {
     publisher: "dataverse-ide",
     name: "dataverse-ide-dataverse",
     displayName: "Dataverse IDE Dataverse",
-    description: "Web resource upload and settings management.",
+    description: "Web resource upload, schema provisioning, and settings management.",
   },
   esbuild: {
     publisher: "dataverse-ide",
@@ -97,6 +98,12 @@ export const extensionManifests: Record<string, ExtensionManifestIdentity> = {
     name: "dataverse-ide-node-runtime",
     displayName: "Dataverse IDE Node Runtime",
     description: "Run JavaScript/TypeScript files against the workspace filesystem directly.",
+  },
+  terminal: {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-terminal",
+    displayName: "Dataverse IDE Terminal",
+    description: "Browser shell backed by just-bash and the workspace filesystem.",
   },
   npm: {
     publisher: "dataverse-ide",

@@ -398,6 +398,7 @@ export default {
 
         const result = await compileTailwindCss(vscode, context.workspaceRootUri, {
           input: currentConfig.input,
+          files: currentConfig.files,
           pluginRunner,
           minify: currentConfig.minify,
           outputChannel,

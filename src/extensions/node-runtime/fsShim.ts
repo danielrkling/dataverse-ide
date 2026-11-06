@@ -56,6 +56,7 @@ export type RuntimeFs = {
   fs: Record<string, unknown>;
   promises: Record<string, unknown>;
   hydrate: (path: string, operation: Operation) => Promise<boolean>;
+  waitForIdle: () => Promise<void>;
   flush: () => Promise<FlushResult>;
 };
 
@@ -262,9 +263,39 @@ export function createRuntimeFs(options: {
   cwd?: string;
   writable?: boolean;
 }): RuntimeFs {
-  const { reader } = options;
   const cwd = options.cwd ?? "/";
   const writable = options.writable ?? true;
+  let pendingOperations = 0;
+
+  /*
+   * Track in-flight workspace operations so the engine can wait for async
+   * top-level work (`void main()`, top-level await, fs/promises chains)
+   * before it flushes and reports completion.
+   */
+  const reader = new Proxy(options.reader, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver) as unknown;
+
+      if (typeof value !== "function") {
+        return value;
+      }
+
+      return (...args: unknown[]) => {
+        pendingOperations += 1;
+
+        try {
+          const result = (value as (...parameters: unknown[]) => unknown).apply(target, args);
+
+          return Promise.resolve(result).finally(() => {
+            pendingOperations -= 1;
+          });
+        } catch (error) {
+          pendingOperations -= 1;
+          throw error;
+        }
+      };
+    },
+  }) as WorkspaceFs;
 
   const files = new Map<string, Uint8Array>();
   const stats = new Map<string, FileStat>();
@@ -1421,6 +1452,35 @@ export function createRuntimeFs(options: {
     },
   };
 
+  /*
+   * Wait until in-flight workspace operations have settled and the
+   * continuation microtasks they queued have run. This is a heuristic, not a
+   * full event-loop drain: timers and network requests started by user code
+   * are not tracked. It covers the common `void main()` + fs/promises shape.
+   */
+  async function waitForIdle(): Promise<void> {
+    const deadline = Date.now() + 10_000;
+    let idleTurns = 0;
+
+    while (Date.now() < deadline) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+      await Promise.resolve();
+
+      if (pendingOperations > 0) {
+        idleTurns = 0;
+        continue;
+      }
+
+      idleTurns += 1;
+
+      if (idleTurns >= 2) {
+        return;
+      }
+    }
+  }
+
   async function flush(): Promise<FlushResult> {
     if (!writable) {
       overlay.length = 0;
@@ -1461,6 +1521,7 @@ export function createRuntimeFs(options: {
     fs,
     promises,
     hydrate,
+    waitForIdle,
     flush,
   };
 }

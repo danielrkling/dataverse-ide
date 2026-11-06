@@ -18,8 +18,23 @@ import {
 } from "./permissions.js";
 import { blockNetworkAccess } from "./networkGate.js";
 
+export type DirectNodeRunOptions = {
+  /** Workspace-relative cwd used for relative entry paths and process.cwd(). */
+  cwd?: string;
+  /** Arguments after the script path (process.argv.slice(2)). */
+  argv?: string[];
+  level?: NodePermissionLevel;
+  stdout?: (data: string) => void;
+  stderr?: (data: string) => void;
+  /** Runtime status lines (start/finish/retry). Defaults to the output channel. */
+  log?: (line: string) => void;
+  /** Prefix console output with `[node:<method>]` (default true). */
+  prefixConsole?: boolean;
+};
+
 export type DirectNodeEngine = {
   runFile: (path: string, level?: NodePermissionLevel) => Promise<number>;
+  runProgram: (path: string, options?: DirectNodeRunOptions) => Promise<number>;
   dispose: () => void;
 };
 
@@ -40,113 +55,178 @@ export function createDirectNodeEngine(
   rootUri: vscodeType.Uri,
   outputChannel: vscodeType.OutputChannel,
 ): DirectNodeEngine {
-  return {
-    async runFile(
-      entryPath: string,
-      level: NodePermissionLevel = "trusted",
-    ): Promise<number> {
-      const permissions = permissionsForLevel(level);
-      /*
-       * Imported on first run so extension activation does not pull the
-       * almostnode shims or esbuild-wasm into the boot chunk.
-       */
-      const [
-        { createProcess },
-        { createRuntimeFs },
-        { createModuleLoader },
-        { createWorkspaceFs, normalizePath },
-      ] = await Promise.all([
-        import("almostnode"),
-        import("./fsShim.js"),
-        import("./loader.js"),
-        import("./workspace.js"),
-      ]);
+  async function runProgram(
+    entryPath: string,
+    options: DirectNodeRunOptions = {},
+  ): Promise<number> {
+    const level = options.level ?? "trusted";
+    const permissions = permissionsForLevel(level);
+    /*
+     * Imported on first run so extension activation does not pull the
+     * almostnode shims or esbuild-wasm into the boot chunk.
+     */
+    const [
+      { createProcess },
+      { createRuntimeFs },
+      { createModuleLoader },
+      { createWorkspaceFs, normalizePath, joinPath },
+    ] = await Promise.all([
+      import("almostnode"),
+      import("./fsShim.js"),
+      import("./loader.js"),
+      import("./workspace.js"),
+    ]);
 
-      const normalized = normalizePath(entryPath.replace(/^\/+/, ""));
-      const started = Date.now();
-
-      outputChannel.appendLine(
-        `[node] Running ${normalized} (${level}: ${describePermissions(permissions)})…`,
-      );
-
-      const reader = createWorkspaceFs(vscode, rootUri, {
-        writable: permissions.filesystem === "read-write",
+    const cwd = normalizePath(options.cwd ?? "");
+    const normalized = normalizePath(
+      entryPath.startsWith("/") ? entryPath : joinPath(cwd, entryPath),
+    );
+    const started = Date.now();
+    const log =
+      options.log ??
+      ((line: string) => {
+        outputChannel.appendLine(line);
       });
-      const runtimeFs = createRuntimeFs({
-        reader,
-        cwd: "/",
-        writable: permissions.filesystem === "read-write",
+    const stdout =
+      options.stdout ??
+      ((data: string) => {
+        outputChannel.append(data);
       });
-      const runtimeProcess = createProcess({
-        cwd: "/",
-        env: {
-          NODE_ENV: "development",
-        },
-        onStdout: (data: string) => outputChannel.append(data),
-        onStderr: (data: string) => outputChannel.append(data),
+    const stderr =
+      options.stderr ??
+      ((data: string) => {
+        outputChannel.append(data);
       });
 
-      const loader = createModuleLoader({
-        reader,
-        runtimeFs,
-        process: runtimeProcess,
-        onConsole: (method, args) => {
-          outputChannel.appendLine(`[node:${method}] ${args.map(formatArgument).join(" ")}`);
-        },
-        onRetry: (message) => {
-          outputChannel.appendLine(`[node] ${message} (retrying run)…`);
-        },
-      });
+    log(`[node] Running ${normalized} (${level}: ${describePermissions(permissions)})…`);
 
-      const networkGuard =
-        permissions.network === "blocked" ? blockNetworkAccess() : undefined;
+    const reader = createWorkspaceFs(vscode, rootUri, {
+      writable: permissions.filesystem === "read-write",
+    });
+    const runtimeFs = createRuntimeFs({
+      reader,
+      cwd: cwd.length === 0 ? "/" : `/${cwd}`,
+      writable: permissions.filesystem === "read-write",
+    });
+    const runtimeProcess = createProcess({
+      cwd: cwd.length === 0 ? "/" : `/${cwd}`,
+      env: {
+        NODE_ENV: "development",
+      },
+      onStdout: stdout,
+      onStderr: stderr,
+    });
 
-      let exitCode = 0;
-
-      try {
-        await loader.run(normalized);
-        outputChannel.appendLine(`[node] Finished in ${Date.now() - started}ms.`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const exit = /^Process exited with code (\d+)/.exec(message);
-
-        if (exit != null) {
-          exitCode = Number(exit[1]);
-          outputChannel.appendLine(`[node] Exited with code ${exitCode}.`);
-        } else {
-          exitCode = 1;
-          outputChannel.appendLine(`[node] Uncaught: ${message}`);
-          outputChannel.show(true);
-        }
-      } finally {
-        networkGuard?.restore();
+    const loader = createModuleLoader({
+      reader,
+      runtimeFs,
+      process: runtimeProcess,
+      onConsole: (method, args) => {
+        const message = args.map(formatArgument).join(" ");
 
         /*
-         * Keep the loader alive for pending dynamic imports and timers; it is
-         * unreachable once this run ends, so its caches follow it.
+         * Terminal runs own stdout; keep console output in the stream
+         * instead of the output channel. The terminal does not need the
+         * `[node:...]` prefix on every script console line.
          */
-        try {
-          const flushed = await runtimeFs.flush();
+        if (options.log == null) {
+          outputChannel.appendLine(`[node:${method}] ${message}`);
+          return;
+        }
 
-          if (flushed.applied > 0) {
-            outputChannel.appendLine(
-              `[node] Wrote ${flushed.applied} filesystem change(s) to the workspace.`,
-            );
-          }
+        const line =
+          options.prefixConsole === false ? `${message}\n` : `[node:${method}] ${message}\n`;
 
-          for (const failure of flushed.errors) {
-            outputChannel.appendLine(`[node] fs flush failed: ${failure}`);
-          }
-        } catch (error) {
-          outputChannel.appendLine(
-            `[node] fs flush failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
+        if (method === "error" || method === "warn") {
+          stderr(line);
+        } else {
+          stdout(line);
+        }
+      },
+      onRetry: (message) => {
+        log(`[node] ${message} (retrying run)…`);
+      },
+    });
+
+    if (permissions.network === "blocked") {
+      /*
+       * esbuild-wasm fetches its gzip wasm asset on first transform. Warm
+       * the shared instance before installing the network guard, so
+       * TypeScript/JSX transpilation still works at workspace level while
+       * user code keeps its network block.
+       */
+      const { ensureEsbuildCompilerReady } = await import("../esbuild/compiler.js");
+
+      await ensureEsbuildCompilerReady();
+    }
+
+    const networkGuard = permissions.network === "blocked" ? blockNetworkAccess() : undefined;
+
+    let exitCode = 0;
+
+    try {
+      await loader.run(normalized, options.argv);
+
+      /*
+       * CJS modules return synchronously even when they start async work
+       * (`void main()`, top-level await, fs/promises chains). Wait for the
+       * tracked workspace operations before flushing/reporting completion.
+       */
+      await runtimeFs.waitForIdle();
+
+      log(`[node] Finished in ${Date.now() - started}ms.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const exit = /^Process exited with code (\d+)/.exec(message);
+
+      if (exit != null) {
+        exitCode = Number(exit[1]);
+        log(`[node] Exited with code ${exitCode}.`);
+      } else {
+        exitCode = 1;
+        stderr(`[node] Uncaught: ${message}\n`);
+        log(`[node] Uncaught: ${message}`);
+
+        if (options.log == null) {
+          outputChannel.show(true);
         }
       }
+    } finally {
+      try {
+        await runtimeFs.waitForIdle();
+      } catch {
+        /* Idle tracking is best-effort. */
+      }
 
-      return exitCode;
+      networkGuard?.restore();
+
+      /*
+       * Keep the loader alive for pending dynamic imports and timers; it is
+       * unreachable once this run ends, so its caches follow it.
+       */
+      try {
+        const flushed = await runtimeFs.flush();
+
+        if (flushed.applied > 0) {
+          log(`[node] Wrote ${flushed.applied} filesystem change(s) to the workspace.`);
+        }
+
+        for (const failure of flushed.errors) {
+          log(`[node] fs flush failed: ${failure}`);
+        }
+      } catch (error) {
+        log(`[node] fs flush failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    return exitCode;
+  }
+
+  return {
+    runFile(entryPath: string, level: NodePermissionLevel = "trusted"): Promise<number> {
+      return runProgram(entryPath, { level });
     },
-
+    runProgram,
     dispose() {},
   };
 }

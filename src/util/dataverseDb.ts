@@ -3,8 +3,9 @@ import { deleteDB, openDB, type Db } from "./db.js";
 /*
  * One IndexedDB database for everything the IDE stores itself:
  *
- * - `workspaces` — recent workspace records and folder handles
- * - `vsix`       — installed VSIX archives
+ * - `workspaces`      — recent workspace records and folder handles
+ * - `vsix`            — installed VSIX archives
+ * - `terminalHistory` — shell command history, keyed by workspace URI
  *
  * Earlier builds used one database per feature (`dataverse-ide-recents` and
  * `dataverse-ide-vsix`). They are copied into this database and then removed
@@ -12,10 +13,11 @@ import { deleteDB, openDB, type Db } from "./db.js";
  */
 
 const DB_NAME = "dataverse-ide";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export const WORKSPACE_STORE = "workspaces";
 export const VSIX_STORE = "vsix";
+export const TERMINAL_HISTORY_STORE = "terminalHistory";
 
 type LegacyDatabase = {
   name: string;
@@ -43,7 +45,11 @@ export function dataverseDB(): Promise<Db> {
 }
 
 async function openDataverseDB(): Promise<Db> {
-  const db = await openDB(DB_NAME, DB_VERSION, [WORKSPACE_STORE, VSIX_STORE]);
+  const db = await openDB(DB_NAME, DB_VERSION, [
+    WORKSPACE_STORE,
+    VSIX_STORE,
+    TERMINAL_HISTORY_STORE,
+  ]);
 
   for (const legacy of LEGACY_DATABASES) {
     await migrateLegacyDatabase(db, legacy);

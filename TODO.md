@@ -10,6 +10,57 @@
 - Able to persist node_modules differently due to onedrive flagging .js files?
 - can we persist node_modules differently?
 
+# Terminal
+
+- [added 2026-11-06] `terminal` extension: native VS Code terminal backed by just-bash
+  (the shell almostnode embeds) over `vscode.workspace.fs`. No almostnode
+  `VirtualFS`/`createContainer`, no workspace mirror, no sync-back.
+  - `terminal/shellFs.ts` implements just-bash's async `IFileSystem` directly on the
+    workspace; scratch paths (`/tmp`, `/home`, `/dev`) are in-memory only.
+  - `terminal/pty.ts` is an extension-owned `Pseudoterminal` (line editor, history,
+    Ctrl-C/Ctrl-D). The workbench only needs `getTerminalServiceOverride()` for the
+    panel UI; no pty backend is registered.
+  - `terminal/commands.ts` adds `node` (delegates to `node-runtime` via
+    `engine.runProgram`) and `npm` (`npm run` through the shell, `npm install`
+    through the direct installer).
+  - Synchronous `getAllPaths()` is served from a metadata-only path index refreshed by
+    the file watcher and after installs; file contents are never mirrored.
+  - Permission level `dataverseIde.terminal.permissions` (`read-only` / `workspace`
+    default / `trusted`).
+- [fixed 2026-11-06] workspace-level `node` runs failed on the first TypeScript
+  transpile with `EACCES: network access denied (fetch)`: esbuild-wasm fetches its
+  gzip wasm asset on first use, and the node runtime installed the network guard
+  before transpiling. `engine.runProgram` now warms the shared esbuild compiler
+  (`ensureEsbuildCompilerReady`) before installing the guard.
+- [added 2026-11-06] terminal command history persists in browser storage
+  (`terminal/history.ts`): the `terminalHistory` store in the shared
+  `dataverse-ide` IndexedDB database, one record per workspace URI, last 1000
+  commands, serialized read-modify-write appends. Setting
+  `dataverseIde.terminal.history` (default true); history is loaded on terminal
+  open and merged across terminals instead of replaced. No workspace file.
+- [added 2026-11-06] terminal `node` output now streams live to the pty for
+  top-level `node ...` commands (`terminal/output.ts`, bound by the pty). Piped/
+  redirected node commands and `npm run` keep buffered output so shell routing
+  and script capture still work. Late async logs after the prompt now appear.
+- [fixed 2026-11-06] terminal `node` runs ended at the first `await` when the
+  script used `void main()`; the loader returns synchronously, so async
+  `fs/promises` continuations ran after the command had returned and their
+  output was lost. `fsShim` now tracks in-flight workspace operations and
+  `engine.runProgram` drains them (`runtimeFs.waitForIdle()`) before flushing
+  and reporting completion.
+- [fixed 2026-11-06] `ls /` showed only the scratch roots when the workspace
+  provider returned an empty/undefined root listing. `shellFs.readdir("/")` now
+  falls back to the workspace directory handle, then the path index and a
+  `findFiles` scan for top-level names; non-root listings use the same index/scan
+  fallback.
+- [open] just-bash cannot execute arbitrary `node_modules/.bin` tools (tsc, vite,
+  esbuild), so `npm run` only works when a script uses `node ...` or shell builtins
+  until a bin-command bridge is added.
+- [open] shell runs on the main thread; a worker + `workspace.fs` bridge is the next
+  step for long-running commands.
+- [test] `tests/terminalShell.sanity.mts` covers redirects, globs, cp/mv/rm, cwd,
+  scratch paths and the read-only guard against a fake workspace.
+
 # Extension panel to enable or disabled extensions
 
 - [implemented] ability to add manual vsix files: `VSIX: Install Extension from File…`
