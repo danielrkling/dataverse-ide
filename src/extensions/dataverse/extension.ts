@@ -14,12 +14,74 @@ import { DataverseWebResourceClient, type DataverseWebResource } from "./webReso
 import guideContent from "./GUIDE.md?raw";
 
 import { registerGuide } from "../shared/guide.js";
+import { createGlobMatcher, scanGlob } from "../shared/glob.js";
 
 export type DataverseUploadController = {
   dispose: () => void;
 };
 
 type UploadSettings = DataverseConfig;
+
+const DEFAULT_INCLUDE_PATTERN = "**/*";
+
+/*
+ * `vscode.workspace.findFiles()` is backed by the browser search provider in
+ * this build. Its file search ignores the include glob (and the search
+ * folder), so it returns every cached workspace file regardless of the
+ * dataverse.config.json "files" option. Walk the upload root through
+ * workspace.fs and apply the configured globs ourselves so uploads and watch
+ * mode honour `files`/`exclude`.
+ */
+const MAX_SCANNED_DIRECTORIES = 20000;
+
+/* VCS/internal folders are never web resources, even for the default pattern. */
+const SKIPPED_DIRECTORY_NAMES = new Set([".git", ".ide-build"]);
+
+function normalizeGlobPattern(pattern: string): string {
+  const normalized = pattern
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/^(?:\.\/)+/, "")
+    .replace(/^\/+/, "");
+
+  /* Upload globs are relative to uploadRoot; never let them escape it. */
+  return normalized.split("/").includes("..") ? "" : normalized;
+}
+
+function configuredGlobPatterns(patterns: string[], fallback?: string): string[] {
+  const normalized = patterns.map(normalizeGlobPattern).filter((pattern) => pattern.length > 0);
+
+  if (normalized.length > 0) {
+    return normalized;
+  }
+
+  return fallback == null ? [] : [fallback];
+}
+
+function createUploadPatternMatcher(settings: UploadSettings): (relativePath: string) => boolean {
+  const includeMatchers = configuredGlobPatterns(settings.files, DEFAULT_INCLUDE_PATTERN).map(
+    (pattern) => createGlobMatcher(pattern),
+  );
+
+  const excludeMatchers = configuredGlobPatterns(settings.exclude).map((pattern) =>
+    createGlobMatcher(pattern),
+  );
+
+  return (relativePath: string): boolean =>
+    includeMatchers.some((matches) => matches(relativePath)) &&
+    !excludeMatchers.some((matches) => matches(relativePath));
+}
+
+// Longest literal directory prefix of a glob. Traversal starts there, so a
+// pattern rooted at a subfolder only scans that subfolder.
+function globTraversalBaseSegments(pattern: string): string[] {
+  const scanned = scanGlob(pattern);
+  const segments = (scanned.isGlob ? scanned.base : pattern.split("/").slice(0, -1).join("/"))
+    .split("/")
+    .filter((segment) => segment.length > 0);
+
+  return segments;
+}
 
 async function getConfiguredUploadFiles(
   vscode: typeof vscodeType,
@@ -31,16 +93,79 @@ async function getConfiguredUploadFiles(
       ? workspaceRootUri
       : vscode.Uri.joinPath(workspaceRootUri, ...settings.uploadRoot.split("/"));
 
-  const includePattern = combineGlobPatterns(settings.files, "**/*");
+  const includePatterns = configuredGlobPatterns(settings.files, DEFAULT_INCLUDE_PATTERN);
 
-  const excludePattern = combineGlobPatterns(settings.exclude, "");
+  /*
+   * Dependencies are not web resources. Skip node_modules unless a configured
+   * pattern names it explicitly.
+   */
+  const skipNodeModules = !includePatterns.some((pattern) =>
+    pattern.split("/").includes("node_modules"),
+  );
 
-  return vscode.workspace.findFiles(
-    new vscode.RelativePattern(uploadRootUri, includePattern),
+  const shouldSkipDirectory = (name: string): boolean => {
+    const lowerName = name.toLowerCase();
 
-    excludePattern.length > 0
-      ? new vscode.RelativePattern(uploadRootUri, excludePattern)
-      : undefined,
+    return (
+      SKIPPED_DIRECTORY_NAMES.has(lowerName) || (lowerName === "node_modules" && skipNodeModules)
+    );
+  };
+
+  const matchesConfiguredPatterns = createUploadPatternMatcher(settings);
+
+  const matched = new Map<string, vscodeType.Uri>();
+  const visitedDirectories = new Set<string>();
+  let scannedDirectories = 0;
+
+  for (const pattern of includePatterns) {
+    const baseUri = vscode.Uri.joinPath(uploadRootUri, ...globTraversalBaseSegments(pattern));
+    const pending: vscodeType.Uri[] = [baseUri];
+
+    while (pending.length > 0 && scannedDirectories < MAX_SCANNED_DIRECTORIES) {
+      const current = pending.pop()!;
+      const key = current.toString();
+
+      if (visitedDirectories.has(key)) {
+        continue;
+      }
+
+      visitedDirectories.add(key);
+      scannedDirectories++;
+
+      let entries: Array<[string, vscodeType.FileType]>;
+
+      try {
+        entries = await vscode.workspace.fs.readDirectory(current);
+      } catch {
+        continue;
+      }
+
+      for (const [name, type] of entries) {
+        const childUri = vscode.Uri.joinPath(current, name);
+
+        if ((type & vscode.FileType.Directory) !== 0) {
+          if (!shouldSkipDirectory(name)) {
+            pending.push(childUri);
+          }
+
+          continue;
+        }
+
+        if ((type & vscode.FileType.File) === 0) {
+          continue;
+        }
+
+        const relativePath = getRelativePath(uploadRootUri, childUri);
+
+        if (matchesConfiguredPatterns(relativePath)) {
+          matched.set(childUri.toString(), childUri);
+        }
+      }
+    }
+  }
+
+  return [...matched.values()].sort((left, right) =>
+    getRelativePath(uploadRootUri, left).localeCompare(getRelativePath(uploadRootUri, right)),
   );
 }
 
@@ -71,22 +196,6 @@ async function getSettings(
   }
 
   return settings;
-}
-
-function combineGlobPatterns(patterns: string[], fallback: string): string {
-  const normalized = patterns
-    .map((pattern) => pattern.trim())
-    .filter((pattern) => pattern.length > 0);
-
-  if (normalized.length === 0) {
-    return fallback;
-  }
-
-  if (normalized.length === 1) {
-    return normalized[0];
-  }
-
-  return `{${normalized.join(",")}}`;
 }
 
 function buildWebResourceName(settings: UploadSettings, relativePath: string): string {
@@ -317,6 +426,17 @@ export async function installDataverseUploadExtension(
    */
   const pendingWatchFiles = new Map<string, vscodeType.Uri>();
 
+  /*
+   * Publishing is slow (often 20s+) and expensive on the Dataverse server.
+   * Watch mode queues uploaded resources and coalesces bursts into one publish
+   * after a short idle period instead of blocking every upload batch.
+   */
+  const PUBLISH_DEBOUNCE_MS = 1500;
+  const pendingPublishResources = new Map<string, DataverseWebResource>();
+  let publishTimer: number | undefined;
+  let publishInProgress = false;
+  let publishQueued = false;
+
   const watchStatus = createWatchStatus(vscode, {
     id: "dataverse",
     label: "dataverse",
@@ -351,7 +471,123 @@ export async function installDataverseUploadExtension(
     ],
   });
 
-  async function uploadFiles(selectedUris: vscodeType.Uri[]): Promise<void> {
+  function createWebResourceClient(settings: UploadSettings): DataverseWebResourceClient {
+    return new DataverseWebResourceClient({
+      apiBaseUrl: settings.apiBaseUrl,
+      solutionUniqueName: settings.solution,
+    });
+  }
+
+  async function publishResources(
+    client: DataverseWebResourceClient,
+    resources: DataverseWebResource[],
+    location: vscodeType.ProgressLocation,
+    label: string,
+  ): Promise<void> {
+    output.appendLine(`${label} ${resources.length} web resource(s)...`);
+
+    await vscode.window.withProgress(
+      {
+        location,
+        title: "Publishing Dataverse web resources",
+        cancellable: false,
+      },
+      async (progress) => {
+        progress.report({ message: "Dataverse can take 20+ seconds…" });
+
+        await client.publishWebResources(resources);
+      },
+    );
+
+    output.appendLine("Publish completed.");
+  }
+
+  function enqueueBackgroundPublish(resources: DataverseWebResource[]): void {
+    for (const resource of resources) {
+      pendingPublishResources.set(resource.webresourceid, resource);
+    }
+
+    if (pendingPublishResources.size === 0) {
+      return;
+    }
+
+    if (publishTimer != null) {
+      window.clearTimeout(publishTimer);
+    }
+
+    publishTimer = window.setTimeout(() => {
+      publishTimer = undefined;
+
+      void flushBackgroundPublish();
+    }, PUBLISH_DEBOUNCE_MS);
+  }
+
+  async function flushBackgroundPublish(): Promise<void> {
+    if (publishInProgress) {
+      publishQueued = true;
+      return;
+    }
+
+    if (pendingPublishResources.size === 0) {
+      return;
+    }
+
+    publishInProgress = true;
+
+    const resources = [...pendingPublishResources.values()];
+    pendingPublishResources.clear();
+    let failed = false;
+
+    try {
+      const settings = await getSettings(vscode, workspaceRootUri);
+
+      if (!settings.publishAfterUpload) {
+        output.appendLine("[watch] publishAfterUpload is disabled; skipping publish.");
+        return;
+      }
+
+      await publishResources(
+        createWebResourceClient(settings),
+        resources,
+        vscode.ProgressLocation.Window,
+        "[watch] Publishing",
+      );
+    } catch (error) {
+      failed = true;
+
+      const message = error instanceof Error ? error.message : String(error);
+
+      output.appendLine(`[watch] Publish failed: ${message}`);
+
+      await vscode.window.showErrorMessage(
+        `Dataverse publish failed: ${message}. It will be retried with the next watch upload.`,
+      );
+    } finally {
+      publishInProgress = false;
+
+      /*
+       * Keep failed resources for the next upload trigger instead of retrying
+       * in a tight loop. New changes made during the publish are picked up by
+       * the normal debounce path.
+       */
+      if (failed) {
+        for (const resource of resources) {
+          pendingPublishResources.set(resource.webresourceid, resource);
+        }
+
+        publishQueued = false;
+      } else if (publishQueued || pendingPublishResources.size > 0) {
+        publishQueued = false;
+
+        enqueueBackgroundPublish([]);
+      }
+    }
+  }
+
+  async function uploadFiles(
+    selectedUris: vscodeType.Uri[],
+    options: { backgroundPublish?: boolean } = {},
+  ): Promise<void> {
     const settings = await getSettings(vscode, workspaceRootUri);
 
     const uploadRootUri =
@@ -373,10 +609,7 @@ export async function installDataverseUploadExtension(
       return;
     }
 
-    const client = new DataverseWebResourceClient({
-      apiBaseUrl: settings.apiBaseUrl,
-      solutionUniqueName: settings.solution,
-    });
+    const client = createWebResourceClient(settings);
 
     const uploaded: DataverseWebResource[] = [];
     const failures: string[] = [];
@@ -425,18 +658,6 @@ export async function installDataverseUploadExtension(
       },
     );
 
-    /*
-     * Do not publish a partial deployment. The user can correct failed files
-     * and retry the same operation.
-     */
-    if (failures.length === 0 && uploaded.length > 0 && settings.publishAfterUpload) {
-      output.appendLine(`Publishing ${uploaded.length} web resource(s)...`);
-
-      await client.publishWebResources(uploaded);
-
-      output.appendLine("Publish completed.");
-    }
-
     if (failures.length > 0) {
       await vscode.window.showErrorMessage(
         `${failures.length} of ${files.length} Dataverse web resource upload(s) failed. See Output for details.`,
@@ -445,9 +666,34 @@ export async function installDataverseUploadExtension(
       return;
     }
 
-    const publishMessage = settings.publishAfterUpload
+    let publishMessage = settings.publishAfterUpload
       ? " Uploaded and published."
       : " Uploaded but not published.";
+
+    /*
+     * Do not publish a partial deployment. The user can correct failed files
+     * and retry the same operation.
+     *
+     * Watch mode queues the IDs and publishes once after a short idle period:
+     * a build often saves several files in a burst, and one PublishXml call is
+     * much cheaper than one publish per file/batch.
+     */
+    if (uploaded.length > 0 && settings.publishAfterUpload) {
+      if (options.backgroundPublish === true) {
+        enqueueBackgroundPublish(uploaded);
+
+        output.appendLine(`Queued ${uploaded.length} web resource(s) for publishing.`);
+
+        publishMessage = " Uploaded; publishing in the background.";
+      } else {
+        await publishResources(
+          client,
+          uploaded,
+          vscode.ProgressLocation.Notification,
+          "Publishing",
+        );
+      }
+    }
 
     await vscode.window.showInformationMessage(
       `${uploaded.length} Dataverse web resource(s) uploaded.${publishMessage}`,
@@ -506,6 +752,7 @@ export async function installDataverseUploadExtension(
     }
 
     watchUploadInProgress = true;
+    watchStatus.update();
 
     /*
      * Snapshot and clear first. File changes that occur during upload populate
@@ -518,19 +765,29 @@ export async function installDataverseUploadExtension(
       const settings = await getSettings(vscode, workspaceRootUri);
 
       /*
-       * Use the built-in VS Code glob query to apply the
-       * dataverse.config.json "files" and "exclude" glob lists.
+       * Match each changed URI directly against dataverse.config.json
+       * "files"/"exclude" instead of re-scanning the workspace and comparing
+       * URI strings. The scan can race the file write and is much slower for
+       * large build outputs.
        *
-       * Deleted files will not be returned by findFiles(), which intentionally
-       * matches the current "do not delete remote resources" requirement.
+       * Deletions are removed from pendingWatchFiles by onDidDelete, which
+       * intentionally matches the "do not delete remote resources"
+       * requirement.
        */
-      const configuredFiles = await getConfiguredUploadFiles(vscode, workspaceRootUri, settings);
+      const uploadRootUri = getUploadRootUri(settings);
+      const matchesConfiguredPatterns = createUploadPatternMatcher(settings);
 
-      const configuredFileUris = new Set(configuredFiles.map((uri) => uri.toString()));
+      const filesToUpload = [...changedFiles.values()].filter((uri) => {
+        if (!isWithinFolder(uri, uploadRootUri)) {
+          return false;
+        }
 
-      const filesToUpload = [...changedFiles.values()].filter((uri) =>
-        configuredFileUris.has(uri.toString()),
-      );
+        try {
+          return matchesConfiguredPatterns(getRelativePath(uploadRootUri, uri));
+        } catch {
+          return false;
+        }
+      });
 
       if (filesToUpload.length === 0) {
         output.appendLine("[watch] No changed files matched configured upload patterns.");
@@ -540,7 +797,7 @@ export async function installDataverseUploadExtension(
 
       output.appendLine(`[watch] Uploading ${filesToUpload.length} changed file(s).`);
 
-      await uploadFiles(filesToUpload);
+      await uploadFiles(filesToUpload, { backgroundPublish: true });
 
       output.appendLine(`[watch] Completed upload of ${filesToUpload.length} file(s).`);
     } catch (error) {
@@ -553,6 +810,7 @@ export async function installDataverseUploadExtension(
       await vscode.window.showErrorMessage(`Dataverse watch upload failed: ${message}`);
     } finally {
       watchUploadInProgress = false;
+      watchStatus.update();
 
       /*
        * Process files changed while the previous batch was uploading.
@@ -578,6 +836,8 @@ export async function installDataverseUploadExtension(
 
     fileWatcher?.dispose();
     fileWatcher = undefined;
+
+    watchStatus.update();
   }
 
   function startWatchUpload(): void {
@@ -600,6 +860,8 @@ export async function installDataverseUploadExtension(
         fileWatcher = vscode.workspace.createFileSystemWatcher(
           new vscode.RelativePattern(uploadRootUri, "**/*"),
         );
+
+        watchStatus.update();
 
         fileWatcher.onDidCreate((uri) => {
           output.appendLine(`[watch] Created: ${uri.path}`);
@@ -653,6 +915,8 @@ export async function installDataverseUploadExtension(
           `Dataverse watch upload started for "${settings.uploadRoot || "."}".`,
         );
       } catch (error) {
+        stopWatchUpload();
+
         output.appendLine(
           `[watch] Failed to start: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -849,6 +1113,13 @@ export async function installDataverseUploadExtension(
   return {
     dispose() {
       stopWatchUpload();
+
+      if (publishTimer != null) {
+        window.clearTimeout(publishTimer);
+        publishTimer = undefined;
+      }
+
+      pendingPublishResources.clear();
 
       uploadConfiguredFilesCommand.dispose();
       uploadSelectionCommand.dispose();

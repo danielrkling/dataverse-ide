@@ -87,6 +87,11 @@ Runtime tuning lives in settings, not the config file:
   propagated — removing a file locally does not delete the web resource.
 - Watch batches rapid saves (for example an esbuild rebuild touching several files) into one
   upload pass. Changes made while an upload is running are queued for the next pass.
+- Publishing is much slower than uploading (often 20s or more) and runs as a separate
+  progress operation. Watch mode coalesces resource IDs for about 1.5s and then publishes
+  them once in the background, so a burst of saves does not trigger a publish per file.
+- A publish request has a longer timeout than normal API calls. A timed-out publish is not
+  retried automatically because Dataverse may still be completing it server-side.
 
 ## Recipes
 

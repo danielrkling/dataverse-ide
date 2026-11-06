@@ -75,15 +75,27 @@ function escapeODataString(value: string): string {
 /*
  * Request resilience (ported from dataverse-dev-tools' dataverse service):
  *
- * - Every request runs under an abort timeout (30s default).
+ * - Every request runs under an abort timeout (60s default).
  * - 429 responses honor the Retry-After header (seconds or HTTP date) and
  *   are retried up to 3 times.
  * - Transient 5xx responses and network errors are retried with
  *   exponential backoff (300ms base, max 3 attempts).
+ *
+ * Publishing is special: Dataverse runs it server-side and it regularly
+ * takes 20-60s, so it gets a longer timeout and is never retried after a
+ * timeout. A timed-out PublishXml may still complete on the server; sending
+ * the same publish again can queue duplicate work.
  */
 const REQUEST_TIMEOUT_MS = 60000;
+const PUBLISH_TIMEOUT_MS = 180000;
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 300;
+
+type FetchWithRetryOptions = {
+  timeoutMs?: number;
+  /** Retry after our own abort timeout. Disabled for non-idempotent work. */
+  retryTimeouts?: boolean;
+};
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -111,7 +123,13 @@ function parseRetryAfterMs(response: Response): number | undefined {
   return undefined;
 }
 
-async function fetchWithRetry(url: string, init: RequestInit = {}): Promise<Response> {
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit = {},
+  options: FetchWithRetryOptions = {},
+): Promise<Response> {
+  const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const retryTimeouts = options.retryTimeouts ?? true;
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -120,7 +138,7 @@ async function fetchWithRetry(url: string, init: RequestInit = {}): Promise<Resp
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(url, {
@@ -142,11 +160,16 @@ async function fetchWithRetry(url: string, init: RequestInit = {}): Promise<Resp
 
       return response;
     } catch (error) {
-      /*
-       * AbortError from our own timeout is treated like a network error:
-       * retry, but the timeout is re-armed for the next attempt.
-       */
       lastError = error;
+
+      /*
+       * AbortError from our own timeout. A non-idempotent request may still be
+       * running on the server, so callers that disable retryTimeouts get a
+       * clear timeout error instead of a silent duplicate request.
+       */
+      if (controller.signal.aborted && !retryTimeouts) {
+        throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s.`);
+      }
 
       if (attempt >= MAX_RETRIES) {
         break;
@@ -434,13 +457,20 @@ export class DataverseWebResourceClient {
       ids.map((id) => `<webresource>${id}</webresource>`).join("") +
       "</webresources></importexportxml>";
 
-    const response = await fetchWithRetry(`${this.apiUrl}/PublishXml`, {
-      method: "POST",
-      headers: this.requestHeaders,
-      body: JSON.stringify({
-        ParameterXml: parameterXml,
-      }),
-    });
+    const response = await fetchWithRetry(
+      `${this.apiUrl}/PublishXml`,
+      {
+        method: "POST",
+        headers: this.requestHeaders,
+        body: JSON.stringify({
+          ParameterXml: parameterXml,
+        }),
+      },
+      {
+        timeoutMs: PUBLISH_TIMEOUT_MS,
+        retryTimeouts: false,
+      },
+    );
 
     if (!response.ok) {
       throw new Error(`Unable to publish web resources: ${await getErrorMessage(response)}`);
