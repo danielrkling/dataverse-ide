@@ -244,6 +244,7 @@ export class ChatController {
         settings: {
           ...settings,
           model: modelIds(settings)[0] ?? settings.model,
+          workspaceRoot: this.workspace,
         },
         apiKey,
         turns,

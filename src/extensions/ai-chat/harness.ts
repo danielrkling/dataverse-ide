@@ -32,6 +32,9 @@ export type AgentSettings = {
   proxyUrl: string;
   model: string;
   systemPrompt: string;
+  environmentContext?: string;
+  /** Workspace root URI, included in the environment block. */
+  workspaceRoot?: string;
   maxTokens: number;
   temperature: number;
   enableWorkspaceTools: boolean;
@@ -66,8 +69,18 @@ export type AgentRunResult = {
 };
 
 function systemPromptFor(options: AgentRunnerOptions): string {
+  const environment = [
+    options.settings.workspaceRoot != null
+      ? `Workspace root: ${options.settings.workspaceRoot}`
+      : "",
+    options.settings.environmentContext ?? "",
+  ]
+    .filter((part) => part.trim().length > 0)
+    .join("\n\n");
+
   return [
     options.settings.systemPrompt,
+    environment.length > 0 ? `Environment:\n${environment}` : "",
     options.settings.enableWorkspaceTools ? options.toolPrompt : "",
   ]
     .filter((part) => part.trim().length > 0)

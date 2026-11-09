@@ -233,6 +233,15 @@ export default {
             scope: "window",
             markdownDescription: "System prompt prepended to every request.",
           },
+          [`${CONFIG_SECTION}.environmentContext`]: {
+            type: "string",
+            default: "",
+            scope: "window",
+            markdownDescription:
+              "Optional description of the environment the agent is working in, for example " +
+              "`React + Vite app; source in src/; builds to dist/; uses Tailwind and pnpm`. " +
+              "Appended to the system prompt with the workspace root.",
+          },
           [`${CONFIG_SECTION}.maxTokens`]: {
             type: "number",
             default: DEFAULT_MAX_TOKENS,
@@ -392,6 +401,7 @@ export default {
         `base URL: ${hostLabel(settings.baseUrl)}`,
         `proxy: ${settings.proxyUrl.length > 0 ? "set" : "none"}`,
         `model: ${settings.model}`,
+        `environment context: ${settings.environmentContext.length > 0 ? "set" : "none"}`,
         `API key: ${key != null && key.trim().length > 0 ? "stored" : "not set"}`,
         `workspace tools: ${settings.enableWorkspaceTools}`,
         `max agent steps: ${settings.maxAgentSteps}`,

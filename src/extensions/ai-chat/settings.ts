@@ -34,6 +34,7 @@ export type AiChatSettings = {
   proxyUrl: string;
   model: string;
   systemPrompt: string;
+  environmentContext: string;
   maxTokens: number;
   temperature: number;
   includeActiveEditor: boolean;
@@ -75,6 +76,7 @@ export function readAiChatSettings(
     proxyUrl: stringSetting(config, "proxyUrl", ""),
     model: stringSetting(config, "model", DEFAULT_MODEL) || DEFAULT_MODEL,
     systemPrompt: stringSetting(config, "systemPrompt", DEFAULT_SYSTEM_PROMPT),
+    environmentContext: stringSetting(config, "environmentContext", ""),
     maxTokens: numberSetting(config, "maxTokens", DEFAULT_MAX_TOKENS),
     temperature: Math.min(
       2,

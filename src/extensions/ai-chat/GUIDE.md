@@ -125,7 +125,10 @@ responses are non-streaming.
 - `delete_file` — delete a file, or a folder with `recursive: true`
 - `move_file` — move or rename a file or folder
 - `get_file_info` — type, size, and modified time
-- `search_files` — substring or regular-expression search with line numbers
+- `find_files` — find files and folders by name or glob (`App.tsx`,
+  `*.css`, `**/*.tsx`)
+- `search_files` — substring or regular-expression content search with line
+  numbers; plain-text queries also return path matches
 - `open_file` — open a file in the editor and jump to a line
 
 Paths are relative to the workspace root and cannot escape it. **Confirm file
@@ -150,6 +153,20 @@ it. Chats are persisted after each turn, so closing the tab does not lose them.
 With **Include active editor** enabled, each request includes the active file
 (only the selection, when there is one). **Max context characters** caps the
 total context. Set it to `0` to send only the conversation and the prompt.
+
+**Environment context** (`dataverseIde.ai-chat.environmentContext`) is an
+optional free-form description of the project the agent is working in, for
+example:
+
+```text
+React + Vite web resource. Source in src/, builds to dist/.
+Uses Tailwind; do not edit node_modules. Deployment target: Dataverse.
+```
+
+It is appended to the system prompt together with the workspace root URI, so
+the agent does not have to spend tool calls discovering the layout. This is
+per-window configuration (put it in workspace settings to keep it with the
+project).
 
 ## Commands
 

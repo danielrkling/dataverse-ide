@@ -6,11 +6,27 @@
 import { strict as assert } from "node:assert";
 
 import { runAgent, type AgentEvent } from "../src/extensions/ai-chat/harness.ts";
+import {
+  globToRegExp,
+  isGlobPattern,
+  matchesFindPattern,
+} from "../src/extensions/ai-chat/globMatch.ts";
 import { createSession, titleFromPrompt } from "../src/extensions/ai-chat/types.ts";
 
 assert.equal(titleFromPrompt("  Summarize   this workspace  "), "Summarize this workspace");
 assert.equal(titleFromPrompt(""), "New chat");
 assert.equal(createSession("file:///demo").workspace, "file:///demo");
+
+// find_files semantics: plain text matches paths and basenames; globs can span
+// directories.
+assert.ok(matchesFindPattern(undefined, "App.tsx", "src/App.tsx"));
+assert.ok(matchesFindPattern(undefined, "app", "src/App.tsx"));
+assert.ok(matchesFindPattern(globToRegExp("*.tsx"), "*.tsx", "src/App.tsx"));
+assert.ok(matchesFindPattern(globToRegExp("**/*.tsx"), "**/*.tsx", "App.tsx"));
+assert.ok(matchesFindPattern(globToRegExp("src/**"), "src/**", "src/components/App.tsx"));
+assert.ok(!matchesFindPattern(globToRegExp("**/*.css"), "**/*.css", "src/App.tsx"));
+assert.ok(isGlobPattern("**/*.tsx"));
+assert.ok(!isGlobPattern("App.tsx"));
 
 const tools = [
   {

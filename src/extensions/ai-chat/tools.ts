@@ -1,6 +1,7 @@
 import type * as vscodeType from "vscode";
 
 import type { OpenAiToolCall, OpenAiToolDefinition } from "./client.js";
+import { globToRegExp, isGlobPattern, matchesFindPattern } from "./globMatch.js";
 import { MAX_TOOL_FILE_BYTES, type AiChatSettings } from "./settings.js";
 
 /*
@@ -36,7 +37,9 @@ const SEARCH_SKIP_DIRECTORIES = new Set([
 
 const SEARCH_MAX_FILES = 4000;
 const SEARCH_MAX_RESULTS = 500;
+const SEARCH_MAX_PATH_MATCHES = 100;
 const SEARCH_LINE_MAX_CHARACTERS = 400;
+const FIND_MAX_RESULTS = 500;
 
 const READ_FILES_MAX_PATHS = 20;
 const READ_FILES_TOTAL_CHARACTERS = 512 * 1024;
@@ -207,9 +210,41 @@ export const WORKSPACE_TOOLS: OpenAiToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "find_files",
+      description:
+        "Find files and folders by name or glob pattern (for example App.tsx, *.css, **/*.tsx, src/**). Returns matching paths. Use this instead of search_files when you are looking for a filename.",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: {
+            type: "string",
+            description: "Filename substring or glob pattern. Glob supports *, ?, and **.",
+          },
+          path: {
+            type: "string",
+            description: "Optional relative directory to search. Defaults to the workspace root.",
+          },
+          includeIgnored: {
+            type: "boolean",
+            description:
+              "Also search node_modules, .git, dist, and similar folders. Defaults to false.",
+          },
+          maxResults: {
+            type: "number",
+            description: "Maximum number of matches to return (default 100, maximum 500).",
+          },
+        },
+        required: ["pattern"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "search_files",
       description:
-        "Search text files in the workspace for a string or regular expression. Returns matching paths, line numbers, and line text.",
+        "Search text files in the workspace for a string or regular expression. Returns matching paths, line numbers, and line text. Plain-text queries also match file paths. For filenames use find_files.",
       parameters: {
         type: "object",
         properties: {
@@ -260,11 +295,12 @@ export const WORKSPACE_TOOLS: OpenAiToolDefinition[] = [
 export const WORKSPACE_TOOL_PROMPT =
   "You can inspect and modify the current workspace using tools: read_file, read_files, " +
   "write_file, list_directory, create_directory, delete_file, move_file, get_file_info, " +
-  "search_files, and open_file. All paths are relative to the workspace root. Prefer " +
-  "read_files when you need several files, and list_directory with recursive: true to " +
-  "enumerate nested files in one call. Use list_directory, search_files, and read_file " +
-  "before writing, and never attempt to access paths outside the workspace. After using " +
-  "tools, summarize what changed.";
+  "find_files, search_files, and open_file. All paths are relative to the workspace root. " +
+  "Prefer read_files when you need several files, and list_directory with recursive: true " +
+  "to enumerate nested files in one call. Use find_files for filenames or glob patterns, " +
+  "and search_files for file contents. Use list_directory, find_files, search_files, and " +
+  "read_file before writing, and never attempt to access paths outside the workspace. " +
+  "After using tools, summarize what changed.";
 
 function workspaceToolUri(
   vscode: typeof vscodeType,
@@ -474,7 +510,12 @@ async function searchWorkspace(
   query: string,
   isRegex: boolean,
   maxResults: number,
-): Promise<{ matches: SearchMatch[]; files: number; truncated: boolean }> {
+): Promise<{
+  matches: SearchMatch[];
+  pathMatches: string[];
+  files: number;
+  truncated: boolean;
+}> {
   const matcher = isRegex
     ? new RegExp(query, "i")
     : {
@@ -484,7 +525,9 @@ async function searchWorkspace(
       };
 
   const matches: SearchMatch[] = [];
+  const pathMatches: string[] = [];
   const queue: { uri: vscodeType.Uri; path: string }[] = [root];
+  const lowerQuery = query.toLowerCase();
   let files = 0;
   let truncated = false;
 
@@ -516,6 +559,14 @@ async function searchWorkspace(
       if (files > SEARCH_MAX_FILES) {
         truncated = true;
         break;
+      }
+
+      if (
+        !isRegex &&
+        pathMatches.length < SEARCH_MAX_PATH_MATCHES &&
+        childPath.toLowerCase().includes(lowerQuery)
+      ) {
+        pathMatches.push(childPath);
       }
 
       let content: string;
@@ -556,7 +607,7 @@ async function searchWorkspace(
     }
   }
 
-  return { matches, files, truncated };
+  return { matches, pathMatches, files, truncated };
 }
 
 type ListedEntry = {
@@ -849,6 +900,58 @@ export async function executeWorkspaceTool(
         };
       }
 
+      case "find_files": {
+        const pattern = stringArgument(args, "pattern").trim();
+
+        if (pattern.length === 0) {
+          throw new Error("Find pattern must not be empty.");
+        }
+
+        const rawPath = optionalStringArgument(args, "path");
+        const root = workspaceToolUri(
+          vscode,
+          workspaceRootUri,
+          rawPath == null || rawPath.trim().length === 0 ? "." : rawPath,
+        );
+        const includeIgnored = booleanArgument(args, "includeIgnored", false);
+        const requested = Math.round(numberArgument(args, "maxResults", 100));
+        const maxResults = Math.min(FIND_MAX_RESULTS, Math.max(1, requested));
+        const scanned = await listWorkspaceTree(
+          vscode,
+          root,
+          includeIgnored,
+          LIST_HARD_MAX_ENTRIES,
+        );
+        const matcher = isGlobPattern(pattern) ? globToRegExp(pattern) : undefined;
+        const matches: ListedEntry[] = [];
+
+        for (const entry of scanned.entries) {
+          if (!matchesFindPattern(matcher, pattern, entry.path)) {
+            continue;
+          }
+
+          matches.push(entry);
+
+          if (matches.length >= maxResults) {
+            break;
+          }
+        }
+
+        return {
+          content: JSON.stringify({
+            pattern,
+            path: root.path,
+            matches,
+            truncated: scanned.truncated || matches.length >= maxResults,
+          }),
+          ok: true,
+          summary:
+            matches.length === 0
+              ? `No files matching “${pattern}”`
+              : `${matches.length} file${matches.length === 1 ? "" : "s"} matching “${pattern}”`,
+        };
+      }
+
       case "search_files": {
         const query = stringArgument(args, "query");
 
@@ -872,14 +975,19 @@ export async function executeWorkspaceTool(
             query,
             path: root.path,
             matches: result.matches,
+            pathMatches: result.pathMatches,
             truncated: result.truncated,
             filesScanned: result.files,
           }),
           ok: true,
           summary:
-            result.matches.length === 0
+            result.matches.length === 0 && result.pathMatches.length === 0
               ? `No matches for “${query}”`
-              : `${result.matches.length} match${result.matches.length === 1 ? "" : "es"} for “${query}”`,
+              : `${result.matches.length} content match${
+                  result.matches.length === 1 ? "" : "es"
+                }, ${result.pathMatches.length} path match${
+                  result.pathMatches.length === 1 ? "" : "es"
+                } for “${query}”`,
         };
       }
 
