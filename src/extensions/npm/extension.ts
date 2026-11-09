@@ -12,6 +12,7 @@ import type { ExtensionContext, IdeExtension } from "../api.js";
 
 import {
   readWorkspaceDependencies,
+  readWorkspaceScripts,
   uninstallDependency,
   fetchPackageVersions,
   listInstalledPackages,
@@ -21,6 +22,7 @@ import {
   checkOutdatedPackages,
   type NpmDependency,
   type NpmDependencySection,
+  type NpmScript,
 } from "./packageBridge.js";
 import { directInstall } from "./directInstaller.js";
 
@@ -47,6 +49,8 @@ const COMMAND_INSTALL_DEPENDENCY_VERSION = "dataverseIde.npm.installDependencyVe
 
 const COMMAND_UNINSTALL_DEPENDENCY = "dataverseIde.npm.uninstallDependency";
 
+const COMMAND_RUN_SCRIPT = "dataverseIde.npm.runScript";
+
 const COMMAND_OPEN_DEPENDENCY_REGISTRY = "dataverseIde.npm.openDependencyRegistry";
 const COMMAND_REFRESH_PACKAGES = "dataverseIde.npm.refreshPackages";
 const COMMAND_LS = "dataverseIde.npm.ls";
@@ -62,6 +66,13 @@ type PackageTreeElementData =
       kind: "section";
       label: string;
       section: NpmDependencySection;
+    }
+  | {
+      kind: "scriptsSection";
+    }
+  | {
+      kind: "script";
+      script: NpmScript;
     }
   | {
       kind: "dependency";
@@ -102,10 +113,15 @@ class DependenciesTreeProvider implements vscodeType.TreeDataProvider<PackageTre
   }
 
   async getChildren(element?: PackageTreeElement): Promise<PackageTreeElement[]> {
-    const dependencies = await readWorkspaceDependencies(this.deps.vscode, this.deps.rootUri);
-
     if (element == null) {
-      return [
+      const scripts = await readWorkspaceScripts(this.deps.vscode, this.deps.rootUri);
+      const sections: PackageTreeElement[] = [];
+
+      if (scripts.length > 0) {
+        sections.push(new PackageTreeElement({ kind: "scriptsSection" }));
+      }
+
+      sections.push(
         new PackageTreeElement({
           kind: "section",
           label: "Dependencies",
@@ -116,13 +132,28 @@ class DependenciesTreeProvider implements vscodeType.TreeDataProvider<PackageTre
           label: "Dev Dependencies",
           section: "devDependencies",
         }),
-      ];
+      );
+
+      return sections;
+    }
+
+    if (element.data.kind === "scriptsSection") {
+      const scripts = await readWorkspaceScripts(this.deps.vscode, this.deps.rootUri);
+
+      return scripts.map(
+        (script) =>
+          new PackageTreeElement({
+            kind: "script",
+            script,
+          }),
+      );
     }
 
     if (element.data.kind !== "section") {
       return [];
     }
 
+    const dependencies = await readWorkspaceDependencies(this.deps.vscode, this.deps.rootUri);
     const { section } = element.data;
 
     return dependencies
@@ -137,6 +168,29 @@ class DependenciesTreeProvider implements vscodeType.TreeDataProvider<PackageTre
   }
 
   getTreeItem(element: PackageTreeElement): vscodeType.TreeItem {
+    if (element.data.kind === "scriptsSection") {
+      const item = new this.vscode.TreeItem(
+        "Scripts",
+        this.vscode.TreeItemCollapsibleState.Collapsed,
+      );
+
+      item.contextValue = "dataverseIde.npm.scriptsSection";
+
+      return item;
+    }
+
+    if (element.data.kind === "script") {
+      const { script } = element.data;
+
+      const item = new this.vscode.TreeItem(script.name, this.vscode.TreeItemCollapsibleState.None);
+
+      item.description = script.command;
+      item.tooltip = `${script.name}: ${script.command}`;
+      item.contextValue = "dataverseIde.npm.script";
+
+      return item;
+    }
+
     if (element.data.kind === "section") {
       const item = new this.vscode.TreeItem(
         element.data.label,
@@ -218,6 +272,11 @@ export default {
           command: COMMAND_UNINSTALL_DEPENDENCY,
           title: "npm: Uninstall Dependency",
           icon: "$(trash)",
+        },
+        {
+          command: COMMAND_RUN_SCRIPT,
+          title: "npm: Run Script",
+          icon: "$(play)",
         },
         {
           command: COMMAND_OPEN_DEPENDENCY_REGISTRY,
@@ -304,6 +363,22 @@ export default {
           command: COMMAND_ADD_DEV_DEPENDENCY,
           when: "view == dataverseIde.npm.packages && viewItem == dataverseIde.npm.devDependenciesSection",
           group: "inline@1",
+        },
+
+        /*
+         * Play button on each package.json script row.
+         */
+        {
+          menu: "view/item/context",
+          command: COMMAND_RUN_SCRIPT,
+          when: "view == dataverseIde.npm.packages && viewItem == dataverseIde.npm.script",
+          group: "inline@1",
+        },
+        {
+          menu: "view/item/context",
+          command: COMMAND_RUN_SCRIPT,
+          when: "view == dataverseIde.npm.packages && viewItem == dataverseIde.npm.script",
+          group: "navigation@1",
         },
 
         /*
@@ -397,6 +472,28 @@ export default {
 
         if (treeElement.data?.kind === "dependency") {
           return treeElement.data.dependency;
+        }
+      }
+
+      return undefined;
+    }
+
+    function toScript(value: unknown): NpmScript | undefined {
+      if (typeof value === "object" && value != null && "data" in value) {
+        const treeElement = value as {
+          data?: PackageTreeElementData;
+        };
+
+        if (treeElement.data?.kind === "script") {
+          return treeElement.data.script;
+        }
+      }
+
+      if (typeof value === "object" && value != null && "name" in value && "command" in value) {
+        const script = value as Partial<NpmScript>;
+
+        if (typeof script.name === "string" && typeof script.command === "string") {
+          return script as NpmScript;
         }
       }
 
@@ -509,6 +606,54 @@ export default {
         // requestChildren are re-read on each getChildren call
       },
     });
+
+    const runScriptCommand = vscode.commands.registerCommand(
+      COMMAND_RUN_SCRIPT,
+      async (argument?: unknown) => {
+        let script = toScript(argument);
+
+        if (script == null) {
+          const scripts = await readWorkspaceScripts(vscode, context.workspaceRootUri);
+
+          if (scripts.length === 0) {
+            await vscode.window.showInformationMessage(
+              "npm: package.json does not define any scripts.",
+            );
+
+            return;
+          }
+
+          const picked = await vscode.window.showQuickPick(
+            scripts.map((entry) => ({
+              label: entry.name,
+              description: entry.command,
+              script: entry,
+            })),
+            {
+              title: "npm: Run Script",
+              placeHolder: "Select a package.json script to run.",
+              matchOnDescription: true,
+              ignoreFocusOut: true,
+            },
+          );
+
+          script = picked?.script;
+        }
+
+        if (script == null) {
+          return;
+        }
+
+        try {
+          await vscode.commands.executeCommand(
+            "dataverseIde.terminal.run",
+            `npm run ${script.name}`,
+          );
+        } catch (error) {
+          reportFailure(`run script "${script.name}"`, error);
+        }
+      },
+    );
 
     const installDependencyVersionCommand = vscode.commands.registerCommand(
       COMMAND_INSTALL_DEPENDENCY_VERSION,
@@ -887,6 +1032,7 @@ export default {
         addDevDependencyCommand.dispose();
         installDependencyVersionCommand.dispose();
         uninstallDependencyCommand.dispose();
+        runScriptCommand.dispose();
         openDependencyRegistryCommand.dispose();
         refreshCommand.dispose();
         lsCommand.dispose();

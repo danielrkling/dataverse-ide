@@ -45,6 +45,11 @@ const schemaText = JSON.stringify({
           options: [{ label: "Active" }, { label: "Closed" }],
         },
         { name: "account", type: "lookup", target: "account" },
+        {
+          name: "serialNumber",
+          type: "string",
+          autoNumberFormat: "PRJ-{SEQNUM:5}-{RANDSTRING:4}",
+        },
       ],
     },
   ],
@@ -91,6 +96,10 @@ const choiceOptions = (choiceDefinition.OptionSet as Record<string, unknown>).Op
 assert.equal(choiceOptions[0]?.Value, 100000000);
 assert.equal(choiceOptions[1]?.Value, 100000001);
 
+const serialNumberDefinition = buildAttributeDefinition(table.columns[3]!, 1033);
+assert.equal(serialNumberDefinition.AutoNumberFormat, "PRJ-{SEQNUM:5}-{RANDSTRING:4}");
+assert.equal((serialNumberDefinition.FormatName as Record<string, unknown>).Value, "Text");
+
 const relationshipDefinition = buildRelationshipDefinition(table, table.columns[2]!, 1033);
 
 assert.equal(relationshipDefinition.ReferencedEntity, "account");
@@ -128,12 +137,15 @@ function entity(attributes: [string, string][]): ExistingEntityMetadata {
 const createPlan = await buildSchemaPlan(schema, readerFor(undefined));
 
 assert.equal(createPlan.tableCreates, 1);
-assert.equal(createPlan.columnCreates, 3);
+assert.equal(createPlan.columnCreates, 4);
 assert.equal(createPlan.lookupCreates, 1);
 assert.equal(createPlan.skips, 0);
 assert.equal(createPlan.conflicts, 0);
 assert.deepEqual(createPlan.changedEntities, ["new_project"]);
 assert.ok(createPlan.items.some((item) => item.kind === "table" && item.action === "create"));
+
+const serialNumberItem = createPlan.items.find((item) => item.column === "new_serialnumber");
+assert.match(serialNumberItem?.reason ?? "", /autonumber PRJ-\{SEQNUM:5\}/);
 
 /*
  * Existing, matching table: nothing is created.
@@ -146,6 +158,7 @@ const matchingPlan = await buildSchemaPlan(
       ["new_description", "MemoType"],
       ["new_status", "PicklistType"],
       ["new_account", "LookupType"],
+      ["new_serialnumber", "StringType"],
     ]),
   ),
 );
@@ -153,7 +166,7 @@ const matchingPlan = await buildSchemaPlan(
 assert.equal(matchingPlan.tableCreates, 0);
 assert.equal(matchingPlan.columnCreates, 0);
 assert.equal(matchingPlan.lookupCreates, 0);
-assert.equal(matchingPlan.skips, 5);
+assert.equal(matchingPlan.skips, 6);
 assert.equal(matchingPlan.conflicts, 0);
 
 /*
@@ -172,7 +185,7 @@ const conflictPlan = await buildSchemaPlan(
 );
 
 assert.equal(conflictPlan.tableCreates, 0);
-assert.equal(conflictPlan.columnCreates, 1);
+assert.equal(conflictPlan.columnCreates, 2);
 assert.equal(conflictPlan.conflicts, 2);
 
 const formatted = formatSchemaPlan(conflictPlan, {
@@ -226,5 +239,92 @@ assert.throws(
     ),
   /needs a "target"/,
 );
+
+assert.throws(
+  () =>
+    resolveDataverseSchema(
+      parseDataverseSchema(
+        JSON.stringify({
+          tables: [
+            {
+              name: "project",
+              columns: [{ name: "code", type: "integer", autoNumberFormat: "{SEQNUM:5}" }],
+            },
+          ],
+        }),
+      ),
+      { prefix: "new_" },
+    ),
+  /only valid for string columns/,
+);
+
+assert.throws(
+  () =>
+    resolveDataverseSchema(
+      parseDataverseSchema(
+        JSON.stringify({
+          tables: [
+            {
+              name: "project",
+              columns: [
+                {
+                  name: "code",
+                  type: "string",
+                  autoNumberFormat: "{SEQNUM:4}-{RANDSTRING:9}",
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+      { prefix: "new_" },
+    ),
+  /between 1 and 6/,
+);
+
+assert.throws(
+  () =>
+    resolveDataverseSchema(
+      parseDataverseSchema(
+        JSON.stringify({
+          tables: [
+            {
+              name: "project",
+              columns: [{ name: "code", type: "string", autoNumberFormat: "PRJ-" }],
+            },
+          ],
+        }),
+      ),
+      { prefix: "new_" },
+    ),
+  /must include a \{SEQNUM:n\}/,
+);
+
+/*
+ * An autonumber primary name column is supported and is included in the
+ * entity definition's Attributes array.
+ */
+const ticketSchema = resolveDataverseSchema(
+  parseDataverseSchema(
+    JSON.stringify({
+      tables: [
+        {
+          name: "ticket",
+          primaryName: {
+            name: "ticketNumber",
+            autoNumberFormat: "TKT-{SEQNUM:5}",
+          },
+        },
+      ],
+    }),
+  ),
+  { prefix: "new_" },
+);
+
+const ticketDefinition = buildEntityDefinition(ticketSchema.tables[0]!, 1033);
+const ticketPrimaryName = (ticketDefinition.Attributes as Record<string, unknown>[])[0];
+
+assert.equal(ticketPrimaryName?.AutoNumberFormat, "TKT-{SEQNUM:5}");
+assert.equal((ticketPrimaryName?.FormatName as Record<string, unknown>).Value, "Text");
 
 console.log("dataverse schema: parsing, planning and diff formatting OK");

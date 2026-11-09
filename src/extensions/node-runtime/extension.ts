@@ -9,6 +9,7 @@ import { registerGuide } from "../shared/guide.js";
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
 import { createDirectNodeEngine } from "./engine.js";
+import { DEFAULT_NODE_FS_CACHE, getNodeFsCacheMode, NODE_FS_CACHE_MODES } from "./fsCache.js";
 import {
   DEFAULT_NODE_PERMISSION_LEVEL,
   getDefaultNodePermissionLevel,
@@ -74,6 +75,18 @@ export default {
             scope: "window",
             description:
               "Default permission level for Node: Run File and Node: Run Active File. The per-run commands let you override it.",
+          },
+          "dataverseIde.nodeRuntime.fsCache": {
+            type: "string",
+            enum: [...NODE_FS_CACHE_MODES],
+            enumDescriptions: [
+              "Hydrate each path on its first synchronous fs access (default).",
+              "Preload workspace files before the run; node_modules, .git, dist and .ide-build are skipped.",
+            ],
+            default: DEFAULT_NODE_FS_CACHE,
+            scope: "window",
+            description:
+              "Synchronous fs cache strategy. Eager loading avoids retry restarts for scripts that read many files, at the cost of startup time and memory.",
           },
         },
       },
@@ -159,7 +172,9 @@ export default {
           cancellable: false,
         },
         async () => {
-          const exitCode = await engine.runFile(entry, level);
+          const exitCode = await engine.runFile(entry, level, {
+            fsCache: getNodeFsCacheMode(vscode, context.workspaceRootUri),
+          });
 
           if (exitCode !== 0) {
             await vscode.window.showErrorMessage(`[node] ${entry} exited with code ${exitCode}.`);

@@ -4,8 +4,9 @@ A browser implementation of Git built on isomorphic-git. It talks to HTTPS remot
 directly from the workspace, so you can initialize a repository, stage and commit changes,
 work with branches, review history, and push or pull without a desktop Git installation.
 
-Use it for source control on a local folder workspace. The extension writes `.git` through
-the same File System Access handle as the editor.
+Use it for source control on a local folder workspace. The extension writes its Git metadata
+directory through the same File System Access handle as the editor. The directory is `.git`
+by default, but can be changed with `dataverseIde.git.metadataDirectoryName`.
 
 ## Before you start
 
@@ -17,7 +18,7 @@ the same File System Access handle as the editor.
   `x-access-token` (or leave the username blank). For GitLab use `oauth2` and a PAT with
   `read_repository`/`write_repository`. Credentials are requested the first time a remote
   operation needs them and cached per host in secret storage — never written to
-  `.git/config`.
+  the Git metadata directory.
 
 ## Quick start
 
@@ -37,6 +38,10 @@ the same File System Access handle as the editor.
    when it is not empty); the default depth is 50 commits.
 3. Edit, stage and commit as usual.
 
+From the Dataverse shell, the common flows are available directly: `git status`,
+`git add .`, `git commit -m "message"`, `git log`, `git branch`, `git switch <branch>`,
+`git fetch`, `git pull` and `git push`.
+
 The Source Control view shows the working tree; the same operations are available from the
 command palette.
 
@@ -44,7 +49,7 @@ command palette.
 
 | Command                                                     | What it does                                                   |
 | ----------------------------------------------------------- | -------------------------------------------------------------- |
-| `Git: Initialize Repository`                                | Creates `.git` in the workspace.                               |
+| `Git: Initialize Repository`                                | Creates the Git metadata directory (`.git` by default).        |
 | `Git: Clone Repository`                                     | Shallow-clones an HTTPS URL into the current workspace folder. |
 | `Git: Refresh Status`                                       | Re-reads the working tree and decorations.                     |
 | `Git: Stage Changes` / `Stage All Changes`                  | Stages selected files or everything.                           |
@@ -55,7 +60,9 @@ command palette.
 | `Git: Discard Changes` / `Discard All Changes`              | Throws away working-tree edits.                                |
 | `Git: Open Changes`                                         | Opens the diff for a file.                                     |
 | `Git: Create Branch` / `Switch Branch` / `Delete Branch`    | Branch management.                                             |
-| `Git: Show Commit History` / `Show File History (Timeline)` | Repository and per-file history.                               |
+| `Git: Show Commit History`                                  | Repository history; check out or reset the branch to a commit. |
+| `Git: Show File History (Timeline)`                         | Per-file history; open a revision or restore a file from a commit. |
+| `Git: Reset Branch to Commit…`                              | Moves the current branch to a commit and discards tracked changes. |
 | `Git: Sync`                                                 | Fast-forward pull, then push, on the selected remote.          |
 | `Git: Add Remote` / `Remove Remote`                         | Remote management.                                             |
 | `Git: Fetch` / `Pull` / `Push`                              | Individual remote operations.                                  |
@@ -69,6 +76,7 @@ command palette.
 | `dataverseIde.git.authorName`       | `""`    | Commit author name. Set it with the email to skip the author prompt.                           |
 | `dataverseIde.git.authorEmail`      | `""`    | Commit author email.                                                                           |
 | `dataverseIde.git.autoFetchMinutes` | `0`     | Fetch from the configured remote every N minutes while the workspace is open. `0` disables it. |
+| `dataverseIde.git.metadataDirectoryName` | `.git` | Directory used for Git metadata. Use a non-reserved name such as `_git` if the browser blocks writes to `.git`. Changing this does not move an existing repository; rename the directory to migrate. |
 
 `Dataverse: Load User Identity` fills the author settings with the signed-in Dataverse user,
 so commits and web resource metadata agree.

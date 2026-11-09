@@ -8,7 +8,7 @@
  *     --alias:virtual:esbuild-wasm-gzip-url=./tests/esbuildWasmBinaryMock.mjs \
  *     --external:esbuild --external:@babel/* --external:@solidjs/babel-plugin \
  *     --external:babel-preset-solid --external:@babel/preset-typescript \
- *     --external:typescript --external:@tagged-jsx/transform \
+ *     --external:typescript \
  *     --outfile=tmp-esbuild-session-sanity.mjs
  *   node tmp-esbuild-session-sanity.mjs
  *

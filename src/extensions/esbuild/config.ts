@@ -44,7 +44,7 @@ import type * as vscodeType from "vscode";
  *     "splitting": false,
  *     "external": [],
  *     "define": {},
- *     "taggedJsx": "off",
+ *     "loader": {},
  *     "solid": "off"
  *   }
  */
@@ -81,7 +81,6 @@ const CHARSETS = ["ascii", "utf8"] as const;
 const LEGAL_COMMENTS = ["none", "inline", "eof", "linked", "external"] as const;
 const JSX_MODES = ["transform", "preserve", "automatic"] as const;
 const DROP_ITEMS = ["console", "debugger"] as const;
-const TAGGED_JSX_TRANSFORMS = ["off", "toJsx", "toTagged"] as const;
 const SOLID_COMPILERS = ["off", "v1", "v2"] as const;
 
 const outputTextSchema = v.object({
@@ -128,7 +127,7 @@ export const ESBUILD_CONFIG_SCHEMA = v.object({
   splitting: withDefault(v.boolean(), false),
   external: withDefault(stringListSchema, []),
   define: withDefault(defineSchema, {}),
-  taggedJsx: withDefault(v.picklist(TAGGED_JSX_TRANSFORMS), "off"),
+  loader: withDefault(stringRecordSchema, {}),
   solid: withDefault(v.picklist(SOLID_COMPILERS), "off"),
 });
 
@@ -252,7 +251,7 @@ export async function updateEsbuildConfig(
     splitting: merged.splitting,
     external: merged.external,
     define: merged.define,
-    taggedJsx: merged.taggedJsx,
+    loader: merged.loader,
     solid: merged.solid,
   };
 

@@ -310,6 +310,7 @@ export const PANEL_GLYPHS = {
   roll: '<path d="M19 12a7 7 0 1 1-2.05-4.95" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/><path d="M19 4v4.2h-4.2" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
   box: '<path d="M4 7h16v13H4V7Z" fill="none" stroke="#fff" stroke-width="1.8"/><path d="M4 7l3-3h10l3 3" fill="none" stroke="#fff" stroke-width="1.8"/>',
   code: '<path d="M9 7 4 12l5 5M15 7l5 5-5 5" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  chat: '<path d="M4 5h16v11H9l-5 4V5Z" fill="none" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 12h5" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>',
 } as const;
 
 type ControlSync = () => void;

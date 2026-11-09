@@ -213,7 +213,6 @@ export const CONFIG_JSON_SCHEMAS: ConfigJsonSchemaEntry[] = [
       splitting: "Split shared code into chunks (requires esm format).",
       external: "Packages or paths to leave external.",
       define: "Build-time global identifier replacements.",
-      taggedJsx: "Tagged-JSX transform applied before esbuild loaders.",
       solid:
         'Solid JSX compiler: "v1" (babel-preset-solid) or "v2" (@solidjs/babel-plugin); "off" leaves JSX to esbuild.',
     },

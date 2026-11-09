@@ -7,6 +7,8 @@ import { createGlobMatcher, globBaseSegments, globStartsInside, isGlobPattern } 
 
 import { registerGuide } from "../shared/guide.js";
 
+import { registerFlattenTerminalCommands } from "./terminal.js";
+
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
 /*
@@ -563,7 +565,7 @@ async function writeBundle(
   fileName: string,
   result: FlattenResult,
   outputChannel: vscodeType.OutputChannel,
-): Promise<void> {
+): Promise<string> {
   const outFile = vscode.Uri.joinPath(workspaceRootUri, fileName);
 
   await vscode.workspace.fs.writeFile(outFile, new TextEncoder().encode(bundleMarkdown(result)));
@@ -571,6 +573,8 @@ async function writeBundle(
   outputChannel.appendLine(`[flatten] wrote ${result.included} file(s) to ${fileName}.`);
 
   await vscode.window.showTextDocument(outFile);
+
+  return fileName;
 }
 
 /*
@@ -798,7 +802,7 @@ export default {
 
         const fileName = await outputFileName(vscode, context.workspaceRootUri, result.selections);
 
-        await writeBundle(vscode, context.workspaceRootUri, fileName, result, outputChannel);
+        return writeBundle(vscode, context.workspaceRootUri, fileName, result, outputChannel);
       },
     );
 
@@ -869,9 +873,11 @@ export default {
 
         const fileName = configuredFileName(config.get<string>(SETTING_NAME));
 
-        await writeBundle(vscode, context.workspaceRootUri, fileName, result, outputChannel);
+        return writeBundle(vscode, context.workspaceRootUri, fileName, result, outputChannel);
       },
     );
+
+    const terminalCommand = registerFlattenTerminalCommands(vscode, context.workspaceRootUri);
 
     outputChannel.appendLine("[flatten] extension activated.");
 
@@ -879,6 +885,7 @@ export default {
       dispose() {
         flattenCommand.dispose();
         flattenConfiguredCommand.dispose();
+        terminalCommand.dispose();
         guideRegistration.dispose();
       },
     };

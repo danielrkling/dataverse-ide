@@ -59,6 +59,7 @@ export function buildPrimaryNameAttribute(table: ResolvedTable, languageCode: nu
     RequiredLevel: requiredLevel(false),
     FormatName: { Value: "Text" },
     MaxLength: table.primaryName.maxLength,
+    AutoNumberFormat: table.primaryName.autoNumberFormat,
   };
 }
 
@@ -94,6 +95,7 @@ export function buildAttributeDefinition(column: ResolvedColumn, languageCode: n
         AttributeTypeName: { Value: "StringType" },
         FormatName: { Value: column.format ?? "Text" },
         MaxLength: column.maxLength ?? 200,
+        AutoNumberFormat: column.autoNumberFormat,
       };
 
     case "memo":

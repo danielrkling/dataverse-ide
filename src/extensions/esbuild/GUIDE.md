@@ -37,6 +37,19 @@ without a build server.
    - `esbuild: Build Configured Entry` — builds `entryPoints[0]` without a prompt.
 4. Check the result in `dist/` and the log in **Output → Dataverse IDE: esbuild**.
 
+From the Dataverse shell, the same build is available as `esbuild src/app.ts` (or just
+`esbuild` for the configured entry), plus `esbuild watch`, `esbuild stop`, `esbuild config`
+and `esbuild output`. The terminal command also accepts esbuild CLI-style flags for one-off
+builds, for example:
+
+```sh
+esbuild src/app.ts --bundle --minify --sourcemap --outfile=dist/app.min.js
+esbuild src/app.ts --format=cjs --target=es2020 --define:DEBUG=false
+```
+
+`esbuild.config.json` is still the base; CLI flags override scalars, append to lists, and
+merge maps for that build only. `esbuild --help` lists the supported flags.
+
 The output keeps the entry's base name (`src/app.ts` → `dist/app.js`). Set `entryNames`,
 `chunkNames` and `outExtension` when you need a different naming scheme.
 
@@ -51,7 +64,6 @@ The output keeps the entry's base name (`src/app.ts` → `dist/app.js`). Set `en
 | `esbuild: Open esbuild.config.json`                    | Creates the config on first use, then opens it.                                                                          |
 | `esbuild: Reload Config`                               | Re-reads the config without restarting the extension.                                                                    |
 | `esbuild: Solid Compiler…`                             | Writes the `solid` mode (`off`, `v1`, `v2`).                                                                             |
-| `esbuild: Tagged JSX Transform…`                       | Writes the `taggedJsx` mode (`off`, `toJsx`, `toTagged`).                                                                |
 | `esbuild: Show Output`                                 | Opens the build log.                                                                                                     |
 
 ## Configuration
@@ -76,7 +88,6 @@ Schema, so the editor completes keys and shows descriptions inline.
 | `jsx`             | `"transform"`    | `transform`, `preserve` or `automatic`.                                                |
 | `jsxImportSource` | —                | For automatic JSX, for example `solid-js` or `react`.                                  |
 | `solid`           | `"off"`          | `v1` or `v2` compiles workspace JSX/TSX with the matching Solid Babel plugin.          |
-| `taggedJsx`       | `"off"`          | `toJsx` converts tagged templates to JSX; `toTagged` does the reverse.                 |
 
 Additional esbuild options (`entryNames`, `chunkNames`, `outExtension`, `charset`,
 `treeShaking`, `keepNames`, `legalComments`, `banner`, `footer`, `pure`, `drop`, `lineLimit`,

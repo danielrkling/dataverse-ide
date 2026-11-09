@@ -22,6 +22,16 @@ type FileData =
   | ArrayBufferView
   | Uint8Array
 
+type GitFsOptions = {
+  /*
+   * Physical directory used for Git metadata. Defaults to `.git`. A
+   * non-reserved name such as `_git` avoids Chromium's File System Access
+   * write blocklist. Sensitive entries keep their safe physical names under
+   * either directory, so renaming `.git` to `_git` preserves existing repos.
+   */
+  metadataDirectoryName?: string
+}
+
 function createFsError(
   code:
     | 'EACCES'
@@ -51,16 +61,49 @@ function getEncoding(options: Encoding): string | undefined {
 }
 
 /*
- * Chromium blocks direct creation/access of `.git/hooks` through the File
- * System Access API. isomorphic-git creates this conventional directory
- * during init but does not execute native Git hooks, so store it under a
- * safe physical directory name instead.
+ * Chromium's File System Access blocklist denies writes to sensitive paths
+ * inside any `.git` directory:
+ *
+ *   .git/hooks
+ *   .git/config
+ *   .git/modules
+ *
+ * isomorphic-git creates `.git/config` during init and rewrites it for remote
+ * operations, so store these entries under safe physical names instead. Reads
+ * remain allowed; the rename is what keeps writes working. `_hooks` is kept
+ * for repositories initialized by earlier versions.
+ *
+ * The remapping is applied under any configured metadata directory name, so
+ * renaming `.git` to an alternate name such as `_git` keeps existing
+ * repositories readable. Only the literal `.git` name is subject to
+ * Chromium's blocklist; alternate names avoid it entirely.
  */
-const GIT_METADATA_DIR = '.git'
-const GIT_HOOKS_DIR = 'hooks'
-const SAFE_GIT_HOOKS_DIR = '_hooks'
+const DEFAULT_GIT_METADATA_DIR_NAME = '.git'
 
-function toPathParts(path: string): string[] {
+const GIT_BLOCKED_ENTRY_NAMES = new Map<string, string>([
+  ['hooks', '_hooks'],
+  ['config', '_config'],
+  ['modules', '_modules'],
+])
+
+function normalizeMetadataDirectoryName(name: string | undefined): string {
+  const trimmed = name?.trim()
+
+  if (
+    trimmed == null ||
+    trimmed.length === 0 ||
+    trimmed === '.' ||
+    trimmed === '..' ||
+    trimmed.includes('/') ||
+    trimmed.includes('\\')
+  ) {
+    return DEFAULT_GIT_METADATA_DIR_NAME
+  }
+
+  return trimmed
+}
+
+function toLegacyPathParts(path: string): string[] {
   const parts = path
     .replaceAll('\\', '/')
     .split('/')
@@ -73,21 +116,60 @@ function toPathParts(path: string): string[] {
     throw createFsError('EACCES', path)
   }
 
+  return parts
+}
+
+function toPathParts(
+  path: string,
+  metadataDirectoryName: string,
+): string[] {
+  const parts = toLegacyPathParts(path)
+
   /*
    * Logical Git path:
-   *   .git/hooks/pre-commit
+   *   .git/config
    *
    * Physical browser-accessed path:
-   *   .git/_dataverse_ide_hooks/pre-commit
+   *   .git/_config
    */
-  if (parts[0] === GIT_METADATA_DIR && parts[1] === GIT_HOOKS_DIR) {
-    parts[1] = SAFE_GIT_HOOKS_DIR
+  if (parts[0] === metadataDirectoryName && parts.length > 1) {
+    const safeName = GIT_BLOCKED_ENTRY_NAMES.get(parts[1])
+
+    if (safeName != null) {
+      parts[1] = safeName
+    }
   }
 
   return parts
 }
 
-function fromStorageEntryName(parentPath: string, name: string): string {
+/*
+ * Repositories created before a path was added to the blocklist may still
+ * contain it under its real name. Reads stay allowed, so look there as a
+ * fallback while new writes always go to the safe physical name.
+ */
+function getPathPartsCandidates(
+  path: string,
+  metadataDirectoryName: string,
+): string[][] {
+  const parts = toPathParts(path, metadataDirectoryName)
+  const legacyParts = toLegacyPathParts(path)
+
+  if (
+    parts.length === legacyParts.length &&
+    parts.every((part, index) => part === legacyParts[index])
+  ) {
+    return [parts]
+  }
+
+  return [parts, legacyParts]
+}
+
+function fromStorageEntryName(
+  parentPath: string,
+  name: string,
+  metadataDirectoryName: string,
+): string {
   const parentParts = parentPath
     .replaceAll('\\', '/')
     .split('/')
@@ -95,46 +177,62 @@ function fromStorageEntryName(parentPath: string, name: string): string {
 
   /*
    * Physical:
-   *   .git/_dataverse_ide_hooks
+   *   .git/_config
    *
    * Logical Git-facing view:
-   *   .git/hooks
+   *   .git/config
    */
   if (
     parentParts.length === 1 &&
-    parentParts[0] === GIT_METADATA_DIR &&
-    name === SAFE_GIT_HOOKS_DIR
+    parentParts[0] === metadataDirectoryName
   ) {
-    return GIT_HOOKS_DIR
+    for (const [logicalName, safeName] of GIT_BLOCKED_ENTRY_NAMES) {
+      if (name === safeName) {
+        return logicalName
+      }
+    }
   }
 
   return name
 }
 
-async function getDirectoryHandle(
+async function getDirectoryHandleFromParts(
   root: FileSystemDirectoryHandle,
-  path: string,
+  parts: string[],
 ): Promise<FileSystemDirectoryHandle> {
   let directory = root
 
-  try {
-    for (const part of toPathParts(path)) {
-      directory = await directory.getDirectoryHandle(part)
-    }
-
-    return directory
-  } catch {
-    throw createFsError('ENOENT', path)
+  for (const part of parts) {
+    directory = await directory.getDirectoryHandle(part)
   }
+
+  return directory
+}
+
+async function getDirectoryHandle(
+  root: FileSystemDirectoryHandle,
+  path: string,
+  metadataDirectoryName: string,
+): Promise<FileSystemDirectoryHandle> {
+  for (const parts of getPathPartsCandidates(path, metadataDirectoryName)) {
+    try {
+      return await getDirectoryHandleFromParts(root, parts)
+    } catch {
+      /* try the next physical path */
+    }
+  }
+
+  throw createFsError('ENOENT', path)
 }
 
 async function getOrCreateDirectoryHandle(
   root: FileSystemDirectoryHandle,
   path: string,
+  metadataDirectoryName: string,
 ): Promise<FileSystemDirectoryHandle> {
   let directory = root
 
-  for (const part of toPathParts(path)) {
+  for (const part of toPathParts(path, metadataDirectoryName)) {
     directory = await directory.getDirectoryHandle(part, {
       create: true,
     })
@@ -146,11 +244,12 @@ async function getOrCreateDirectoryHandle(
 async function getParentDirectoryHandle(
   root: FileSystemDirectoryHandle,
   path: string,
+  metadataDirectoryName: string,
 ): Promise<{
   parent: FileSystemDirectoryHandle
   name: string
 }> {
-  const parts = toPathParts(path)
+  const parts = toPathParts(path, metadataDirectoryName)
   const name = parts.pop()
 
   if (name == null) {
@@ -158,7 +257,11 @@ async function getParentDirectoryHandle(
   }
 
   return {
-    parent: await getDirectoryHandle(root, parts.join('/')),
+    /*
+     * writeFile/rmdir/unlink must target the safe physical entry even when a
+     * legacy, now-write-blocked entry still exists under the real name.
+     */
+    parent: await getDirectoryHandleFromParts(root, parts),
     name,
   }
 }
@@ -166,14 +269,25 @@ async function getParentDirectoryHandle(
 async function getFileHandle(
   root: FileSystemDirectoryHandle,
   path: string,
+  metadataDirectoryName: string,
 ): Promise<FileSystemFileHandle> {
-  try {
-    const { parent, name } = await getParentDirectoryHandle(root, path)
+  for (const parts of getPathPartsCandidates(path, metadataDirectoryName)) {
+    const name = parts.pop()
 
-    return await parent.getFileHandle(name)
-  } catch {
-    throw createFsError('ENOENT', path)
+    if (name == null) {
+      continue
+    }
+
+    try {
+      const parent = await getDirectoryHandleFromParts(root, parts)
+
+      return await parent.getFileHandle(name)
+    } catch {
+      /* try the next physical path */
+    }
   }
+
+  throw createFsError('ENOENT', path)
 }
 
 function createStats(
@@ -235,11 +349,20 @@ function normalizeWriteData(
 
 export function createFileSystemAccessGitFs(
   root: FileSystemDirectoryHandle,
+  options?: GitFsOptions,
 ) {
+  const metadataDirectoryName = normalizeMetadataDirectoryName(
+    options?.metadataDirectoryName,
+  )
+
   return {
     promises: {
       async readFile(path: string, options?: Encoding) {
-        const handle = await getFileHandle(root, path)
+        const handle = await getFileHandle(
+          root,
+          path,
+          metadataDirectoryName,
+        )
         const file = await handle.getFile()
         const data = new Uint8Array(await file.arrayBuffer())
 
@@ -261,7 +384,11 @@ export function createFileSystemAccessGitFs(
         data: FileData,
         _options?: Encoding,
       ): Promise<void> {
-        const { parent, name } = await getParentDirectoryHandle(root, path)
+        const { parent, name } = await getParentDirectoryHandle(
+          root,
+          path,
+          metadataDirectoryName,
+        )
 
         const handle = await parent.getFileHandle(name, {
           create: true,
@@ -277,26 +404,41 @@ export function createFileSystemAccessGitFs(
       },
 
       async readdir(path: string): Promise<string[]> {
-        const directory = await getDirectoryHandle(root, path)
-        const entries: string[] = []
-      
+        const directory = await getDirectoryHandle(
+          root,
+          path,
+          metadataDirectoryName,
+        )
+        const entries = new Set<string>()
+
         for await (const [name] of directory.entries()) {
-          entries.push(fromStorageEntryName(path, name))
+          entries.add(
+            fromStorageEntryName(path, name, metadataDirectoryName),
+          )
         }
-      
-        return entries.sort((left, right) => left.localeCompare(right))
+
+        return [...entries].sort((left, right) => left.localeCompare(right))
       },
 
       async mkdir(path: string): Promise<void> {
         /*
-         * isomorphic-git creates .git/objects, .git/refs, lock-file parents,
-         * and similar directories. Recursive creation is safe here.
+         * isomorphic-git creates the metadata directory, objects, refs,
+         * lock-file parents, and similar directories. Recursive creation is
+         * safe here.
          */
-        await getOrCreateDirectoryHandle(root, path)
+        await getOrCreateDirectoryHandle(
+          root,
+          path,
+          metadataDirectoryName,
+        )
       },
 
       async rmdir(path: string): Promise<void> {
-        const { parent, name } = await getParentDirectoryHandle(root, path)
+        const { parent, name } = await getParentDirectoryHandle(
+          root,
+          path,
+          metadataDirectoryName,
+        )
 
         try {
           await parent.removeEntry(name, {
@@ -315,7 +457,11 @@ export function createFileSystemAccessGitFs(
       },
 
       async unlink(path: string): Promise<void> {
-        const { parent, name } = await getParentDirectoryHandle(root, path)
+        const { parent, name } = await getParentDirectoryHandle(
+          root,
+          path,
+          metadataDirectoryName,
+        )
 
         try {
           await parent.removeEntry(name, {
@@ -328,13 +474,21 @@ export function createFileSystemAccessGitFs(
 
       async stat(path: string): Promise<GitStats> {
         try {
-          const handle = await getFileHandle(root, path)
+          const handle = await getFileHandle(
+            root,
+            path,
+            metadataDirectoryName,
+          )
           const file = await handle.getFile()
 
           return createStats('file', file)
         } catch {
           try {
-            await getDirectoryHandle(root, path)
+            await getDirectoryHandle(
+              root,
+              path,
+              metadataDirectoryName,
+            )
 
             return createStats('directory')
           } catch {
@@ -345,13 +499,21 @@ export function createFileSystemAccessGitFs(
 
       async lstat(path: string): Promise<GitStats> {
         try {
-          const handle = await getFileHandle(root, path)
+          const handle = await getFileHandle(
+            root,
+            path,
+            metadataDirectoryName,
+          )
           const file = await handle.getFile()
 
           return createStats('file', file)
         } catch {
           try {
-            await getDirectoryHandle(root, path)
+            await getDirectoryHandle(
+              root,
+              path,
+              metadataDirectoryName,
+            )
 
             return createStats('directory')
           } catch {

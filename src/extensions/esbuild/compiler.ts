@@ -19,7 +19,6 @@
  * - conditional browser/import/module/default/require exports
  * - configured externals
  * - Node builtins left external
- * - tagged JSX transforms for workspace source files
  * - optional virtual source files for callers such as Tailwind @plugin
  *
  * Builds can run through a reusable `EsbuildBuildSession` (context + rebuild)
@@ -44,13 +43,7 @@ import {
   splitPackageSpec,
 } from "../shared/packageResolver.js";
 
-import {
-  createSolidEsbuildPlugin,
-  isWorkspaceSourcePath,
-  type SolidCompilerVersion,
-} from "./solidPlugin.js";
-
-export type TaggedJsxMode = "off" | "toJsx" | "toTagged";
+import { createSolidEsbuildPlugin, type SolidCompilerVersion } from "./solidPlugin.js";
 
 export type BuildOutputFile = {
   path: string;
@@ -153,10 +146,11 @@ export type BuildRequest = {
   splitting?: boolean;
   external?: string[];
   define?: Record<string, string>;
+  /** Extension -> esbuild loader overrides, e.g. { ".png": "dataurl" }. */
+  loader?: Record<string, string>;
   entryNames?: string;
   chunkNames?: string;
   outExtension?: Record<string, string>;
-  taggedJsx?: TaggedJsxMode;
 
   /**
    * Solid JSX compiler backend:
@@ -211,25 +205,6 @@ type PackageResolver = {
 };
 
 let initialization: Promise<void> | undefined;
-
-/*
- * Tagged JSX plugin state is retained for the application lifetime.
- * TypeScript and @tagged-jsx/transform are loaded only when a build enables
- * taggedJsx.
- */
-type TaggedJsxTransformers = {
-  toJsx: (code: string) => {
-    code: string;
-    errors?: unknown[];
-  };
-
-  toTagged: (code: string) => {
-    code: string;
-    errors?: unknown[];
-  };
-};
-
-let taggedJsxTransformersPromise: Promise<TaggedJsxTransformers> | undefined;
 
 /*
  * Creates a cached workspace reader over vscode.workspace.fs.
@@ -447,33 +422,21 @@ export async function ensureEsbuildCompilerReady(): Promise<void> {
   await ensureInitialized();
 }
 
-function ensureTaggedJsxTransformers(): Promise<TaggedJsxTransformers> {
-  taggedJsxTransformersPromise ??= Promise.all([
-    import("@tagged-jsx/transform"),
-    import("typescript"),
-  ]).then(([transform, ts]) => {
-    const callbacks = transform.createExpressionTransformCallbacks(ts);
+function getLoaderForPath(path: string, loaderOverrides?: Record<string, string>): esbuild.Loader {
+  if (loaderOverrides != null) {
+    const slash = path.lastIndexOf("/");
+    const dot = path.lastIndexOf(".");
 
-    return {
-      toJsx: transform.createJsxTransformer({
-        tags: ["html", "jsx"],
-        ts,
-        callbacks,
-      }),
+    if (dot > slash) {
+      const extension = path.slice(dot).toLowerCase();
+      const override = loaderOverrides[extension] ?? loaderOverrides[path.slice(dot)];
 
-      toTagged: transform.createTaggedTransformer({
-        tag: "html",
-        ts,
-        callbacks,
-        registeredComponents: [],
-      }),
-    };
-  }) as Promise<TaggedJsxTransformers>;
+      if (override != null && override.length > 0) {
+        return override as esbuild.Loader;
+      }
+    }
+  }
 
-  return taggedJsxTransformersPromise;
-}
-
-function getLoaderForPath(path: string): esbuild.Loader {
   if (path.endsWith(".css")) {
     return "css";
   }
@@ -495,42 +458,6 @@ function getLoaderForPath(path: string): esbuild.Loader {
   }
 
   return "js";
-}
-
-function isTaggedJsxCandidate(loader: esbuild.Loader): boolean {
-  return loader === "ts" || loader === "tsx" || loader === "js" || loader === "jsx";
-}
-
-function transformTaggedJsxLoader(loader: esbuild.Loader, changed: boolean): esbuild.Loader {
-  if (!changed) {
-    return loader;
-  }
-
-  if (loader === "ts") {
-    return "tsx";
-  }
-
-  if (loader === "js") {
-    return "jsx";
-  }
-
-  return loader;
-}
-
-function convertTaggedJsx(
-  contents: string,
-  mode: TaggedJsxMode,
-  transformers: TaggedJsxTransformers,
-): {
-  code: string;
-  errors: string[];
-} {
-  const result = mode === "toJsx" ? transformers.toJsx(contents) : transformers.toTagged(contents);
-
-  return {
-    code: result.code,
-    errors: (result.errors ?? []).map((error) => String(error)),
-  };
 }
 
 /*
@@ -1071,7 +998,7 @@ function createWorkspaceFsPlugin(
   externalPaths: string[],
   unresolvedImports: Set<string>,
   dependencyPaths: Set<string>,
-  taggedJsxRequest: TaggedJsxMode = "off",
+  loaderOverrides?: Record<string, string>,
 ): esbuild.Plugin {
   return {
     name: "dataverse-ide-workspace-fs",
@@ -1183,7 +1110,7 @@ function createWorkspaceFsPlugin(
         },
         async (args) => {
           const normalizedPath = normalizePath(args.path);
-          let contents = await getReader().readText(normalizedPath);
+          const contents = await getReader().readText(normalizedPath);
 
           if (contents == null) {
             return {
@@ -1195,51 +1122,7 @@ function createWorkspaceFsPlugin(
             };
           }
 
-          let loader = getLoaderForPath(normalizedPath);
-
-          /*
-           * Tagged JSX transforms apply only to workspace source files.
-           * node_modules content is already authored/compiled by the package
-           * publisher and should remain untouched.
-           */
-          if (
-            taggedJsxRequest !== "off" &&
-            isWorkspaceSourcePath(normalizedPath) &&
-            isTaggedJsxCandidate(loader)
-          ) {
-            try {
-              const transformers = await ensureTaggedJsxTransformers();
-
-              const converted = convertTaggedJsx(contents, taggedJsxRequest, transformers);
-
-              if (converted.code !== contents) {
-                contents = converted.code;
-                loader = transformTaggedJsxLoader(loader, true);
-              }
-
-              if (converted.errors.length > 0) {
-                return {
-                  contents,
-                  loader,
-                  errors: converted.errors.slice(0, 8).map((text) => ({
-                    text,
-                  })),
-                };
-              }
-            } catch (error) {
-              return {
-                contents,
-                loader,
-                errors: [
-                  {
-                    text: `taggedJsx transform failed: ${
-                      error instanceof Error ? error.message : String(error)
-                    }`,
-                  },
-                ],
-              };
-            }
-          }
+          const loader = getLoaderForPath(normalizedPath, loaderOverrides);
 
           return {
             contents,
@@ -1304,6 +1187,7 @@ export type BundlerTransformOptions = {
   minify?: boolean;
   sourcemap?: boolean;
   format?: "esm" | "iife" | "cjs";
+  supported?: Record<string, boolean>;
 };
 
 /*
@@ -1326,6 +1210,7 @@ export async function transformForBundler(
     define: options.define,
     minify: options.minify ?? false,
     sourcemap: options.sourcemap === true,
+    supported: options.supported,
     /*
      * Rollup does not run esbuild's JSX loader itself; automatic matches the
      * modern jsx-runtime convention used by the rest of the toolchain.
@@ -1351,7 +1236,6 @@ type BuildState = {
 
 function createBuildPlugins(state: BuildState): esbuild.Plugin[] {
   const { request } = state;
-  const taggedJsx = request.taggedJsx ?? "off";
   const solid = request.solid ?? "off";
   const plugins: esbuild.Plugin[] = [];
 
@@ -1367,16 +1251,6 @@ function createBuildPlugins(state: BuildState): esbuild.Plugin[] {
         version: solid,
         readText: (path) => state.reader.readText(path),
         sourcemap: request.sourcemap != null && request.sourcemap !== false,
-        beforeTransform:
-          taggedJsx === "off"
-            ? undefined
-            : async (source) => {
-                const transformers = await ensureTaggedJsxTransformers();
-
-                const converted = convertTaggedJsx(source, taggedJsx, transformers);
-
-                return { code: converted.code, errors: converted.errors };
-              },
       }),
     );
   }
@@ -1388,7 +1262,7 @@ function createBuildPlugins(state: BuildState): esbuild.Plugin[] {
       request.external ?? [],
       state.unresolvedImports,
       state.dependencyPaths,
-      taggedJsx,
+      request.loader,
     ),
   );
 
@@ -1489,10 +1363,10 @@ function buildRequestKey(request: BuildRequest): string {
     splitting: request.splitting,
     external: request.external ?? [],
     define: request.define,
+    loader: request.loader,
     entryNames: request.entryNames,
     chunkNames: request.chunkNames,
     outExtension: request.outExtension,
-    taggedJsx: request.taggedJsx ?? "off",
     solid: request.solid ?? "off",
     virtualFiles: Object.keys(request.virtualFiles ?? {}).sort(),
   });

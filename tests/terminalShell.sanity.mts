@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 
 import { createShellCommands } from "../src/extensions/terminal/commands.ts";
 import { createShellOutput } from "../src/extensions/terminal/output.ts";
+import { registerTerminalCommand } from "../src/extensions/terminal/registry.ts";
 import { createShellFs } from "../src/extensions/terminal/shellFs.ts";
 import { createShellSession } from "../src/extensions/terminal/shell.ts";
 import type { WorkspaceFs } from "../src/extensions/node-runtime/workspace.ts";
@@ -26,6 +27,22 @@ function createFakeWorkspace() {
     ["src/a.ts", new TextEncoder().encode("export const a = 1;\n")],
     ["src/sub/b.txt", new TextEncoder().encode("bee\n")],
     ["package.json", new TextEncoder().encode('{"scripts":{"hello":"echo hi"}}')],
+    [
+      "node_modules/tiny-cli/package.json",
+      new TextEncoder().encode('{"name":"tiny-cli","bin":{"tinycli":"./bin/tiny.js"}}'),
+    ],
+    [
+      "node_modules/tiny-cli/bin/tiny.js",
+      new TextEncoder().encode('#!/usr/bin/env node\nconsole.log("tiny");\n'),
+    ],
+    [
+      "node_modules/tiny/package.json",
+      new TextEncoder().encode('{"name":"tiny","bin":"./cli.js"}'),
+    ],
+    [
+      "node_modules/tiny/cli.js",
+      new TextEncoder().encode('#!/usr/bin/env node\nconsole.log("tiny");\n'),
+    ],
   ]);
   const dirs = new Set(["", "src", "src/sub"]);
 
@@ -175,7 +192,23 @@ async function createFs(workspace: ReturnType<typeof createFakeWorkspace>, writa
 
 const workspace = createFakeWorkspace();
 const fs = await createFs(workspace, true);
-const nodeCalls: Array<{ entry: string; cwd?: string; argv?: string[] }> = [];
+const contributedCommand = registerTerminalCommand({
+  name: "hello",
+  async execute(args) {
+    return {
+      stdout: `hello ${args[0] ?? "world"}\n`,
+      stderr: "",
+      exitCode: 0,
+    };
+  },
+});
+
+const nodeCalls: Array<{
+  entry: string;
+  cwd?: string;
+  argv?: string[];
+  fsCache?: string;
+}> = [];
 const shellOutput = createShellOutput();
 const streamed: string[] = [];
 
@@ -190,7 +223,7 @@ const commands = await createShellCommands({
   engine: async () => ({
     runFile: async () => 0,
     runProgram: async (entry, options) => {
-      nodeCalls.push({ entry, cwd: options?.cwd, argv: options?.argv });
+      nodeCalls.push({ entry, cwd: options?.cwd, argv: options?.argv, fsCache: options?.fsCache });
       options?.stdout?.("node-ok\n");
 
       return 0;
@@ -223,6 +256,7 @@ assert.ok(!workspace.dirs.has("made"));
 assert.ok(!workspace.files.has("made/moved.txt"));
 
 assert.equal((await shell.exec("npm run hello")).stdout, "hi\n");
+assert.equal((await shell.exec("hello OpenAI")).stdout, "hello OpenAI\n");
 assert.match((await shell.exec("node --version")).stdout, /v20/);
 assert.match((await shell.exec("npm --version")).stdout, /10\./);
 
@@ -234,7 +268,31 @@ assert.deepEqual(nodeCalls.at(-1), {
   entry: "scripts/build.ts",
   cwd: "/src",
   argv: ["one", "two"],
+  fsCache: "lazy",
 });
+
+assert.equal((await shell.exec("node --eager scripts/build.ts one")).stdout, "node-ok\n");
+assert.deepEqual(nodeCalls.at(-1), {
+  entry: "scripts/build.ts",
+  cwd: "/src",
+  argv: ["one"],
+  fsCache: "eager",
+});
+
+assert.equal((await shell.exec("node --lazy scripts/build.ts")).stdout, "node-ok\n");
+assert.equal(nodeCalls.at(-1)?.fsCache, "lazy");
+
+assert.match((await shell.exec("npx --version")).stdout, /10\./);
+assert.equal((await shell.exec("npx -p tiny-cli tinycli one two")).stdout, "node-ok\n");
+assert.deepEqual(nodeCalls.at(-1), {
+  entry: "/node_modules/tiny-cli/bin/tiny.js",
+  cwd: "/src",
+  argv: ["one", "two"],
+  fsCache: "lazy",
+});
+assert.equal((await shell.exec("npx tiny one")).stdout, "node-ok\n");
+assert.equal(nodeCalls.at(-1)?.entry, "/node_modules/tiny/cli.js");
+assert.equal((await shell.exec("npx --no-install missing-pkg")).exitCode, 1);
 
 shellOutput.setStreaming(true);
 
@@ -267,5 +325,7 @@ const readOnly = createShellSession({ fs: await createFs(workspace, false) });
 await assert.rejects(readOnly.exec("echo nope > src/nope.txt"));
 assert.ok(!workspace.files.has("src/nope.txt"));
 assert.equal((await readOnly.exec("echo ok > /tmp/ok.txt")).exitCode, 0);
+
+contributedCommand.dispose();
 
 console.log("terminal shell sanity: ok");

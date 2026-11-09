@@ -7,8 +7,12 @@ export type Db = {
   close: () => void;
 };
 
-function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
+function requestToPromise<T>(request: IDBRequest<T>, blockedMessage?: string): Promise<T> {
   return new Promise((resolve, reject) => {
+    if (blockedMessage != null) {
+      (request as unknown as IDBOpenDBRequest).onblocked = () => reject(new Error(blockedMessage));
+    }
+
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
@@ -38,7 +42,15 @@ export async function openDB(
     }
   };
 
-  const db = await requestToPromise(request);
+  /*
+   * A version bump is blocked while another tab keeps an older connection
+   * open. Reject instead of hanging forever; callers can retry after the user
+   * closes the other tab.
+   */
+  const db = await requestToPromise(
+    request,
+    `IndexedDB "${name}" is blocked by another open tab. Close other IDE tabs and reload.`,
+  );
 
   return {
     get: async (store, key) => {

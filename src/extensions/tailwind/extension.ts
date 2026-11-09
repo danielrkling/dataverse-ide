@@ -25,6 +25,8 @@ import { registerGuide } from "../shared/guide.js";
 
 import { EsbuildWatcher } from "../esbuild/watcher.js";
 
+import { registerTailwindTerminalCommands } from "./terminal.js";
+
 import { createWatchStatus } from "../watchStatus.js";
 
 import { ensureWorkspaceDirectory } from "../../workspace/workspaceFs.js";
@@ -499,9 +501,7 @@ export default {
 
     const compileCommand = vscode.commands.registerCommand(
       "dataverseIde.tailwind.compileCss",
-      async () => {
-        await runCompile();
-      },
+      async () => runCompile(),
     );
 
     function ensureWatcher(): EsbuildWatcher {
@@ -622,6 +622,8 @@ export default {
       },
     );
 
+    const terminalCommand = registerTailwindTerminalCommands(vscode, context.workspaceRootUri);
+
     await reloadConfigFromDisk();
 
     outputChannel.appendLine("[tailwind] commands registered.");
@@ -641,6 +643,7 @@ export default {
         toggleWatchCommand.dispose();
         openConfigCommand.dispose();
         showOutputCommand.dispose();
+        terminalCommand.dispose();
 
         completionProviderDisposable.dispose();
         hoverProviderDisposable.dispose();

@@ -76,6 +76,7 @@ const columnSchema = v.strictObject({
   optionSetBase: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0)), 100000000),
   target: optionalTextSchema,
   relationshipName: optionalTextSchema,
+  autoNumberFormat: optionalTextSchema,
 });
 
 const primaryNameSchema = v.strictObject({
@@ -83,6 +84,7 @@ const primaryNameSchema = v.strictObject({
   displayName: optionalTextSchema,
   description: optionalTextSchema,
   maxLength: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(4000)), 200),
+  autoNumberFormat: optionalTextSchema,
 });
 
 const tableSchema = v.strictObject({
@@ -114,6 +116,7 @@ export type ResolvedPrimaryName = {
   displayName: string;
   description?: string;
   maxLength: number;
+  autoNumberFormat?: string;
 };
 
 export type ResolvedColumn = {
@@ -136,6 +139,7 @@ export type ResolvedColumn = {
   target?: string;
   targetLogicalName?: string;
   relationshipName?: string;
+  autoNumberFormat?: string;
 };
 
 export type ResolvedTable = {
@@ -257,6 +261,36 @@ function resolveOptions(column: DataverseColumnSpec): { label: string; value: nu
   });
 }
 
+function validateAutoNumberFormat(format: string, label: string): void {
+  const trimmed = format.trim();
+
+  if (trimmed.length === 0) {
+    throw new Error(`${label} has an empty autoNumberFormat.`);
+  }
+
+  const sequenceMatches = [...trimmed.matchAll(/\{SEQNUM:(\d+)\}/g)];
+
+  if (sequenceMatches.length === 0) {
+    throw new Error(`${label} autoNumberFormat "${format}" must include a {SEQNUM:n} placeholder.`);
+  }
+
+  for (const match of sequenceMatches) {
+    if (Number(match[1]) < 1) {
+      throw new Error(`${label} autoNumberFormat has an invalid {SEQNUM:${match[1]}} length.`);
+    }
+  }
+
+  for (const match of trimmed.matchAll(/\{RANDSTRING:(\d+)\}/g)) {
+    const length = Number(match[1]);
+
+    if (length < 1 || length > 6) {
+      throw new Error(
+        `${label} autoNumberFormat uses {RANDSTRING:${length}}; the length must be between 1 and 6.`,
+      );
+    }
+  }
+}
+
 function resolveColumn(column: DataverseColumnSpec, prefix: string): ResolvedColumn {
   const shortName = stripPrefix(column.name, prefix);
 
@@ -341,6 +375,23 @@ function resolveColumn(column: DataverseColumnSpec, prefix: string): ResolvedCol
     throw new Error(`Column "${column.name}" has minValue greater than maxValue.`);
   }
 
+  if (column.autoNumberFormat != null) {
+    if (column.type !== "string") {
+      throw new Error(
+        `Column "${column.name}" uses autoNumberFormat, which is only valid for string columns.`,
+      );
+    }
+
+    if (format != null && format.toLowerCase() !== "text") {
+      throw new Error(
+        `Column "${column.name}" uses autoNumberFormat, so its format must be "Text" (got "${format}").`,
+      );
+    }
+
+    format = "Text";
+    validateAutoNumberFormat(column.autoNumberFormat, `Column "${column.name}"`);
+  }
+
   return {
     name: shortName,
     logicalName,
@@ -360,6 +411,7 @@ function resolveColumn(column: DataverseColumnSpec, prefix: string): ResolvedCol
     options: resolveOptions(column),
     target: column.target,
     relationshipName: column.relationshipName,
+    autoNumberFormat: column.autoNumberFormat,
   };
 }
 
@@ -389,6 +441,13 @@ function resolveTable(table: DataverseTableSpec, prefix: string): ResolvedTable 
   const displayName = table.displayName ?? humanize(shortTableName);
   const columns: ResolvedColumn[] = [];
   const usedNames = new Set<string>([primaryLogicalName]);
+
+  if (table.primaryName.autoNumberFormat != null) {
+    validateAutoNumberFormat(
+      table.primaryName.autoNumberFormat,
+      `Primary name column "${primaryShortName}"`,
+    );
+  }
 
   for (const column of table.columns) {
     const resolved = resolveColumn(column, prefix);
@@ -425,6 +484,7 @@ function resolveTable(table: DataverseTableSpec, prefix: string): ResolvedTable 
       displayName: table.primaryName.displayName ?? humanize(primaryShortName),
       description: table.primaryName.description,
       maxLength: table.primaryName.maxLength,
+      autoNumberFormat: table.primaryName.autoNumberFormat,
     },
     columns,
   };

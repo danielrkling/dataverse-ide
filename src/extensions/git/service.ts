@@ -11,7 +11,44 @@ import {
 } from './gitFs.js'
 
 const GIT_DIR = '/'
-const GIT_METADATA_DIR = '/.git'
+const DEFAULT_GIT_METADATA_DIR_NAME = '.git'
+
+let gitMetadataDirName = DEFAULT_GIT_METADATA_DIR_NAME
+let GIT_METADATA_DIR = `/${gitMetadataDirName}`
+
+/*
+ * Physical directory used for Git metadata. Defaults to `.git`. Users can
+ * choose a non-reserved name such as `_git` when browser write restrictions
+ * make `.git` unusable.
+ */
+export function getGitMetadataDirectoryName(): string {
+  return gitMetadataDirName
+}
+
+export function configureGitMetadataDirectoryName(name: string | undefined): void {
+  const trimmed = name?.trim()
+
+  gitMetadataDirName =
+    trimmed == null ||
+    trimmed.length === 0 ||
+    trimmed === '.' ||
+    trimmed === '..' ||
+    trimmed.includes('/') ||
+    trimmed.includes('\\')
+      ? DEFAULT_GIT_METADATA_DIR_NAME
+      : trimmed
+
+  GIT_METADATA_DIR = `/${gitMetadataDirName}`
+}
+
+function isGitMetadataPath(filepath: string): boolean {
+  const normalized = filepath.replaceAll('\\', '/')
+
+  return (
+    normalized === gitMetadataDirName ||
+    normalized.startsWith(`${gitMetadataDirName}/`)
+  )
+}
 
 export type GitFileStatus =
   | 'clean'
@@ -154,7 +191,9 @@ function getStatus(
 }
 
 function getFs(workspaceHandle: FileSystemDirectoryHandle) {
-  return createFileSystemAccessGitFs(workspaceHandle)
+  return createFileSystemAccessGitFs(workspaceHandle, {
+    metadataDirectoryName: gitMetadataDirName,
+  })
 }
 
 function validateBranchName(branchName: string): string {
@@ -232,7 +271,7 @@ function validateBranchName(branchName: string): string {
     const fs = getFs(workspaceHandle)
   
     try {
-      await fs.promises.readFile('/.git/HEAD', 'utf8')
+      await fs.promises.readFile(`${GIT_METADATA_DIR}/HEAD`, 'utf8')
     } catch {
       return {
         isRepository: false,
@@ -262,7 +301,7 @@ function validateBranchName(branchName: string): string {
         gitdir: GIT_METADATA_DIR,
         refresh: true,
   
-        filter: (filepath) => !filepath.startsWith('.git/'),
+        filter: (filepath) => !isGitMetadataPath(filepath),
       }),
   
       git.resolveRef({
@@ -349,7 +388,7 @@ function validateBranchName(branchName: string): string {
     workspaceHandle: FileSystemDirectoryHandle,
     filepath: string,
   ): Promise<GitTreeEntry | undefined> {
-    if (filepath.length === 0 || filepath === '.git' || filepath.startsWith('.git/')) {
+    if (filepath.length === 0 || isGitMetadataPath(filepath)) {
       return undefined
     }
 
@@ -552,6 +591,127 @@ export async function checkoutCommit(
     dir: GIT_DIR,
     gitdir: GIT_METADATA_DIR,
     ref: commitId,
+  })
+}
+
+
+export async function getCurrentBranchName(
+  workspaceHandle: FileSystemDirectoryHandle,
+): Promise<string | undefined> {
+  await ensureRepository(workspaceHandle)
+
+  const fs = getFs(workspaceHandle)
+
+  const branch = await git.currentBranch({
+    fs,
+    dir: GIT_DIR,
+    gitdir: GIT_METADATA_DIR,
+    fullname: false,
+  })
+
+  return branch ?? undefined
+}
+
+
+/**
+ * Move the current branch to commitId and force the index/working tree to
+ * match that commit. This is the equivalent of `git reset --hard <commit>`
+ * while staying on the current branch.
+ */
+export async function resetBranchToCommit(
+  workspaceHandle: FileSystemDirectoryHandle,
+  commitId: string,
+): Promise<void> {
+  await ensureRepository(workspaceHandle)
+  await ensureInitialCommit(workspaceHandle)
+
+  const fs = getFs(workspaceHandle)
+
+  const branch = await git.currentBranch({
+    fs,
+    dir: GIT_DIR,
+    gitdir: GIT_METADATA_DIR,
+    fullname: false,
+  })
+
+  if (branch == null) {
+    throw new Error('Check out a branch before resetting it to a commit.')
+  }
+
+  try {
+    await git.readCommit({
+      fs,
+      dir: GIT_DIR,
+      gitdir: GIT_METADATA_DIR,
+      oid: commitId,
+    })
+  } catch {
+    throw new Error('The selected commit could not be found.')
+  }
+
+  await git.writeRef({
+    fs,
+    dir: GIT_DIR,
+    gitdir: GIT_METADATA_DIR,
+    ref: `refs/heads/${branch}`,
+    value: commitId,
+    force: true,
+  })
+
+  /*
+   * The branch ref now points at the target. Checking it out with force
+   * rewrites the index and working tree and keeps HEAD attached to the branch.
+   */
+  await git.checkout({
+    fs,
+    dir: GIT_DIR,
+    gitdir: GIT_METADATA_DIR,
+    ref: branch,
+    force: true,
+  })
+}
+
+
+/**
+ * Restore one file and its index entry from a commit without moving HEAD.
+ */
+export async function restoreFileFromCommit(
+  workspaceHandle: FileSystemDirectoryHandle,
+  commitId: string,
+  filepath: string,
+): Promise<void> {
+  await ensureRepository(workspaceHandle)
+  await ensureInitialCommit(workspaceHandle)
+
+  if (filepath.length === 0 || isGitMetadataPath(filepath)) {
+    throw new Error('That path cannot be restored from a commit.')
+  }
+
+  const fs = getFs(workspaceHandle)
+
+  try {
+    await git.readCommit({
+      fs,
+      dir: GIT_DIR,
+      gitdir: GIT_METADATA_DIR,
+      oid: commitId,
+    })
+  } catch {
+    throw new Error('The selected commit could not be found.')
+  }
+
+  if ((await readBlobAt(workspaceHandle, commitId, filepath)) == null) {
+    throw new Error(`"${filepath}" did not exist in the selected commit.`)
+  }
+
+  await git.checkout({
+    fs,
+    dir: GIT_DIR,
+    gitdir: GIT_METADATA_DIR,
+    ref: commitId,
+    filepaths: [filepath],
+    force: true,
+    noUpdateHead: true,
   })
 }
 

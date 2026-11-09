@@ -25,6 +25,10 @@ import { createProcess } from "almostnode";
 
 import { createRuntimeFs } from "../src/extensions/node-runtime/fsShim.ts";
 import { createModuleLoader } from "../src/extensions/node-runtime/loader.ts";
+import {
+  rewriteDynamicImports,
+  transpileModule,
+} from "../src/extensions/node-runtime/transpile.ts";
 import type { WorkspaceFs } from "../src/extensions/node-runtime/workspace.ts";
 
 function createNodeReader(root: string): WorkspaceFs {
@@ -165,6 +169,9 @@ await exportsValue.finished;
 const flushed = await runtimeFs.flush();
 
 assert.equal(flushed.errors.length, 0, flushed.errors.join("\n"));
+assert.ok(flushed.changed.includes("out/written.txt"));
+assert.ok(flushed.changed.includes("out/mixed.txt"));
+assert.ok(flushed.changed.includes("out/async.txt"));
 assert.equal(retries.length, 2, retries.join("\n"));
 assert.deepEqual(
   output.filter((line) => line.trim().length > 0),
@@ -184,6 +191,113 @@ const asyncFile = await readFile(join(root, "out", "async.txt"), "utf8");
 assert.equal(written, "flushed");
 assert.equal(mixed, "sync-then-async");
 assert.equal(asyncFile, "async-ok");
+
+/*
+ * Eager fs cache: preload fills the sync maps, directory listings work, the
+ * byte cap leaves paths lazy, and a preloaded sync read needs no retry.
+ */
+const eagerFs = createRuntimeFs({ reader, cwd: "/" });
+const preloaded = await eagerFs.preload(["src/note.txt", "src/data.json"]);
+
+assert.equal(preloaded.files, 2);
+assert.ok(preloaded.bytes > 0);
+assert.equal(
+  (eagerFs.fs.readFileSync as (path: string, encoding: string) => string)("src/note.txt", "utf8"),
+  "note-ok\n",
+);
+assert.ok((eagerFs.fs.readdirSync as (path: string) => string[])("src").includes("note.txt"));
+
+const capped = await createRuntimeFs({ reader, cwd: "/" }).preload(["src/note.txt"], {
+  maxBytes: 1,
+});
+
+assert.equal(capped.files, 0);
+assert.equal(capped.skipped, 1);
+
+await writeFile(
+  join(root, "src", "eager.ts"),
+  [
+    'import { readFileSync } from "node:fs";',
+    'console.log("eager", readFileSync("src/note.txt", "utf8").trim());',
+  ].join("\n"),
+);
+
+const eagerOutput: string[] = [];
+const eagerRetries: string[] = [];
+const eagerRuntimeFs = createRuntimeFs({ reader, cwd: "/" });
+
+await eagerRuntimeFs.preload(["src/note.txt"]);
+
+const eagerLoader = createModuleLoader({
+  reader,
+  runtimeFs: eagerRuntimeFs,
+  process: createProcess({
+    cwd: "/",
+    onStdout: (data) => eagerOutput.push(data),
+    onStderr: (data) => eagerOutput.push(data),
+  }),
+  onConsole: (_method, args) => eagerOutput.push(args.map(String).join(" ")),
+  onRetry: (message) => eagerRetries.push(message),
+});
+
+await eagerLoader.run("src/eager.ts");
+
+assert.deepEqual(
+  eagerOutput.filter((line) => line.trim().length > 0),
+  ["eager note-ok"],
+);
+assert.deepEqual(eagerRetries, []);
+
+/*
+ * Dynamic-import rewriting must ignore string literals (prettier uses
+ * `new Function("module", "return import(module)")`) and the loader must bind
+ * that idiom to the module-local resolver.
+ */
+assert.equal(
+  rewriteDynamicImports('const f = new Function("m", "return import(m)");'),
+  'const f = new Function("m", "return import(m)");',
+);
+assert.equal(
+  rewriteDynamicImports('const x = import("./a.js");'),
+  'const x = __dynamicImport("./a.js");',
+);
+assert.equal(
+  rewriteDynamicImports('const t = `keep import("./no") ${import("./yes")}`;'),
+  'const t = `keep import("./no") ${__dynamicImport("./yes")}`;',
+);
+
+const dynamicModule = await transpileModule(
+  "src/dynamic.js",
+  'export const load = () => import("./target.js");',
+);
+
+assert.match(dynamicModule, /require\("\.\/target\.js"\)/);
+assert.doesNotMatch(dynamicModule, /(?<![.$\w])import\s*\(/);
+
+await writeFile(join(root, "src", "legacy-target.mjs"), 'export const value = "legacy-ok";\n');
+await writeFile(
+  join(root, "src", "legacy.ts"),
+  [
+    'const dynamicImport = new Function("module", "return import(module)") as (',
+    "  specifier: string,",
+    ") => Promise<{ value: string }>;",
+    'export const loaded = dynamicImport("./legacy-target.mjs");',
+  ].join("\n"),
+);
+
+const legacyRuntimeFs = createRuntimeFs({ reader, cwd: "/" });
+const legacyLoader = createModuleLoader({
+  reader,
+  runtimeFs: legacyRuntimeFs,
+  process: createProcess({ cwd: "/", onStdout: () => {}, onStderr: () => {} }),
+  onConsole: () => {},
+});
+
+const legacyExports = (await legacyLoader.run("src/legacy.ts")) as {
+  loaded: Promise<{ value: string }>;
+};
+
+assert.equal((await legacyExports.loaded).value, "legacy-ok");
 
 await rm(root, { recursive: true, force: true });
 

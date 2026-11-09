@@ -32,6 +32,36 @@
   gzip wasm asset on first use, and the node runtime installed the network guard
   before transpiling. `engine.runProgram` now warms the shared esbuild compiler
   (`ensureEsbuildCompilerReady`) before installing the guard.
+- [added 2026-11-06] terminal Git and esbuild commands via the contribution
+  registry:
+  - `git/terminal.ts`: status, add/unstage, commit -m/--amend, log, branch,
+    switch, init, remote, fetch/pull/push using the SCM service functions
+    (no SCM quick picks for common flows; remotes reuse the cached credential
+    provider).
+  - `esbuild/extension.ts`: `esbuild [entry]`, `build`, `workspace`, `watch`,
+    `stop`, `config`, `output`, `guide`; build results use the esbuild output
+    channel and the terminal gets a summary/exit code.
+  - `esbuild/cli.ts`: esbuild CLI-style flag parsing for one-off builds
+    (`--bundle`, `--minify`, `--sourcemap`, `--format`, `--platform`,
+    `--target`, `--outfile`/`--outdir`, `--define:`, `--external:`, `--loader:`,
+    `--jsx*`, `--entry-names`, ...). CLI overrides merge over the config for
+    that build only (scalars replace, lists append, maps merge); unsupported
+    flags fail instead of being ignored.
+  - `tailwind/terminal.ts`: `tailwind [build|watch|stop|toggle|config|output|guide]`;
+    compile delegates to the extension and returns a real exit code.
+  - `dataverse/terminal.ts`: `dataverse [upload|upload-active|preview|watch|stop|
+identity|config|schema|guide]`; upload commands return file/uploaded/failure
+    counts for the shell result.
+  - `flatten/terminal.ts`: `flatten [path...] [--configured]`; shell paths become
+    workspace URIs and the bundle file name is printed on success.
+- [added 2026-11-09] terminal CLI coverage for tailwind, dataverse and flatten:
+  `workspaceUri.ts` maps shell paths to workspace URIs; the extension commands
+  are reused instead of duplicated.
+- [added 2026-11-06] terminal command registry for in-house extensions
+  (`terminal/registry.ts`): `registerTerminalCommand({ name, execute })` returns a
+  disposable; commands receive `(args, justBashContext, { vscode, rootUri, fs,
+output })`. Contributions are read at shell creation; built-ins (`open`, `code`,
+  `node`, `npm`) win name collisions. Documented in `terminal/GUIDE.md`.
 - [added 2026-11-06] terminal command history persists in browser storage
   (`terminal/history.ts`): the `terminalHistory` store in the shared
   `dataverse-ide` IndexedDB database, one record per workspace URI, last 1000
@@ -106,9 +136,6 @@
   `updateEsbuildConfig`), `BuildRequest.solid` / `BuildRequestInput.solid`, quick pick
   `esbuild: Solid Compiler…` (`dataverseIde.esbuild.configureSolid`), JSON-schema description.
   The plugin is only added when solid !== off, so existing builds are unchanged.
-- Tagged-JSX composition: when both are enabled, the plugin's `beforeTransform` runs the
-  existing tagged-JSX transform first (`toJsx` introduces JSX for Solid to compile; `toTagged`
-  removes it first). `.ts`/`.js` tagged-JSX files still go through the workspace plugin.
 - Browser bundling: `@babel/core` needs Node's `path`; Vite aliases `^path$` ->
   `path-browserify` (otherwise it externalizes an empty object and Babel breaks at runtime).
   `assert`/`util`/`process` resolve to the installed browser packages. Lazy Babel chunks:
@@ -249,6 +276,29 @@ produced no output.` when the file map lacks node_modules contents (overlay-FS w
   prefetched and dynamic requires / uncached sync fs reads use a
   throw → hydrate → retry loop. Retries re-run module side effects (logged via
   `onRetry`).
+- [added 2026-11-09] node-runtime → Git refresh: `flush()` now returns the
+  workspace-relative `changed` paths (sync overlay and async fs mutations), and
+  the engine invokes `dataverseGit.refreshPaths` after a run. The Git extension
+  registers that command and debounces targeted `refreshPaths` calls, so SCM
+  status updates for files written through `vscode.workspace.fs` without a
+  text-document save.
+- [added 2026-11-09] dynamic-import compatibility for bundled CLIs:
+  `transpileModule` now marks `dynamic-import` unsupported so esbuild lowers
+  `import()` to `require()` (literal specifiers are prefetched; optional
+  missing packages stay lazy). `rewriteDynamicImports()` is retained for
+  `new Function("module", "return import(module)")` bodies, which the loader's
+  `Function` shim binds to the module resolver. Added `v8` and `readline`
+  builtin shims, a correct `PassThrough` shim (`_write`/`end`) for glob-based
+  CLIs, a runtime-cwd `path.resolve`, relative `require("..")` support, and
+  missing-module deferral to runtime. Sanity harness covers the rewrite, the
+  `new Function` path, and optional imports.
+- [added 2026-11-09] opt-in eager sync-fs cache:
+  `dataverseIde.nodeRuntime.fsCache` = `lazy` (default) or `eager`, plus
+  `node --eager` / `node --lazy` in the terminal. `fsShim.preload()` fills the
+  sync maps from `vscode.workspace.findFiles`; the scan skips
+  `node_modules`/`.git`/`dist`/`.ide-build` and caps at 5000 paths / 64 MB.
+  `learnFile()` now records the basename in the parent directory listing so
+  preloaded and sync-written files appear in `readdirSync`.
 - [added 2026-11-02] permission levels: `dataverseIde.nodeRuntime.permissions`
   (`read-only` / `workspace` / `trusted`) plus per-run `Node: Run File with
 Permissions…` / `Node: Run Active File with Permissions…` commands. FS writes
@@ -259,59 +309,6 @@ Permissions…` / `Node: Run Active File with Permissions…` commands. FS write
   - `.js` config files with custom plugins for esbuild (not started)
   - worker realm option for terminability / real CSP-based request isolation
   - `crypto.createHash`, `child_process`, and native `.node` addons are stubs
-
-# Tagged JSX extension
-
-- [added 2026-10-29] src/extensions/taggedJsx/ - port of the "Tagged JSX Tools"
-  (DanielRKling.tagged-jsx-vscode) extension features for tagged template literals
-  (`html`...`` - the @solidjs/html / @dom-expressions/tagged-jsx runtime syntax):
-  - Conversion commands `taggedJsx.toggle` (smart direction by content regex) /
-    `taggedJsx.convertToJsx` / `taggedJsx.convertToTagged`, whole-document transform
-    via lazily-imported `@tagged-jsx/transform@2.0.0` (shipped as `typescript` +
-    `diff`; tsc loads as its own async chunk on first conversion). useCallbacks
-    setting wired to `createExpressionTransformCallbacks` (Solid `() =>` lazy bridging),
-    registeredComponents / preferredTag / customTags handled by the package. Verified
-    round-trips incl. nested JSX in expressions -> nested templates (tests/tagged-transform.sanity.mts,
-    run with `node --experimental-strip-types`).
-  - TextMate injection grammar (JSX highlighting inside tagged templates): the three
-    upstream grammars vendored into src/extensions/taggedJsx/syntaxes/ (jsx.json embedded
-    JSX incl. `<${Comp}>` dynamic tags + `<//>` close, lit-jsx-string-injection.json), and
-    the primary lit-jsx grammar REGENERATED at runtime from tagged-jsx.customTags with the
-    upstream generator algorithm (grammar.ts). JSON served as base64 data URLs via
-    registerFileUrl; registered on a single LocalProcess extension via contributes.grammars
-    - contributes.languages (jsxt) - extension registry is main-thread shared and
-      registerFileUrl only exists on ext-host registrations. "Regenerate Grammar" command
-      disposes + re-registers from current tags.
-  - Settings under `tagged-jsx.*` (customTags, preferredTag, useCallbacks, registeredComponents)
-    contributed identically to upstream defaults.
-  - Formatting inside templates was covered by the removed in-house prettier
-    extension (@tagged-jsx/prettier-plugin, embeddedJsxTags); that dependency
-    is no longer bundled. The official Prettier extension is now recommended
-    through the Open VSX gallery.
-  - NOT ported yet: ts-plugin TypeScript diagnostics inside templates (upstream uses a
-    typescriptServerPlugins package; would need a monaco-vscode TS plugin bridge),
-    toggleComment command, exemplified keybindings (commands are palette-only for now).
-- [added 2026-10-29] esbuild build plugin: `taggedJsx: "off" | "toJsx" | "toTagged"`
-  key in esbuild.config.json (default off) + quick pick
-  `esbuild: Tagged JSX Transform…` (dataverseIde.esbuild.configureTaggedJsx) that
-  writes it. Plumb-through: EsbuildConfig (config.ts parse + write) ->
-  BuildRequestInput.taggedJsx (buildRunner.ts) -> BuildRequest.taggedJsx
-  (worker.ts) -> the virtual-fs plugin's onLoad.
-  - worker.ts: Workspace SOURCE files only (node_modules paths skipped); loaders
-    ts/tsx/js/jsx only. The transform runs before the esbuild loaders, memoized
-    transformers created on first use (dynamic `import("@tagged-jsx/transform")` +
-    `import("typescript")` inside the worker; builds with the plugin off never load
-    the ~3.6 MB typescript chunk - vite emits a separate lazy worker-graph chunk:
-    typescript-DPm3id58.js).
-  - Loader upgrade after a successful conversion: ts -> tsx, js -> jsx (content
-    class changes: tagged->JSX direction introduces JSX; the reverse removes it -
-    the tsx/jsx loaders accept JSX-free sources so no downgrade needed).
-  - Transform failures return the ORIGINAL contents + esbuild onLoad errors
-    attributed to that file (build does not abort); toTagged on `.ts`/`.js` files is
-    a no-op round trip at worst (no JSX to convert).
-  - Same limitations noted for the reverted Solid worker integration: no sourcemap
-    chaining (transform is character-mapped, not byte-identical), and in-browser
-    end-to-end build with the plugin on still needs a manual test run.
 
 # Rolldown
 

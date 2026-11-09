@@ -22,6 +22,7 @@ const COMMAND_GUIDE = "dataverseIde.terminal.openGuide";
 
 const CONFIG_SECTION = "dataverseIde.terminal";
 const PERMISSIONS_KEY = "permissions";
+const AUTO_START_KEY = "autoStart";
 const DEFAULT_TERMINAL_PERMISSION_LEVEL: NodePermissionLevel = "workspace";
 
 const PERMISSION_DESCRIPTIONS: Record<NodePermissionLevel, string> = {
@@ -53,6 +54,12 @@ function getPermissionLevel(
 
 function isHistoryEnabled(vscode: typeof vscodeType, rootUri: vscodeType.Uri): boolean {
   return vscode.workspace.getConfiguration(CONFIG_SECTION, rootUri).get<boolean>("history", true);
+}
+
+function isAutoStartEnabled(vscode: typeof vscodeType, rootUri: vscodeType.Uri): boolean {
+  return vscode.workspace
+    .getConfiguration(CONFIG_SECTION, rootUri)
+    .get<boolean>(AUTO_START_KEY, true);
 }
 
 export default {
@@ -97,6 +104,13 @@ export default {
             scope: "window",
             description:
               "Persist shell command history in browser storage so it survives reloads and new terminals.",
+          },
+          [`${CONFIG_SECTION}.${AUTO_START_KEY}`]: {
+            type: "boolean",
+            default: true,
+            scope: "window",
+            description:
+              "Open a Dataverse shell when the workbench starts, unless a terminal is already open.",
           },
         },
       },
@@ -192,12 +206,20 @@ export default {
       }
     });
 
-    const runCommand = vscode.commands.registerCommand(COMMAND_RUN, async () => {
-      const command = await vscode.window.showInputBox({
-        title: "Terminal: Run Command",
-        prompt: "Command to run in a new Dataverse shell.",
-        placeHolder: "ls src",
-      });
+    const runCommand = vscode.commands.registerCommand(COMMAND_RUN, async (arg?: unknown) => {
+      /*
+       * Other extensions (for example the npm script play button) can pass
+       * a command directly; from the palette the argument is absent and we
+       * prompt for one.
+       */
+      const command =
+        typeof arg === "string" && arg.trim().length > 0
+          ? arg
+          : await vscode.window.showInputBox({
+              title: "Terminal: Run Command",
+              prompt: "Command to run in a new Dataverse shell.",
+              placeHolder: "ls src",
+            });
 
       if (command == null || command.trim().length === 0) {
         return;
@@ -217,12 +239,43 @@ export default {
       }
     });
 
+    let startupTimer: number | undefined;
+
+    if (isAutoStartEnabled(vscode, context.workspaceRootUri)) {
+      /*
+       * Let the workbench finish its first layout before opening the panel.
+       * If the terminal service restored a terminal already, do not add a
+       * second one.
+       */
+      startupTimer = window.setTimeout(() => {
+        if (vscode.window.terminals.length > 0) {
+          return;
+        }
+
+        void createTerminal()
+          .then((terminal) => {
+            terminal.show(true);
+          })
+          .catch((error: unknown) => {
+            outputChannel.appendLine(
+              `[terminal] Could not auto-start the shell: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          });
+      }, 250);
+    }
+
     outputChannel.appendLine(
       "[terminal] extension activated (just-bash over the workspace filesystem).",
     );
 
     return {
       dispose() {
+        if (startupTimer != null) {
+          window.clearTimeout(startupTimer);
+        }
+
         newCommand.dispose();
         runCommand.dispose();
         closeListener.dispose();

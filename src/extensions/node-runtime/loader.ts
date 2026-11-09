@@ -20,8 +20,54 @@ import { createPackageResolver } from "../shared/workspaceResolver.js";
 
 import { createBuiltins, type Builtins, type RequireFunction } from "./builtins.js";
 import { MissingPathError, type RuntimeFs } from "./fsShim.js";
-import { collectModuleSpecifiers, transpileModule } from "./transpile.js";
+import { collectModuleSpecifiers, rewriteDynamicImports, transpileModule } from "./transpile.js";
 import { dirname, joinPath, normalizePath, type WorkspaceFs } from "./workspace.js";
+
+type DynamicImport = (specifier: string) => Promise<unknown>;
+
+/*
+ * Bundled CLIs sometimes obtain a native dynamic import with
+ * `new Function("module", "return import(module)")`. The created function's
+ * scope is global, so the module-local `__dynamicImport` is not visible.
+ * Wrap the Function constructor and inject the module resolver as a hidden
+ * final parameter when the body uses dynamic import.
+ */
+function createBoundFunction(
+  args: unknown[],
+  dynamicImport: DynamicImport,
+): (...callArgs: unknown[]) => unknown {
+  if (args.length === 0) {
+    return new Function() as (...callArgs: unknown[]) => unknown;
+  }
+
+  const parameters = args.slice(0, -1).map(String);
+  const body = String(args[args.length - 1]);
+  const rewritten = rewriteDynamicImports(body);
+
+  if (rewritten === body) {
+    return Function(...parameters, body) as (...callArgs: unknown[]) => unknown;
+  }
+
+  const factory = Function(...parameters, "__dynamicImport", rewritten) as (
+    this: unknown,
+    ...callArgs: unknown[]
+  ) => unknown;
+
+  return function (this: unknown, ...callArgs: unknown[]): unknown {
+    return factory.apply(this, [...callArgs, dynamicImport]);
+  };
+}
+
+function createModuleFunctionConstructor(dynamicImport: DynamicImport): typeof Function {
+  return new Proxy(Function, {
+    apply(_target, _thisArg, args: unknown[]) {
+      return createBoundFunction(args, dynamicImport);
+    },
+    construct(_target, args: unknown[]) {
+      return createBoundFunction(args, dynamicImport);
+    },
+  }) as typeof Function;
+}
 
 const COMPANION_EXTENSIONS = [
   "",
@@ -233,7 +279,13 @@ export function createModuleLoader(options: {
       return resolved ?? undefined;
     }
 
-    if (specifier.startsWith("./") || specifier.startsWith("../") || specifier.startsWith("/")) {
+    const isRelative =
+      specifier === "." ||
+      specifier === ".." ||
+      specifier.startsWith("./") ||
+      specifier.startsWith("../");
+
+    if (isRelative || specifier.startsWith("/")) {
       const base = specifier.startsWith("/")
         ? normalizePath(specifier)
         : joinPath(fromDir, specifier);
@@ -319,18 +371,27 @@ export function createModuleLoader(options: {
         json: false,
       });
 
+      const directory = dirname(normalized);
+
       for (const specifier of collectModuleSpecifiers(code)) {
         if (builtins.has(specifier)) {
           continue;
         }
 
-        const resolved = await resolveAsync(specifier, dirname(normalized));
+        const resolved = await resolveAsync(specifier, directory);
 
+        /*
+         * Missing modules are left to runtime. Node's require is catchable,
+         * and packages commonly guard optional dependencies with try/catch
+         * (typescript's source-map-support) or lazy dynamic imports
+         * (prettier's tinybench). A real miss still throws MissingModuleError
+         * at the require site, or a clear "Cannot find module" if uncaught.
+         */
         if (resolved == null) {
-          throw new Error(`Cannot find module '${specifier}' imported from '${normalized}'.`);
+          continue;
         }
 
-        resolutions.set(`${dirname(normalized)}|${specifier}`, resolved);
+        resolutions.set(`${directory}|${specifier}`, resolved);
 
         await collectModule(resolved);
       }
@@ -496,7 +557,9 @@ export function createModuleLoader(options: {
         return wrapEsm(executeModule(resolved).exports);
       };
 
-      const wrapped = `(function($exports, $require, $module, $filename, $dirname, $process, $console, $Buffer, $global, $importMeta, $dynamicImport, $fetch) {
+      const moduleFunction = createModuleFunctionConstructor(dynamicImport);
+
+      const wrapped = `(function($exports, $require, $module, $filename, $dirname, $process, $console, $Buffer, $global, $importMeta, $dynamicImport, $fetch, $Function) {
 var exports = $exports;
 var require = $require;
 var module = $module;
@@ -509,6 +572,7 @@ var global = $global;
 var __importMeta = $importMeta;
 var __dynamicImport = $dynamicImport;
 var fetch = $fetch;
+var Function = $Function;
 return (function() {
 ${record.code}
 }).call(this);
@@ -528,6 +592,7 @@ ${record.code}
         importMetaValue: unknown,
         dynamicImportValue: (specifier: string) => Promise<unknown>,
         fetchValue: typeof fetch,
+        functionValue: typeof Function,
       ) => unknown;
 
       factory.call(
@@ -544,6 +609,7 @@ ${record.code}
         importMeta,
         dynamicImport,
         globalThis.fetch.bind(globalThis),
+        moduleFunction,
       );
 
       module.loaded = true;

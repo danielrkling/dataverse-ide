@@ -6,20 +6,20 @@
  * ./directInstaller.ts). package.json is consulted with ensureWorkspacePackageJson
  * so npm commands do not require the user to hand-write one first.
  */
-import { rsort } from 'semver'
+import { rsort } from "semver";
 
-import type * as vscodeType from 'vscode'
+import type * as vscodeType from "vscode";
 
-const DECODER = new TextDecoder()
-const ENCODER = new TextEncoder()
+const DECODER = new TextDecoder();
+const ENCODER = new TextEncoder();
 
 async function readWorkspaceFileText(
   vscode: typeof vscodeType,
   fileUri: vscodeType.Uri,
 ): Promise<string> {
-  const bytes = await vscode.workspace.fs.readFile(fileUri)
+  const bytes = await vscode.workspace.fs.readFile(fileUri);
 
-  return DECODER.decode(bytes)
+  return DECODER.decode(bytes);
 }
 
 export async function writeWorkspaceFileText(
@@ -27,26 +27,23 @@ export async function writeWorkspaceFileText(
   fileUri: vscodeType.Uri,
   text: string,
 ): Promise<void> {
-  await vscode.workspace.fs.writeFile(
-    fileUri,
-    ENCODER.encode(text),
-  )
+  await vscode.workspace.fs.writeFile(fileUri, ENCODER.encode(text));
 }
 
 const MINIMAL_PACKAGE_JSON = {
-  name: 'dataverse-ide-workspace',
-  version: '0.1.0',
+  name: "dataverse-ide-workspace",
+  version: "0.1.0",
   private: true,
-}
+};
 
 export async function ensureWorkspacePackageJson(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
 ): Promise<string | undefined> {
-  const packageJsonUri = vscode.Uri.joinPath(rootUri, 'package.json')
+  const packageJsonUri = vscode.Uri.joinPath(rootUri, "package.json");
 
   try {
-    return await readWorkspaceFileText(vscode, packageJsonUri)
+    return await readWorkspaceFileText(vscode, packageJsonUri);
   } catch (error) {
     /*
      * Create a starter package.json when none exists - npm commands should
@@ -55,14 +52,14 @@ export async function ensureWorkspacePackageJson(
     if (isFileNotFound(error)) {
       // fall through to creation
     } else {
-      return undefined
+      return undefined;
     }
   }
 
-  const created = `${JSON.stringify(MINIMAL_PACKAGE_JSON, null, 2)}\n`
+  const created = `${JSON.stringify(MINIMAL_PACKAGE_JSON, null, 2)}\n`;
 
   try {
-    await writeWorkspaceFileText(vscode, packageJsonUri, created)
+    await writeWorkspaceFileText(vscode, packageJsonUri, created);
 
     /*
      * Do not await the notification/dialog here - an earlier version blocked
@@ -70,78 +67,109 @@ export async function ensureWorkspacePackageJson(
      * install was never processed after the starter package.json was created.
      */
     void vscode.window
-      .showInformationMessage(
-        'npm: created a starter package.json in the workspace root.',
-        'Open',
-      )
+      .showInformationMessage("npm: created a starter package.json in the workspace root.", "Open")
       .then((createdInformation) => {
-        if (createdInformation === 'Open') {
-          void vscode.window.showTextDocument(packageJsonUri)
+        if (createdInformation === "Open") {
+          void vscode.window.showTextDocument(packageJsonUri);
         }
-      })
+      });
 
-    return created
+    return created;
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
 function isFileNotFound(error: unknown): boolean {
-  const code = (error as { code?: string | number } | undefined)?.code
+  const code = (error as { code?: string | number } | undefined)?.code;
 
   // vscode.FileSystemError instances carry the string code; monaco-vscode-api
   // internal provider errors may carry the numeric enum value 1 (FileNotFound).
-  return code === 'FileNotFound' || code === 1
+  return code === "FileNotFound" || code === 1;
 }
 
-
-
-
-
-
-
-
-
-export type NpmDependencySection = 'dependencies' | 'devDependencies'
+export type NpmDependencySection = "dependencies" | "devDependencies";
 
 export type NpmDependency = {
-  name: string
-  range: string
-  section: NpmDependencySection
+  name: string;
+  range: string;
+  section: NpmDependencySection;
+};
+
+export type NpmScript = {
+  name: string;
+  command: string;
+};
+
+export async function readWorkspaceScripts(
+  vscode: typeof vscodeType,
+  rootUri: vscodeType.Uri,
+): Promise<NpmScript[]> {
+  const packageJsonUri = vscode.Uri.joinPath(rootUri, "package.json");
+
+  let text: string;
+
+  try {
+    text = await readWorkspaceFileText(vscode, packageJsonUri);
+  } catch {
+    return [];
+  }
+
+  let parsed: {
+    scripts?: Record<string, unknown>;
+  };
+
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [];
+  }
+
+  if (
+    parsed.scripts == null ||
+    typeof parsed.scripts !== "object" ||
+    Array.isArray(parsed.scripts)
+  ) {
+    return [];
+  }
+
+  return Object.entries(parsed.scripts)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+    .map(([name, command]) => ({ name, command }));
 }
 
 export async function readWorkspaceDependencies(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
 ): Promise<NpmDependency[]> {
-  const packageJsonUri = vscode.Uri.joinPath(rootUri, 'package.json')
+  const packageJsonUri = vscode.Uri.joinPath(rootUri, "package.json");
 
-  let text: string
+  let text: string;
 
   try {
-    text = await readWorkspaceFileText(vscode, packageJsonUri)
+    text = await readWorkspaceFileText(vscode, packageJsonUri);
   } catch {
-    return []
+    return [];
   }
 
   let parsed: {
-    dependencies?: Record<string, string>
-    devDependencies?: Record<string, string>
-  }
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  };
 
   try {
-    parsed = JSON.parse(text)
+    parsed = JSON.parse(text);
   } catch {
-    return []
+    return [];
   }
 
-  const result: NpmDependency[] = []
+  const result: NpmDependency[] = [];
 
-  for (const section of ['dependencies', 'devDependencies'] as const) {
-    const entries = parsed[section]
+  for (const section of ["dependencies", "devDependencies"] as const) {
+    const entries = parsed[section];
 
     if (entries == null) {
-      continue
+      continue;
     }
 
     for (const name of Object.keys(entries)) {
@@ -149,41 +177,37 @@ export async function readWorkspaceDependencies(
         name,
         range: entries[name],
         section,
-      })
+      });
     }
   }
 
-  return result
+  return result;
 }
 
 const registryUrl = (packageName: string): string =>
-  `https://registry.npmjs.org/${encodeURIComponent(packageName).replace('%2F', '%2f')}`
+  `https://registry.npmjs.org/${encodeURIComponent(packageName).replace("%2F", "%2f")}`;
 
-export async function fetchPackageVersions(
-  packageName: string,
-): Promise<string[]> {
+export async function fetchPackageVersions(packageName: string): Promise<string[]> {
   const response = await fetch(registryUrl(packageName), {
-    headers: { Accept: 'application/vnd.npm.install-v1+json' },
-  })
+    headers: { Accept: "application/vnd.npm.install-v1+json" },
+  });
 
   if (!response.ok) {
-    throw new Error(
-      `npm registry lookup for ${packageName} failed: ${response.status}`,
-    )
+    throw new Error(`npm registry lookup for ${packageName} failed: ${response.status}`);
   }
 
   const manifest = (await response.json()) as {
-    versions?: Record<string, unknown>
-    'dist-tags'?: Record<string, string>
-  }
+    versions?: Record<string, unknown>;
+    "dist-tags"?: Record<string, string>;
+  };
 
-  const versions = Object.keys(manifest.versions ?? {})
+  const versions = Object.keys(manifest.versions ?? {});
 
-  const latest = manifest['dist-tags']?.latest
+  const latest = manifest["dist-tags"]?.latest;
 
   if (latest != null) {
-    versions.splice(versions.indexOf(latest), 1)
-    versions.unshift(latest)
+    versions.splice(versions.indexOf(latest), 1);
+    versions.unshift(latest);
   }
 
   /*
@@ -192,7 +216,7 @@ export async function fetchPackageVersions(
    * prerelease identifiers (`2.0.0-rc.19` sorted via NaN comparisons and
    * could lose to `rc.9`).
    */
-  return rsort(versions, { loose: true }).slice(0, 200)
+  return rsort(versions, { loose: true }).slice(0, 200);
 }
 
 export async function uninstallDependency(
@@ -200,31 +224,25 @@ export async function uninstallDependency(
   rootUri: vscodeType.Uri,
   dependency: NpmDependency,
 ): Promise<void> {
-  const packageJsonUri = vscode.Uri.joinPath(rootUri, 'package.json')
+  const packageJsonUri = vscode.Uri.joinPath(rootUri, "package.json");
 
-  const text = await readWorkspaceFileText(vscode, packageJsonUri)
-  const parsed = JSON.parse(text) as Record<string, unknown>
+  const text = await readWorkspaceFileText(vscode, packageJsonUri);
+  const parsed = JSON.parse(text) as Record<string, unknown>;
 
-  const section = parsed[dependency.section] as
-    | Record<string, unknown>
-    | undefined
+  const section = parsed[dependency.section] as Record<string, unknown> | undefined;
 
   if (section != null) {
-    delete section[dependency.name]
+    delete section[dependency.name];
   }
 
-  await writeWorkspaceFileText(
-    vscode,
-    packageJsonUri,
-    `${JSON.stringify(parsed, null, 2)}\n`,
-  )
+  await writeWorkspaceFileText(vscode, packageJsonUri, `${JSON.stringify(parsed, null, 2)}\n`);
 
   // Also remove node_modules/<name> (top-level) in the workspace fs
   try {
     await vscode.workspace.fs.delete(
-      vscode.Uri.joinPath(rootUri, 'node_modules', dependency.name),
+      vscode.Uri.joinPath(rootUri, "node_modules", dependency.name),
       { recursive: true },
-    )
+    );
   } catch {
     // not installed locally: fine
   }
@@ -235,44 +253,40 @@ export async function uninstallDependency(
  * description/license/homepage are available).
  */
 export type NpmPackageView = {
-  name: string
-  description?: string
-  latest: string
-  license?: string
-  homepage?: string
-  distTags: Record<string, string>
-  versionCount: number
-}
+  name: string;
+  description?: string;
+  latest: string;
+  license?: string;
+  homepage?: string;
+  distTags: Record<string, string>;
+  versionCount: number;
+};
 
-export async function viewPackage(
-  packageName: string,
-): Promise<NpmPackageView> {
-  const response = await fetch(registryUrl(packageName))
+export async function viewPackage(packageName: string): Promise<NpmPackageView> {
+  const response = await fetch(registryUrl(packageName));
 
   if (!response.ok) {
-    throw new Error(
-      `npm registry lookup for ${packageName} failed: ${response.status}`,
-    )
+    throw new Error(`npm registry lookup for ${packageName} failed: ${response.status}`);
   }
 
-  const manifest = await response.json() as {
-    name?: string
-    description?: string
-    license?: string
-    homepage?: string
-    'dist-tags'?: Record<string, string>
-    versions?: Record<string, unknown>
-  }
+  const manifest = (await response.json()) as {
+    name?: string;
+    description?: string;
+    license?: string;
+    homepage?: string;
+    "dist-tags"?: Record<string, string>;
+    versions?: Record<string, unknown>;
+  };
 
   return {
     name: manifest.name ?? packageName,
     description: manifest.description,
-    latest: manifest['dist-tags']?.latest ?? '(unknown)',
+    latest: manifest["dist-tags"]?.latest ?? "(unknown)",
     license: manifest.license,
     homepage: manifest.homepage,
-    distTags: manifest['dist-tags'] ?? {},
+    distTags: manifest["dist-tags"] ?? {},
     versionCount: Object.keys(manifest.versions ?? {}).length,
-  }
+  };
 }
 
 /*
@@ -280,71 +294,68 @@ export async function viewPackage(
  * their installed version and (when known) the requested range.
  */
 export type InstalledPackage = {
-  name: string
-  version: string
-  range?: string
-  section?: NpmDependencySection
-  scoped?: boolean
-}
+  name: string;
+  version: string;
+  range?: string;
+  section?: NpmDependencySection;
+  scoped?: boolean;
+};
 
 export async function listInstalledPackages(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
 ): Promise<InstalledPackage[]> {
-  const nodeModulesUri = vscode.Uri.joinPath(rootUri, 'node_modules')
+  const nodeModulesUri = vscode.Uri.joinPath(rootUri, "node_modules");
 
-  let entries: [string, vscodeType.FileType][]
+  let entries: [string, vscodeType.FileType][];
 
   try {
-    entries = await vscode.workspace.fs.readDirectory(nodeModulesUri)
+    entries = await vscode.workspace.fs.readDirectory(nodeModulesUri);
   } catch {
-    return []
+    return [];
   }
 
-  const dependencies = await readWorkspaceDependencies(vscode, rootUri)
-  const byName = new Map(dependencies.map((dep) => [dep.name, dep]))
+  const dependencies = await readWorkspaceDependencies(vscode, rootUri);
+  const byName = new Map(dependencies.map((dep) => [dep.name, dep]));
 
-  const result: InstalledPackage[] = []
+  const result: InstalledPackage[] = [];
 
-  const readVersion = async (
-    packageDir: vscodeType.Uri,
-    name: string,
-  ): Promise<string> => {
+  const readVersion = async (packageDir: vscodeType.Uri, name: string): Promise<string> => {
     try {
       const bytes = await vscode.workspace.fs.readFile(
-        vscode.Uri.joinPath(packageDir, name, 'package.json'),
-      )
+        vscode.Uri.joinPath(packageDir, name, "package.json"),
+      );
 
       const parsed = JSON.parse(DECODER.decode(bytes)) as {
-        version?: string
-      }
+        version?: string;
+      };
 
-      return parsed.version ?? '(unknown)'
+      return parsed.version ?? "(unknown)";
     } catch {
-      return '(unknown)'
+      return "(unknown)";
     }
-  }
+  };
 
   for (const [entryName, fileType] of entries) {
     if (fileType !== vscode.FileType.Directory) {
-      continue
+      continue;
     }
 
-    if (entryName.startsWith('@')) {
+    if (entryName.startsWith("@")) {
       /*
        * Scope directory: descend one level for the actual packages.
        */
       const scopeEntries = await vscode.workspace.fs.readDirectory(
         vscode.Uri.joinPath(nodeModulesUri, entryName),
-      )
+      );
 
       for (const [packageName, scopedType] of scopeEntries) {
         if (scopedType !== vscode.FileType.Directory) {
-          continue
+          continue;
         }
 
-        const fullName = `${entryName}/${packageName}`
-        const dependency = byName.get(fullName)
+        const fullName = `${entryName}/${packageName}`;
+        const dependency = byName.get(fullName);
 
         result.push({
           name: fullName,
@@ -352,23 +363,23 @@ export async function listInstalledPackages(
           range: dependency?.range,
           section: dependency?.section,
           scoped: true,
-        })
+        });
       }
 
-      continue
+      continue;
     }
 
-    const dependency = byName.get(entryName)
+    const dependency = byName.get(entryName);
 
     result.push({
       name: entryName,
       version: await readVersion(nodeModulesUri, entryName),
       range: dependency?.range,
       section: dependency?.section,
-    })
+    });
   }
 
-  return result.sort((left, right) => left.name.localeCompare(right.name))
+  return result.sort((left, right) => left.name.localeCompare(right.name));
 }
 
 /*
@@ -383,78 +394,72 @@ export async function listExtraneousPackages(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
 ): Promise<InstalledPackage[]> {
-  const installed = await listInstalledPackages(vscode, rootUri)
+  const installed = await listInstalledPackages(vscode, rootUri);
 
   const installedByName = new Map(
-    installed
-      .filter((entry) => entry.version !== '(unknown)')
-      .map((entry) => [entry.name, entry]),
-  )
+    installed.filter((entry) => entry.version !== "(unknown)").map((entry) => [entry.name, entry]),
+  );
 
-  const declared = await readWorkspaceDependencies(vscode, rootUri)
+  const declared = await readWorkspaceDependencies(vscode, rootUri);
 
-  const keep = new Set<string>()
+  const keep = new Set<string>();
 
-  const readAllRequirements = async (
-    name: string,
-  ): Promise<string[]> => {
+  const readAllRequirements = async (name: string): Promise<string[]> => {
     try {
       const bytes = await vscode.workspace.fs.readFile(
-        vscode.Uri.joinPath(rootUri, 'node_modules', ...name.split('/'), 'package.json'),
-      )
+        vscode.Uri.joinPath(rootUri, "node_modules", ...name.split("/"), "package.json"),
+      );
 
       const manifest = JSON.parse(DECODER.decode(bytes)) as {
-        dependencies?: Record<string, string>
-        peerDependencies?: Record<string, string>
-        peerDependenciesMeta?: Record<string, { optional?: boolean }>
-      }
+        dependencies?: Record<string, string>;
+        peerDependencies?: Record<string, string>;
+        peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+      };
 
-      const required: string[] = Object.keys(manifest.dependencies ?? {})
+      const required: string[] = Object.keys(manifest.dependencies ?? {});
 
       if (manifest.peerDependencies != null) {
-        const peerMeta = manifest.peerDependenciesMeta ?? {}
+        const peerMeta = manifest.peerDependenciesMeta ?? {};
 
-        for (const [peerName, peerRange] of Object.entries(
-          manifest.peerDependencies,
-        )) {
+        for (const [peerName, peerRange] of Object.entries(manifest.peerDependencies)) {
           if (peerRange.length > 0 && !peerMeta[peerName]?.optional) {
-            required.push(peerName)
+            required.push(peerName);
           }
         }
       }
 
-      return required
+      return required;
     } catch {
-      return []
+      return [];
     }
-  }
+  };
 
-  const queue = [...new Set(declared.map((dep) => dep.name))]
+  const queue = [...new Set(declared.map((dep) => dep.name))];
 
   for (const name of queue) {
     if (installedByName.has(name)) {
-      keep.add(name)
+      keep.add(name);
     }
   }
 
   while (queue.length > 0) {
-    const name = queue.shift() as string
+    const name = queue.shift() as string;
 
     if (!keep.has(name)) {
-      continue
+      continue;
     }
 
     for (const requiredName of await readAllRequirements(name)) {
       if (keep.has(requiredName)) {
-        continue
+        continue;
       }
 
       if (!installedByName.has(requiredName)) {
-        continue
+        continue;
       }
 
-      keep.add(requiredName)
-      queue.push(requiredName)
+      keep.add(requiredName);
+      queue.push(requiredName);
     }
   }
 
@@ -462,7 +467,7 @@ export async function listExtraneousPackages(
    * Packages without a readable package.json (corrupt/partial installs) have
    * no way to prove they are needed - npm prune removes those too.
    */
-  return installed.filter((entry) => !keep.has(entry.name))
+  return installed.filter((entry) => !keep.has(entry.name));
 }
 
 export async function pruneExtraneousPackages(
@@ -470,21 +475,21 @@ export async function pruneExtraneousPackages(
   rootUri: vscodeType.Uri,
   onRemoved: (name: string) => void,
 ): Promise<number> {
-  const extraneous = await listExtraneousPackages(vscode, rootUri)
+  const extraneous = await listExtraneousPackages(vscode, rootUri);
 
-  let removedCount = 0
-  const removedNames = new Set<string>()
+  let removedCount = 0;
+  const removedNames = new Set<string>();
 
   for (const entry of extraneous) {
     try {
       await vscode.workspace.fs.delete(
-        vscode.Uri.joinPath(rootUri, 'node_modules', ...entry.name.split('/')),
+        vscode.Uri.joinPath(rootUri, "node_modules", ...entry.name.split("/")),
         { recursive: true },
-      )
+      );
 
-      removedNames.add(entry.name)
-      onRemoved(entry.name)
-      removedCount++
+      removedNames.add(entry.name);
+      onRemoved(entry.name);
+      removedCount++;
     } catch {
       // already gone or undeletable: leave it alone
     }
@@ -492,33 +497,22 @@ export async function pruneExtraneousPackages(
 
   if (removedNames.size > 0) {
     try {
-      const lockPath = vscode.Uri.joinPath(
-        rootUri,
-        'node_modules',
-        '.package-lock.json',
-      )
+      const lockPath = vscode.Uri.joinPath(rootUri, "node_modules", ".package-lock.json");
 
-      const lockBytes = await vscode.workspace.fs.readFile(lockPath)
-      const lock = JSON.parse(DECODER.decode(lockBytes)) as Record<
-        string,
-        unknown
-      >
+      const lockBytes = await vscode.workspace.fs.readFile(lockPath);
+      const lock = JSON.parse(DECODER.decode(lockBytes)) as Record<string, unknown>;
 
       for (const name of removedNames) {
-        delete lock[name]
+        delete lock[name];
       }
 
-      await writeWorkspaceFileText(
-        vscode,
-        lockPath,
-        `${JSON.stringify(lock, null, 2)}\n`,
-      )
+      await writeWorkspaceFileText(vscode, lockPath, `${JSON.stringify(lock, null, 2)}\n`);
     } catch {
       // no lockfile or unreadable: nothing to sync
     }
   }
 
-  return removedCount
+  return removedCount;
 }
 
 /*
@@ -526,53 +520,53 @@ export async function pruneExtraneousPackages(
  * against the registry's latest dist-tag.
  */
 export type OutdatedPackage = {
-  name: string
-  range: string
-  section: NpmDependencySection
-  installed?: string
-  latest: string
-}
+  name: string;
+  range: string;
+  section: NpmDependencySection;
+  installed?: string;
+  latest: string;
+};
 
 export async function checkOutdatedPackages(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
 ): Promise<OutdatedPackage[]> {
-  const dependencies = await readWorkspaceDependencies(vscode, rootUri)
+  const dependencies = await readWorkspaceDependencies(vscode, rootUri);
 
-  const nodeModulesUri = vscode.Uri.joinPath(rootUri, 'node_modules')
+  const nodeModulesUri = vscode.Uri.joinPath(rootUri, "node_modules");
 
-  const results: OutdatedPackage[] = []
+  const results: OutdatedPackage[] = [];
 
   for (const dependency of dependencies) {
-    let installed: string | undefined
+    let installed: string | undefined;
 
     try {
       const bytes = await vscode.workspace.fs.readFile(
-        vscode.Uri.joinPath(nodeModulesUri, dependency.name, 'package.json'),
-      )
+        vscode.Uri.joinPath(nodeModulesUri, dependency.name, "package.json"),
+      );
 
       const parsed = JSON.parse(DECODER.decode(bytes)) as {
-        version?: string
-      }
+        version?: string;
+      };
 
-      installed = parsed.version
+      installed = parsed.version;
     } catch {
       // not installed locally
     }
 
-    let latest = '(registry lookup failed)'
+    let latest = "(registry lookup failed)";
 
     try {
       const response = await fetch(registryUrl(dependency.name), {
-        headers: { Accept: 'application/vnd.npm.install-v1+json' },
-      })
+        headers: { Accept: "application/vnd.npm.install-v1+json" },
+      });
 
       if (response.ok) {
-        const manifest = await response.json() as {
-          'dist-tags'?: Record<string, string>
-        }
+        const manifest = (await response.json()) as {
+          "dist-tags"?: Record<string, string>;
+        };
 
-        latest = manifest['dist-tags']?.latest ?? latest
+        latest = manifest["dist-tags"]?.latest ?? latest;
       }
     } catch {
       // keep the placeholder
@@ -584,9 +578,8 @@ export async function checkOutdatedPackages(
       section: dependency.section,
       installed,
       latest,
-    })
+    });
   }
 
-  return results
+  return results;
 }
-

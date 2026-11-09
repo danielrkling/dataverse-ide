@@ -45,6 +45,20 @@ attributes.
 | `Tailwind: Open tailwind.config.json`                   | Creates the config on first use, then opens it.                 |
 | `Tailwind: Show Output`                                 | Opens the compiler log.                                         |
 
+From the Dataverse shell:
+
+```sh
+tailwind            # compile
+tailwind watch
+tailwind stop
+tailwind toggle
+tailwind config
+tailwind output
+tailwind guide
+```
+
+The command exits non-zero when compilation fails.
+
 ## Configuration
 
 `tailwind.config.json` lives at the workspace root. Point elsewhere with

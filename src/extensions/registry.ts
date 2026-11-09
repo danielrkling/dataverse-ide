@@ -48,11 +48,10 @@ export const extensionModules: Record<string, () => Promise<{ default: IdeExtens
   gitlab: () => import("./gitlab/extension.js"),
   tailwind: () => import("./tailwind/extension.js"),
   flatten: () => import("./flatten/extension.js"),
-  scripts: () => import("./scripts/extension.js"),
   welcome: () => import("./welcome/extension.js"),
   markdown: () => import("./markdown/extension.js"),
+  "ai-chat": () => import("./ai-chat/extension.js"),
   vsix: () => import("./vsix/extension.js"),
-  // taggedJsx: () => import("./taggedJsx/extension.js"), //gramer not working atm, disabling for now
 };
 
 /*
@@ -129,12 +128,6 @@ export const extensionManifests: Record<string, ExtensionManifestIdentity> = {
     displayName: "Dataverse IDE Flatten",
     description: "Combine selected files into a single markdown document.",
   },
-  scripts: {
-    publisher: "dataverse-ide",
-    name: "dataverse-ide-scripts",
-    displayName: "Dataverse IDE Scripts",
-    description: "Run user-defined series/parallel command scripts.",
-  },
   welcome: {
     publisher: "dataverse-ide",
     name: "dataverse-ide-welcome",
@@ -146,6 +139,13 @@ export const extensionManifests: Record<string, ExtensionManifestIdentity> = {
     name: "dataverse-ide-markdown",
     displayName: "Dataverse IDE Markdown",
     description: "DOM-based Markdown preview that does not require webviews or service workers.",
+  },
+  "ai-chat": {
+    publisher: "dataverse-ide",
+    name: "dataverse-ide-ai-chat",
+    displayName: "Dataverse IDE AI Chat",
+    description:
+      "Workspace agent with a sidebar view and editor tab, powered by any OpenAI-compatible endpoint.",
   },
   vsix: {
     publisher: "dataverse-ide",

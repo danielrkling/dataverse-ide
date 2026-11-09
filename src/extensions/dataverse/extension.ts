@@ -28,11 +28,19 @@ import guideContent from "./GUIDE.md?raw";
 import { registerGuide } from "../shared/guide.js";
 import { createGlobMatcher, scanGlob } from "../shared/glob.js";
 
+import { registerDataverseTerminalCommands } from "./terminal.js";
+
 export type DataverseUploadController = {
   dispose: () => void;
 };
 
 type UploadSettings = DataverseConfig;
+
+type UploadSummary = {
+  files: number;
+  uploaded: number;
+  failures: string[];
+};
 
 const SCHEMA_PATH_OPTIONS: ConfigPathOptions = {
   section: "dataverseIde.dataverse",
@@ -724,7 +732,7 @@ export async function installDataverseUploadExtension(
       showProgress?: boolean;
       silent?: boolean;
     } = {},
-  ): Promise<void> {
+  ): Promise<UploadSummary> {
     const settings = await getSettings(vscode, workspaceRootUri);
 
     const uploadRootUri =
@@ -745,7 +753,7 @@ export async function installDataverseUploadExtension(
         void vscode.window.showWarningMessage("No files were selected for Dataverse upload.");
       }
 
-      return;
+      return { files: 0, uploaded: 0, failures: [] };
     }
 
     const client = createWebResourceClient(settings);
@@ -813,7 +821,7 @@ export async function installDataverseUploadExtension(
         `${failures.length} of ${files.length} Dataverse web resource upload(s) failed. See Output for details.`,
       );
 
-      return;
+      return { files: files.length, uploaded: uploaded.length, failures };
     }
 
     let publishMessage = settings.publishAfterUpload
@@ -870,6 +878,8 @@ export async function installDataverseUploadExtension(
         `${uploaded.length} Dataverse web resource(s) uploaded.${publishMessage}`,
       );
     }
+
+    return { files: files.length, uploaded: uploaded.length, failures };
   }
 
   function getUploadRootUri(settings: UploadSettings): vscodeType.Uri {
@@ -1411,13 +1421,19 @@ export async function installDataverseUploadExtension(
 
         const files = await getConfiguredUploadFiles(vscode, workspaceRootUri, settings);
 
-        await uploadFiles(files);
+        return await uploadFiles(files);
       } catch (error) {
         await vscode.window.showErrorMessage(
           error instanceof Error
             ? `Dataverse upload failed: ${error.message}`
             : "Dataverse upload failed.",
         );
+
+        return {
+          files: 0,
+          uploaded: 0,
+          failures: [error instanceof Error ? error.message : "Dataverse upload failed."],
+        };
       }
     },
   );
@@ -1436,13 +1452,19 @@ export async function installDataverseUploadExtension(
       }
 
       try {
-        await uploadFiles(uris);
+        return await uploadFiles(uris);
       } catch (error) {
         await vscode.window.showErrorMessage(
           error instanceof Error
             ? `Dataverse upload failed: ${error.message}`
             : "Dataverse upload failed.",
         );
+
+        return {
+          files: 0,
+          uploaded: 0,
+          failures: [error instanceof Error ? error.message : "Dataverse upload failed."],
+        };
       }
     },
   );
@@ -1462,13 +1484,20 @@ export async function installDataverseUploadExtension(
 
       try {
         await document.save();
-        await uploadFiles([document.uri]);
+
+        return await uploadFiles([document.uri]);
       } catch (error) {
         await vscode.window.showErrorMessage(
           error instanceof Error
             ? `Dataverse upload failed: ${error.message}`
             : "Dataverse upload failed.",
         );
+
+        return {
+          files: 0,
+          uploaded: 0,
+          failures: [error instanceof Error ? error.message : "Dataverse upload failed."],
+        };
       }
     },
   );
@@ -1532,6 +1561,8 @@ export async function installDataverseUploadExtension(
     },
   );
 
+  const terminalCommand = registerDataverseTerminalCommands(vscode, workspaceRootUri);
+
   return {
     dispose() {
       stopWatchUpload();
@@ -1543,6 +1574,7 @@ export async function installDataverseUploadExtension(
 
       pendingPublishResources.clear();
 
+      terminalCommand.dispose();
       uploadConfiguredFilesCommand.dispose();
       uploadSelectionCommand.dispose();
       uploadActiveFileCommand.dispose();

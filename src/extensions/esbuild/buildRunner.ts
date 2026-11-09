@@ -113,15 +113,10 @@ export type BuildRequestInput = {
   splitting?: boolean;
   external?: string[];
   define?: Record<string, string>;
+  loader?: Record<string, string>;
   entryNames?: string;
   chunkNames?: string;
   outExtension?: Record<string, string>;
-
-  /*
-   * Tagged JSX transform applied to workspace source files before esbuild
-   * transpiles them.
-   */
-  taggedJsx?: "off" | "toJsx" | "toTagged";
 
   /*
    * Solid JSX compiler backend: "off" (default), "v1" (babel-preset-solid),

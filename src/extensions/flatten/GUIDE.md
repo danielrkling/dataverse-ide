@@ -43,6 +43,16 @@ an earlier one.
 "dataverseIde.flatten.include": ["src", "node_modules/**/*.{md,d.ts}", "package.json"]
 ```
 
+From the Dataverse shell, combine explicit paths or the configured includes:
+
+```sh
+flatten                       # use dataverseIde.flatten.include
+flatten src/app.ts src/extensions
+flatten --configured
+```
+
+Paths resolve against the shell's current directory. The command prints the bundle file name.
+
 - Paths are relative to the workspace root. Absolute paths are not used.
 - Folders are expanded recursively with the same exclusions and 500-file cap as selected
   folders.

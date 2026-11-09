@@ -85,7 +85,7 @@ await assert.rejects(readOnly.promises.writeFile("out/blocked.txt", "nope"), /EA
 await assert.rejects(readOnly.promises.mkdir("new-dir"), /EACCES/);
 await assert.rejects(readOnly.promises.unlink("src/note.txt"), /EACCES/);
 
-assert.deepEqual(await readOnly.flush(), { applied: 0, errors: [] });
+assert.deepEqual(await readOnly.flush(), { applied: 0, errors: [], changed: [] });
 assert.equal(files.has("out/blocked.txt"), false);
 assert.equal(files.has("new-dir"), false);
 assert.equal(files.has("src/note.txt"), true);
@@ -114,10 +114,7 @@ const readOnlyWorkspace = createWorkspaceFs(fakeVscode as never, "root" as never
   writable: false,
 });
 
-await assert.rejects(
-  readOnlyWorkspace.writeFile("blocked.txt", new Uint8Array()),
-  /EACCES/,
-);
+await assert.rejects(readOnlyWorkspace.writeFile("blocked.txt", new Uint8Array()), /EACCES/);
 await assert.rejects(readOnlyWorkspace.createDirectory("blocked"), /EACCES/);
 await assert.rejects(readOnlyWorkspace.deletePath("blocked.txt", false), /EACCES/);
 await assert.rejects(readOnlyWorkspace.rename("a.txt", "b.txt"), /EACCES/);

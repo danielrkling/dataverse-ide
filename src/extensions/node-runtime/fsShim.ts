@@ -50,12 +50,27 @@ type OverlayOperation =
 export type FlushResult = {
   applied: number;
   errors: string[];
+  /** Workspace-relative paths mutated during the run. */
+  changed: string[];
+};
+
+export type PreloadOptions = {
+  /** Stop loading file contents once this many bytes are cached. */
+  maxBytes?: number;
+};
+
+export type PreloadResult = {
+  files: number;
+  bytes: number;
+  skipped: number;
 };
 
 export type RuntimeFs = {
   fs: Record<string, unknown>;
   promises: Record<string, unknown>;
   hydrate: (path: string, operation: Operation) => Promise<boolean>;
+  /** Eagerly populate the sync-fs cache for the given workspace paths. */
+  preload: (paths: string[], options?: PreloadOptions) => Promise<PreloadResult>;
   waitForIdle: () => Promise<void>;
   flush: () => Promise<FlushResult>;
 };
@@ -304,6 +319,13 @@ export function createRuntimeFs(options: {
   const absent = new Set<string>();
   const deleted = new Set<string>();
   const overlay: OverlayOperation[] = [];
+  const changedPaths = new Set<string>();
+
+  function markChanged(...paths: string[]): void {
+    for (const path of paths) {
+      changedPaths.add(path);
+    }
+  }
 
   const descriptors = new Map<number, FileDescriptor>();
   let nextDescriptor = 3;
@@ -403,6 +425,14 @@ export function createRuntimeFs(options: {
     }
 
     ensureDirectory(dirname(normalized));
+
+    /*
+     * Keep the parent directory listing in sync. Without this, a file created
+     * through writeFileSync/openSync (or preloaded for eager mode) would not
+     * appear in a later readdirSync of its parent until that directory was
+     * hydrated asynchronously.
+     */
+    directories.get(dirname(normalized))?.add(basename(normalized));
   }
 
   function learnDirectory(path: string, entries: Array<[string, vscodeType.FileType]>): void {
@@ -486,6 +516,70 @@ export function createRuntimeFs(options: {
     return true;
   }
 
+  /*
+   * Eager cache load for `node --eager` / dataverseIde.nodeRuntime.fsCache.
+   *
+   * Paths are workspace-relative files (the engine supplies them from
+   * vscode.workspace.findFiles). Directories are learned from the paths so
+   * readdirSync works for every preloaded parent. Binary files count toward
+   * maxBytes the same way source files do; once the cap is reached the
+   * remaining paths stay lazy and hydrate on demand.
+   */
+  async function preload(paths: string[], options: PreloadOptions = {}): Promise<PreloadResult> {
+    const maxBytes = options.maxBytes ?? Number.POSITIVE_INFINITY;
+    let loaded = 0;
+    let bytesLoaded = 0;
+    let skipped = 0;
+
+    for (const path of paths) {
+      const normalized = normalizePath(path);
+
+      if (normalized.length === 0 || files.has(normalized)) {
+        continue;
+      }
+
+      const stat = await reader.stat(normalized);
+
+      if (stat == null) {
+        absent.add(normalized);
+        continue;
+      }
+
+      stats.set(normalized, stat);
+      absent.delete(normalized);
+
+      if ((stat.type & DIRECTORY) !== 0) {
+        ensureDirectory(normalized);
+
+        if (!hydratedDirectories.has(normalized)) {
+          const entries = (await reader.readDirectory(normalized)) ?? [];
+
+          learnDirectory(normalized, entries);
+        }
+
+        continue;
+      }
+
+      if (bytesLoaded + stat.size > maxBytes) {
+        skipped += 1;
+        continue;
+      }
+
+      const bytes = await reader.readBytes(normalized);
+
+      if (bytes == null) {
+        absent.add(normalized);
+        continue;
+      }
+
+      learnFile(normalized, bytes, stat);
+      loaded += 1;
+      bytesLoaded += bytes.length;
+    }
+
+    return { files: loaded, bytes: bytesLoaded, skipped };
+  }
+
   function listDirectory(path: string): string[] {
     const entries = directories.get(path);
 
@@ -555,6 +649,7 @@ export function createRuntimeFs(options: {
     learnFile(path, bytes);
     deleted.delete(path);
     overlay.push({ kind: "write", path, bytes });
+    markChanged(path);
   }
 
   function existsSync(pathLike: PathLike): boolean {
@@ -656,6 +751,7 @@ export function createRuntimeFs(options: {
     deleted.add(path);
     unlinkFromParent(path);
     overlay.push({ kind: "delete", path, recursive: false });
+    markChanged(path);
   }
 
   function rmdirSync(pathLike: PathLike): void {
@@ -679,6 +775,7 @@ export function createRuntimeFs(options: {
     deleted.add(path);
     unlinkFromParent(path);
     overlay.push({ kind: "delete", path, recursive: false });
+    markChanged(path);
   }
 
   function rmSync(pathLike: PathLike, options?: { recursive?: boolean; force?: boolean }): void {
@@ -702,6 +799,7 @@ export function createRuntimeFs(options: {
         path,
         recursive: options?.recursive === true,
       });
+      markChanged(path);
       return;
     }
 
@@ -728,6 +826,7 @@ export function createRuntimeFs(options: {
       stats.delete(from);
       unlinkFromParent(from);
       overlay.push({ kind: "rename", from, to });
+      markChanged(from, to);
       return;
     }
 
@@ -737,6 +836,7 @@ export function createRuntimeFs(options: {
       unlinkFromParent(from);
       ensureDirectory(dirname(to));
       overlay.push({ kind: "rename", from, to });
+      markChanged(from, to);
       return;
     }
 
@@ -1058,6 +1158,7 @@ export function createRuntimeFs(options: {
       discardOverlayFor(path);
       await reader.writeFile(path, bytes);
       learnFile(path, bytes);
+      markChanged(path);
     },
 
     async appendFile(
@@ -1079,6 +1180,7 @@ export function createRuntimeFs(options: {
       discardOverlayFor(path);
       await reader.writeFile(path, joined);
       learnFile(path, joined);
+      markChanged(path);
     },
 
     async stat(pathLike: PathLike): Promise<RuntimeStats> {
@@ -1104,7 +1206,10 @@ export function createRuntimeFs(options: {
     },
 
     async lstat(pathLike: PathLike): Promise<RuntimeStats> {
-      return this.stat(pathLike);
+      /*
+       * Do not use `this`: callback adapters pass this method unbound.
+       */
+      return promises.stat(pathLike);
     },
 
     async readdir(
@@ -1153,6 +1258,7 @@ export function createRuntimeFs(options: {
       files.delete(path);
       stats.delete(path);
       unlinkFromParent(path);
+      markChanged(path);
     },
 
     async rmdir(pathLike: PathLike): Promise<void> {
@@ -1162,6 +1268,7 @@ export function createRuntimeFs(options: {
       discardOverlayFor(path);
       await reader.deletePath(path, false);
       removeSubtree(path);
+      markChanged(path);
     },
 
     async rm(
@@ -1182,6 +1289,7 @@ export function createRuntimeFs(options: {
       }
 
       removeSubtree(path);
+      markChanged(path);
     },
 
     async rename(fromLike: PathLike, toLike: PathLike): Promise<void> {
@@ -1201,11 +1309,13 @@ export function createRuntimeFs(options: {
         files.delete(from);
         stats.delete(from);
         unlinkFromParent(from);
+        markChanged(from, to);
         return;
       }
 
       discardOverlayFor(from, to);
       await reader.rename(from, to);
+      markChanged(from, to);
     },
 
     async copyFile(fromLike: PathLike, toLike: PathLike): Promise<void> {
@@ -1219,6 +1329,7 @@ export function createRuntimeFs(options: {
         await reader.writeFile(from, cached);
         await reader.copy(from, to);
         learnFile(to, cached, stats.get(from));
+        markChanged(to);
         return;
       }
 
@@ -1229,6 +1340,8 @@ export function createRuntimeFs(options: {
       if (bytes != null) {
         learnFile(to, bytes);
       }
+
+      markChanged(to);
     },
 
     async access(pathLike: PathLike, mode = constants.F_OK): Promise<void> {
@@ -1484,8 +1597,9 @@ export function createRuntimeFs(options: {
   async function flush(): Promise<FlushResult> {
     if (!writable) {
       overlay.length = 0;
+      changedPaths.clear();
 
-      return { applied: 0, errors: [] };
+      return { applied: 0, errors: [], changed: [] };
     }
 
     const errors: string[] = [];
@@ -1514,13 +1628,18 @@ export function createRuntimeFs(options: {
 
     overlay.length = 0;
 
-    return { applied, errors };
+    const changed = [...changedPaths];
+
+    changedPaths.clear();
+
+    return { applied, errors, changed };
   }
 
   return {
     fs,
     promises,
     hydrate,
+    preload,
     waitForIdle,
     flush,
   };

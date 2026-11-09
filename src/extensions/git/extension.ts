@@ -10,6 +10,7 @@ import { registerGuide } from "../shared/guide.js";
 import {
   addRemote,
   cloneRepository,
+  configureGitMetadataDirectoryName,
   createBranch,
   createCommit,
   deleteLocalBranch,
@@ -18,8 +19,10 @@ import {
   discardPaths,
   listRemoteBranches,
   createBranchFrom,
+  getCurrentBranchName,
   getGitRepositorySnapshot,
   getGitPathEntry,
+  getGitMetadataDirectoryName,
   getHeadCommit,
   getRecentCommits,
   getSyncStatus,
@@ -29,6 +32,8 @@ import {
   pullRemote,
   pushRemote,
   readBlobAt,
+  resetBranchToCommit,
+  restoreFileFromCommit,
   checkoutCommit,
   readWorkdirFile,
   stageAll,
@@ -51,6 +56,7 @@ import {
   forgetCredentials,
   type GitCredentialPrompt,
 } from "./credentials.js";
+import { registerGitTerminalCommands } from "./terminal.js";
 
 import { detectLineDiff, selectiveMerge, splitLines } from "./lineMerge.js";
 
@@ -377,6 +383,13 @@ export async function installDataverseGitExtension(
             description:
               "Automatically fetch from the configured remote(s) every N minutes while the workspace is open. 0 disables auto-fetch.",
           },
+          "dataverseIde.git.metadataDirectoryName": {
+            type: "string",
+            default: ".git",
+            pattern: "^[^/\\\\]+$",
+            description:
+              "Directory name used to store Git metadata. Defaults to .git. Use a non-reserved name such as _git if the browser blocks writes to .git. Changing this does not move an existing repository; rename the directory to migrate.",
+          },
         },
       },
       commands: [
@@ -462,6 +475,10 @@ export async function installDataverseGitExtension(
         {
           command: "dataverseGit.showFileHistory",
           title: "Git: Show File History (Timeline)",
+        },
+        {
+          command: "dataverseGit.resetToCommit",
+          title: "Git: Reset Branch to Commit…",
         },
         {
           command: "dataverseGit.sync",
@@ -805,6 +822,14 @@ export async function installDataverseGitExtension(
   } as unknown as IExtensionManifest);
 
   const vscode = await getApi();
+
+  function configureMetadataDirectory(): void {
+    const config = vscode.workspace.getConfiguration("dataverseIde.git", rootUri);
+
+    configureGitMetadataDirectoryName(config.get<string>("metadataDirectoryName", ".git"));
+  }
+
+  configureMetadataDirectory();
 
   const sourceControl = vscode.scm.createSourceControl("dataverseGit", "Git", rootUri);
 
@@ -1344,6 +1369,27 @@ export async function installDataverseGitExtension(
   const refreshCommand = vscode.commands.registerCommand("dataverseGit.refresh", async () => {
     await refresh();
   });
+
+  /*
+   * External writers (node-runtime, shell commands) mutate files through
+   * vscode.workspace.fs, which does not raise onDidSaveTextDocument. They call
+   * this command with the workspace-relative paths they wrote so SCM status
+   * updates without a full rescan.
+   */
+  const refreshPathsCommand = vscode.commands.registerCommand(
+    "dataverseGit.refreshPaths",
+    (value: unknown) => {
+      const paths = Array.isArray(value)
+        ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+        : typeof value === "string" && value.length > 0
+          ? [value]
+          : [];
+
+      for (const filepath of paths) {
+        scheduleRefresh(350, filepath.replaceAll("\\", "/"));
+      }
+    },
+  );
 
   const stageCommand = vscode.commands.registerCommand(
     "dataverseGit.stage",
@@ -2254,6 +2300,78 @@ export async function installDataverseGitExtension(
     },
   );
 
+  async function resetToCommitFlow(commitOid: string): Promise<void> {
+    const branchName = await getCurrentBranchName(workspaceHandle);
+
+    if (branchName == null) {
+      await vscode.window.showWarningMessage("Check out a branch before resetting it to a commit.");
+
+      return;
+    }
+
+    const shortOid = commitOid.slice(0, 8);
+
+    const confirmation = await vscode.window.showWarningMessage(
+      `Reset branch "${branchName}" to commit ${shortOid}? This discards all staged and tracked working-tree changes. Commits after ${shortOid} will no longer be on this branch.`,
+      {
+        modal: true,
+      },
+      "Reset Branch",
+    );
+
+    if (confirmation !== "Reset Branch") {
+      return;
+    }
+
+    await resetBranchToCommit(workspaceHandle, commitOid);
+    await refresh();
+
+    await vscode.window.showInformationMessage(`Reset branch "${branchName}" to ${shortOid}.`);
+  }
+
+  const resetToCommitCommand = vscode.commands.registerCommand(
+    "dataverseGit.resetToCommit",
+    async () => {
+      try {
+        const commits = await getRecentCommits(workspaceHandle, 50);
+
+        if (commits.length === 0) {
+          await vscode.window.showInformationMessage("This repository has no commits yet.");
+
+          return;
+        }
+
+        const selected = await vscode.window.showQuickPick(
+          commits.map((commit) => ({
+            label: `$(git-commit) ${commit.message.split("\n")[0]}`,
+            description: `${commit.oid.slice(0, 8)} · ${commit.authorName}`,
+            detail: new Date(commit.timestamp * 1000).toLocaleString(),
+            commitOid: commit.oid,
+          })),
+          {
+            title: "Reset Branch to Commit",
+            placeHolder: "Select the commit to reset the current branch to.",
+            ignoreFocusOut: true,
+          },
+        );
+
+        if (selected == null) {
+          return;
+        }
+
+        await resetToCommitFlow(selected.commitOid);
+      } catch (error) {
+        console.error("[Dataverse IDE] Git branch reset failed.", error);
+
+        await vscode.window.showErrorMessage(
+          error instanceof Error
+            ? `Unable to reset branch: ${error.message}`
+            : "Unable to reset branch.",
+        );
+      }
+    },
+  );
+
   const showHistoryCommand = vscode.commands.registerCommand(
     "dataverseGit.showHistory",
     async () => {
@@ -2269,7 +2387,8 @@ export async function installDataverseGitExtension(
         /*
          * Enter re-uses the message in the commit input box (recent
          * history flow). Then a follow-up menu lets the user check the
-         * commit out (detached, like desktop "Checkout Commit").
+         * commit out (detached, like desktop "Checkout Commit") or reset
+         * the current branch to it.
          */
         const selected = await vscode.window.showQuickPick(
           commits.map((commit) => ({
@@ -2306,6 +2425,11 @@ export async function installDataverseGitExtension(
               action: "checkout",
             },
             {
+              label: "$(history) Reset Branch to Commit",
+              description: "Move the current branch here and discard tracked changes",
+              action: "reset",
+            },
+            {
               label: "$(copy) Copy Commit Object Name",
               action: "copy",
             },
@@ -2323,6 +2447,22 @@ export async function installDataverseGitExtension(
         if (action.action === "copy") {
           await vscode.env.clipboard.writeText(selected.commitOid);
           await vscode.window.showInformationMessage(`Copied ${selected.commitOid.slice(0, 8)}.`);
+
+          return;
+        }
+
+        if (action.action === "reset") {
+          try {
+            await resetToCommitFlow(selected.commitOid);
+          } catch (resetError) {
+            console.error("[Dataverse IDE] Git branch reset failed.", resetError);
+
+            await vscode.window.showErrorMessage(
+              resetError instanceof Error
+                ? `Unable to reset branch: ${resetError.message}`
+                : "Unable to reset branch.",
+            );
+          }
 
           return;
         }
@@ -2434,10 +2574,11 @@ export async function installDataverseGitExtension(
             label: `$(git-commit) ${commit.message.split("\n")[0]}`,
             description: `${commit.oid.slice(0, 8)}  ·  ${commit.authorName}`,
             detail: new Date(commit.timestamp * 1000).toLocaleString(),
+            commitOid: commit.oid,
           })),
           {
             title: `Git Timeline: ${filepath}`,
-            placeHolder: "Commit history for this file — select one to open the revision.",
+            placeHolder: "Commit history for this file — select one to open or restore it.",
             ignoreFocusOut: false,
           },
         );
@@ -2446,12 +2587,69 @@ export async function installDataverseGitExtension(
           return;
         }
 
-        const selectedCommit = commits.find(
-          (commit) => commit.oid.slice(0, 8) === (selected.description?.split(" ")[0] ?? ""),
+        const selectedCommit = commits.find((commit) => commit.oid === selected.commitOid);
+
+        if (selectedCommit == null) {
+          return;
+        }
+
+        const action = await vscode.window.showQuickPick(
+          [
+            {
+              label: "$(go-to-file) Open Revision",
+              description: "View this version of the file read-only",
+              action: "open",
+            },
+            {
+              label: "$(history) Restore File from This Commit",
+              description: "Overwrite the working-tree file and stage the restored content",
+              action: "restore",
+            },
+          ],
+          {
+            title: `Commit ${selectedCommit.oid.slice(0, 8)}`,
+            placeHolder: `Choose an action for "${filepath}".`,
+            ignoreFocusOut: true,
+          },
         );
 
-        if (selectedCommit != null) {
+        if (action == null) {
+          return;
+        }
+
+        if (action.action === "open") {
           await openRevision(filepath, selectedCommit);
+
+          return;
+        }
+
+        const shortOid = selectedCommit.oid.slice(0, 8);
+
+        const confirmation = await vscode.window.showWarningMessage(
+          `Restore "${filepath}" from commit ${shortOid}? This overwrites the working-tree file and stages the restored content.`,
+          {
+            modal: true,
+          },
+          "Restore File",
+        );
+
+        if (confirmation !== "Restore File") {
+          return;
+        }
+
+        try {
+          await restoreFileFromCommit(workspaceHandle, selectedCommit.oid, filepath);
+          await refresh();
+
+          await vscode.window.showInformationMessage(`Restored "${filepath}" from ${shortOid}.`);
+        } catch (restoreError) {
+          console.error("[Dataverse IDE] Git file restore failed.", restoreError);
+
+          await vscode.window.showErrorMessage(
+            restoreError instanceof Error
+              ? `Unable to restore file: ${restoreError.message}`
+              : "Unable to restore file.",
+          );
         }
       } catch (error) {
         console.error("[Dataverse IDE] Git file history lookup failed.", error);
@@ -2839,17 +3037,20 @@ export async function installDataverseGitExtension(
 
       const relativePath = vscode.workspace.asRelativePath(uri, false);
 
+      const normalPath = relativePath.replaceAll("\\", "/");
+
+      const metadataDirectoryName = getGitMetadataDirectoryName();
+
       if (
         relativePath.length === 0 ||
         relativePath.startsWith("../") ||
         relativePath.startsWith("..\\") ||
-        relativePath.startsWith(".git/") ||
-        relativePath.replaceAll("\\", "/").includes("/.git/")
+        normalPath === metadataDirectoryName ||
+        normalPath.startsWith(`${metadataDirectoryName}/`) ||
+        normalPath.includes(`/${metadataDirectoryName}/`)
       ) {
         return undefined;
       }
-
-      const normalPath = relativePath.replaceAll("\\", "/");
 
       const headCommit = await getHeadCommit(workspaceHandle);
 
@@ -2952,6 +3153,11 @@ export async function installDataverseGitExtension(
   }
 
   const autoFetchConfigListener = vscode.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration("dataverseIde.git.metadataDirectoryName")) {
+      configureMetadataDirectory();
+      void refresh();
+    }
+
     if (event.affectsConfiguration("dataverseIde.git")) {
       restartAutoFetch();
     }
@@ -2960,6 +3166,13 @@ export async function installDataverseGitExtension(
   restartAutoFetch();
 
   await refresh();
+
+  const terminalCommandDisposables = registerGitTerminalCommands({
+    workspaceHandle,
+    credentialProvider,
+    refresh,
+    getCommitAuthor,
+  });
 
   installedController = {
     refresh,
@@ -2987,6 +3200,7 @@ export async function installDataverseGitExtension(
 
       initializeCommand.dispose();
       refreshCommand.dispose();
+      refreshPathsCommand.dispose();
       stageCommand.dispose();
       stageAllCommand.dispose();
       unstageCommand.dispose();
@@ -2999,6 +3213,7 @@ export async function installDataverseGitExtension(
       switchBranchCommand.dispose();
       deleteBranchCommand.dispose();
       showHistoryCommand.dispose();
+      resetToCommitCommand.dispose();
       cloneCommand.dispose();
       addRemoteCommand.dispose();
       removeRemoteCommand.dispose();
@@ -3006,6 +3221,10 @@ export async function installDataverseGitExtension(
       pullCommand.dispose();
       pushCommand.dispose();
       forgetCredentialsCommand.dispose();
+
+      for (const disposable of terminalCommandDisposables) {
+        disposable.dispose();
+      }
 
       sourceControl.dispose();
 

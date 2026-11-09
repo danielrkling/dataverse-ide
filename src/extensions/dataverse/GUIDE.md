@@ -63,6 +63,26 @@ The web resource name is `<prefix>/<path relative to uploadRoot>`. With the conf
 | `Dataverse: Publish Schema Tables`                    | Publishes every table declared in `dataverse.schema.json`; useful after a failed publish.                                   |
 | `Dataverse: Open dataverse.config.json`               | Creates the config on first use, then opens it.                                                                             |
 
+From the Dataverse shell:
+
+```sh
+dataverse                         # upload configured web resources
+dataverse upload dist/index.html  # upload specific files or folders
+dataverse upload-active
+dataverse preview dist/index.html
+dataverse watch
+dataverse stop
+dataverse identity
+dataverse config
+dataverse schema
+dataverse schema preview
+dataverse schema provision
+dataverse schema publish
+dataverse guide
+```
+
+Uploads print the resource count and exit non-zero when any file fails.
+
 ## Configuration
 
 `dataverse.config.json` lives at the workspace root. Point elsewhere with
@@ -134,6 +154,11 @@ creates only the missing components.
            },
            { "name": "budget", "type": "money", "precision": 2 },
            { "name": "dueDate", "type": "datetime", "format": "DateOnly" },
+           {
+             "name": "serialNumber",
+             "type": "string",
+             "autoNumberFormat": "PRJ-{SEQNUM:5}"
+           },
            { "name": "account", "type": "lookup", "target": "account" }
          ]
        }
@@ -167,7 +192,7 @@ Administrator.
 
 | `type`        | Notes                                                                                                         |
 | ------------- | ------------------------------------------------------------------------------------------------------------- |
-| `string`      | `maxLength` 1–4000 (default 200), `format` (default `Text`).                                                  |
+| `string`      | `maxLength` 1–4000 (default 200), `format` (default `Text`), optional `autoNumberFormat`.                     |
 | `memo`        | `maxLength` 1–1048576 (default 2000), `format` (default `TextArea`).                                          |
 | `integer`     | Optional `minValue` / `maxValue`.                                                                             |
 | `bigint`      | 64-bit integer.                                                                                               |
@@ -180,12 +205,50 @@ Administrator.
 | `lookup`      | Requires `target`; creates a one-to-many relationship and its lookup column.                                  |
 
 Common keys: `displayName`, `description`, `required`, `format`, `minValue`, `maxValue`,
-`precision`, `options`, `optionSetBase`, `target`, and `relationshipName`. `relationshipName`
-overrides the generated relationship schema name (for example `new_project_new_account`).
+`precision`, `options`, `optionSetBase`, `target`, `relationshipName`, and
+`autoNumberFormat`. `relationshipName` overrides the generated relationship schema name (for
+example `new_project_new_account`).
 
 `target` may be a table declared in the same file (short name, for example `project`) or
 an existing table logical name (for example `account`). Lookup columns assume the target's
 primary key is `<logicalname>id`.
+
+### Autonumber columns
+
+Dataverse autonumber columns are string columns with an `AutoNumberFormat`. Set
+`autoNumberFormat` on a `type: "string"` column, or on the table's `primaryName`:
+
+```json
+{
+  "name": "serialNumber",
+  "type": "string",
+  "maxLength": 100,
+  "autoNumberFormat": "PRJ-{SEQNUM:5}-{RANDSTRING:4}"
+}
+```
+
+Supported placeholders:
+
+| Placeholder            | Notes                                                                                      |
+| ---------------------- | ------------------------------------------------------------------------------------------ |
+| `{SEQNUM:n}`           | Required. Zero-padded sequential number; it keeps growing past `n` rather than truncating. |
+| `{RANDSTRING:n}`       | Optional. `n` must be between 1 and 6.                                                     |
+| `{DATETIMEUTC:format}` | Optional. Uses a .NET date/time format string, for example `yyyyMMddhhmmss`.               |
+
+Examples: `PRJ-{SEQNUM:5}`, `TKT-{SEQNUM:6}-{DATETIMEUTC:yyyyMM}`, `INV-{SEQNUM:4}-{RANDSTRING:3}`.
+
+Notes:
+
+- The column format must be `Text`. The provisioner rejects other formats when
+  `autoNumberFormat` is set.
+- Leave enough room in `maxLength` for the literal text plus realistic sequential values. The
+  default is 200.
+- Sequential values start at 1000 by default. The provisioner does not call
+  `SetAutoNumberSeed`; that setting is environment-specific and is not stored in a solution.
+  Set it separately if you need a different starting number.
+- An existing plain string column is **not** converted to an autonumber column. Delete it and
+  provision again if you want the autonumber behavior.
+- An autonumber primary name column is supported.
 
 ### What the plan shows
 
@@ -239,6 +302,8 @@ deletion is a separate, deliberate action.
 - Tables, columns and lookups only. Forms, views, charts, sitemaps, security roles, global
   choice sets and many-to-many relationships are not provisioned.
 - No update or delete path, by design.
+- Autonumber formats are created, but seed values (`SetAutoNumberSeed`) are not provisioned
+  because they are environment-specific.
 - Lookup creation assumes the target primary key is `<logicalname>id`.
 - The schema file uses short names plus one publisher prefix; multi-publisher schemas are
   not supported.

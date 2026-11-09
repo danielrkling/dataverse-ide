@@ -58,18 +58,44 @@ and `navigator.sendBeacon`.
 The blocking is a guardrail, not a security boundary: runtime code shares the extension-host
 worker globals. Treat `trusted` as "I wrote this code" rather than a sandbox.
 
+## Sync fs cache
+
+Synchronous `fs` calls (`readFileSync`, `statSync`, `existsSync`, `readdirSync`) are served
+from an in-memory cache. By default the cache is **lazy**: an uncached path throws a typed
+miss, the runtime reads just that path through `vscode.workspace.fs`, and the run retries.
+
+Set `dataverseIde.nodeRuntime.fsCache` to `eager` to preload workspace files before the run.
+This avoids repeated retry restarts for scripts that read many files. The eager scan:
+
+- skips `node_modules`, `.git`, `dist` and `.ide-build`
+- stops after 5000 paths or 64 MB of file contents
+- leaves anything beyond those caps lazy
+
+From the shell, `node --eager <file>` enables it for one run and `node --lazy <file>` forces
+the default. Writes still use the overlay and flush after the run.
+
 ## How it runs
 
 - The loader walks imports and `require()` calls and reads files through
-  `vscode.workspace.fs`. There is no workspace-wide virtual filesystem copy.
+  `vscode.workspace.fs`. By default there is no workspace-wide virtual filesystem copy;
+  eager mode preloads workspace files into the sync cache.
 - TypeScript, JSX and ESM sources are transpiled to CommonJS with esbuild-wasm.
 - Node built-ins come from almostnode's browser shims plus local fallbacks (`path`,
   `process`, `events`, `stream`, `http`, and an `fs` shim).
 - Static imports are prefetched. A dynamic `require()` or an uncached synchronous `fs` read
   throws a typed miss; the engine hydrates that path and retries. Retries re-execute module
   side effects, which are logged to the output channel.
+- Dynamic `import()` is lowered to `require()` by esbuild (dynamic-import is
+  marked unsupported), so literal dynamic imports are prefetched and missing
+  optional packages stay lazy. `new Function("module", "return import(module)")`
+  is bound to the module-local resolver through a `Function` shim.
+- The `stream` shim's `PassThrough` honors a user-assigned `_write` and emits
+  `end`; glob-based CLIs such as prettier rely on this.
 - `writeFileSync` and friends are recorded in an overlay and flushed to the workspace after
-  the run.
+  the run. Async `fs/promises` writes go straight through.
+- After a run, the engine notifies the Git extension of every written, deleted or renamed
+  path (`dataverseGit.refreshPaths`), so SCM status updates even though
+  `vscode.workspace.fs` does not fire `onDidSaveTextDocument`.
 - Each run starts with a fresh module graph.
 
 ## Recipes
@@ -102,18 +128,20 @@ use `Node: Run File with Permissions…` and pick that level for one run.
 
 ## Troubleshooting
 
-| Symptom                                                            | Cause and fix                                                                                                                                                |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `Cannot find module "…"`                                           | The package is not installed in the workspace. Install it with npm, then run again.                                                                          |
-| A file written by the script is missing                            | Writes are buffered and flushed after the run. Check the output channel for a flush error or a permission denial.                                            |
-| `EACCES` / permission error                                        | The selected level is `read-only` or the path is outside the workspace.                                                                                      |
-| `fetch is not defined` or a blocked request                        | Network access is disabled at `read-only`/`workspace`. Use `trusted` for same-origin requests.                                                               |
-| Script seems to run twice                                          | Dynamic requires and uncached sync reads retry after hydration, which re-executes module side effects. Log work from module top level is expected to repeat. |
-| `crypto.createHash`, `child_process` or native `.node` addons fail | These are stubs in the browser runtime.                                                                                                                      |
+| Symptom                                                            | Cause and fix                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Cannot find module "…"`                                           | The package is not installed in the workspace. Install it with npm, then run again.                                                                                                                                                                           |
+| A file written by the script is missing                            | Writes are buffered and flushed after the run. Check the output channel for a flush error or a permission denial.                                                                                                                                             |
+| `EACCES` / permission error                                        | The selected level is `read-only` or the path is outside the workspace.                                                                                                                                                                                       |
+| `fetch is not defined` or a blocked request                        | Network access is disabled at `read-only`/`workspace`. Use `trusted` for same-origin requests.                                                                                                                                                                |
+| Script seems to run twice                                          | Dynamic requires and uncached sync reads retry after hydration, which re-executes module side effects. Log work from module top level is expected to repeat. Use `dataverseIde.nodeRuntime.fsCache` = `eager` (or `node --eager`) to preload workspace files. |
+| `crypto.createHash`, `child_process` or native `.node` addons fail | These are stubs in the browser runtime.                                                                                                                                                                                                                       |
 
 ## Limits
 
 - No child processes, native addons, worker threads or real sockets.
 - `crypto.createHash`, `child_process` and `.node` binaries are stubs.
+- `v8` startup-snapshot probes and `readline` cursor helpers are stubs; `readline` has no
+  interactive input. Bundled CLIs that only use them for optional features still run.
 - Network blocking is best-effort; runtime code shares the extension-host worker globals.
 - Runs on the page/worker thread; long CPU-bound scripts block other work.

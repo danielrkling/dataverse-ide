@@ -13,8 +13,8 @@
  * (postinstall patches, worker pools, virtual wasm URLs) for esbuild builds.
  *
  * The Babel packages are loaded lazily on the first Solid build, the same way
- * the tagged-JSX transform loads TypeScript: builds that do not enable
- * "solid" never pay for the ~460 KB gzip Babel chunk.
+ * other optional compiler backends load their dependencies: builds that do not
+ * enable "solid" never pay for the ~460 KB gzip Babel chunk.
  */
 
 import type * as esbuild from "esbuild-wasm";
@@ -40,16 +40,6 @@ export type SolidPluginOptions = {
   version: SolidCompilerVersion;
   /** Reads workspace-relative text (vscode.workspace.fs backed in the IDE). */
   readText: (path: string) => Promise<string | undefined>;
-
-  /**
-   * Runs before the Solid compile. Used to compose the tagged-JSX transform
-   * (toJsx introduces JSX, toTagged removes it before Solid sees the file).
-   * Returning errors aborts the file load with attributed esbuild errors.
-   */
-  beforeTransform?: (
-    source: string,
-    path: string,
-  ) => Promise<{ code: string; errors?: string[] } | undefined>;
 
   sourcemap?: boolean;
   dev?: boolean;
@@ -325,23 +315,6 @@ export function createSolidEsbuildPlugin(options: SolidPluginOptions): esbuild.P
           if (source == null) {
             /* Let the workspace-fs plugin report the missing file. */
             return undefined;
-          }
-
-          if (options.beforeTransform != null) {
-            const prepared = await options.beforeTransform(source, path);
-
-            if (prepared != null) {
-              source = prepared.code;
-
-              if (prepared.errors != null && prepared.errors.length > 0) {
-                return {
-                  errors: prepared.errors.slice(0, 8).map((text) => ({
-                    text,
-                    location: { file: path, line: 1, column: 0 },
-                  })),
-                };
-              }
-            }
           }
 
           try {

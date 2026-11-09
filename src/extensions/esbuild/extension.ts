@@ -19,9 +19,13 @@ import {
   type EsbuildConfig,
 } from "./config.js";
 
+import { mergeEsbuildOverride, parseEsbuildCliArgs } from "./cli.js";
+
 import { EsbuildWatcher } from "./watcher.js";
 
 import { ensureWorkspaceDirectory } from "../../workspace/workspaceFs.js";
+
+import { registerTerminalCommand } from "../terminal/registry.js";
 
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
@@ -41,6 +45,12 @@ import type { ExtensionContext, IdeExtension } from "../api.js";
  */
 
 const CONFIG_SECTION = "dataverseIde.esbuild";
+
+type BuildRunOptions = {
+  silent?: boolean;
+  /** Per-run CLI overrides; never written back to esbuild.config.json. */
+  override?: Partial<EsbuildConfig>;
+};
 
 function getAutoStartWatchSetting(vscode: typeof vscodeType): boolean {
   return vscode.workspace
@@ -239,10 +249,6 @@ export default {
           title: "esbuild: Open esbuild.config.json",
         },
         {
-          command: "dataverseIde.esbuild.configureTaggedJsx",
-          title: "esbuild: Tagged JSX Transform…",
-        },
-        {
           command: "dataverseIde.esbuild.configureSolid",
           title: "esbuild: Solid Compiler…",
         },
@@ -360,7 +366,7 @@ export default {
     let pendingBuild:
       | {
           entry: string;
-          options?: { silent?: boolean };
+          options?: BuildRunOptions;
         }
       | undefined;
 
@@ -373,9 +379,7 @@ export default {
      */
     async function runBuild(
       requestedEntryPath: string,
-      options?: {
-        silent?: boolean;
-      },
+      options?: BuildRunOptions,
     ): Promise<boolean> {
       if (buildActive) {
         outputChannel.appendLine(`[esbuild] build queued: ${requestedEntryPath}`);
@@ -391,7 +395,7 @@ export default {
         let next:
           | {
               entry: string;
-              options?: { silent?: boolean };
+              options?: BuildRunOptions;
             }
           | undefined = { entry: requestedEntryPath, options };
 
@@ -411,9 +415,7 @@ export default {
 
     async function performBuild(
       requestedEntryPath: string,
-      options?: {
-        silent?: boolean;
-      },
+      options?: BuildRunOptions,
     ): Promise<boolean> {
       const started = performance.now();
 
@@ -424,6 +426,10 @@ export default {
 
         await reloadConfigFromDisk();
 
+        const config =
+          options?.override != null
+            ? mergeEsbuildOverride(currentConfig, options.override)
+            : currentConfig;
         const configMs = performance.now() - configStarted;
 
         lastStatus = "building";
@@ -456,38 +462,38 @@ export default {
 
         const response = await runner.build({
           entry: entryPath,
-          format: currentConfig.format,
-          platform: currentConfig.platform,
-          charset: currentConfig.charset,
-          globalName: currentConfig.globalName,
-          minify: currentConfig.minify,
-          sourcemap: currentConfig.sourcemap,
-          sourceRoot: currentConfig.sourceRoot,
-          sourcesContent: currentConfig.sourcesContent,
-          target: currentConfig.target,
-          treeShaking: currentConfig.treeShaking,
-          keepNames: currentConfig.keepNames,
-          legalComments: currentConfig.legalComments,
-          lineLimit: currentConfig.lineLimit,
-          drop: currentConfig.drop,
-          banner: currentConfig.banner,
-          footer: currentConfig.footer,
-          pure: currentConfig.pure,
-          jsx: currentConfig.jsx,
-          jsxFactory: currentConfig.jsxFactory,
-          jsxFragment: currentConfig.jsxFragment,
-          jsxImportSource: currentConfig.jsxImportSource,
-          jsxDev: currentConfig.jsxDev,
-          jsxSideEffects: currentConfig.jsxSideEffects,
-          bundle: currentConfig.bundle,
-          splitting: currentConfig.splitting,
-          external: currentConfig.external,
-          define: currentConfig.define,
-          entryNames: currentConfig.entryNames,
-          chunkNames: currentConfig.chunkNames,
-          outExtension: currentConfig.outExtension,
-          taggedJsx: currentConfig.taggedJsx,
-          solid: currentConfig.solid,
+          format: config.format,
+          platform: config.platform,
+          charset: config.charset,
+          globalName: config.globalName,
+          minify: config.minify,
+          sourcemap: config.sourcemap,
+          sourceRoot: config.sourceRoot,
+          sourcesContent: config.sourcesContent,
+          target: config.target,
+          treeShaking: config.treeShaking,
+          keepNames: config.keepNames,
+          legalComments: config.legalComments,
+          lineLimit: config.lineLimit,
+          drop: config.drop,
+          banner: config.banner,
+          footer: config.footer,
+          pure: config.pure,
+          jsx: config.jsx,
+          jsxFactory: config.jsxFactory,
+          jsxFragment: config.jsxFragment,
+          jsxImportSource: config.jsxImportSource,
+          jsxDev: config.jsxDev,
+          jsxSideEffects: config.jsxSideEffects,
+          bundle: config.bundle,
+          splitting: config.splitting,
+          external: config.external,
+          define: config.define,
+          loader: config.loader,
+          entryNames: config.entryNames,
+          chunkNames: config.chunkNames,
+          outExtension: config.outExtension,
+          solid: config.solid,
         });
 
         const compileMs = performance.now() - compileStarted;
@@ -533,7 +539,7 @@ export default {
         const writeResult = await writeOutputs(
           vscode,
           context.workspaceRootUri,
-          currentConfig.outdir,
+          config.outdir,
           response.outputs,
         );
 
@@ -783,48 +789,6 @@ export default {
       },
     );
 
-    const configureTaggedJsxCommand = vscode.commands.registerCommand(
-      "dataverseIde.esbuild.configureTaggedJsx",
-      async () => {
-        const modes: {
-          value: EsbuildConfig["taggedJsx"];
-          label: string;
-        }[] = [
-          {
-            value: "off",
-            label: "off — no conversion; build sources as written",
-          },
-          {
-            value: "toJsx",
-            label: "toJsx — tagged templates (html`…`) become JSX before build",
-          },
-          {
-            value: "toTagged",
-            label: "toTagged — JSX becomes tagged templates in build output",
-          },
-        ];
-
-        const picked = await vscode.window.showQuickPick(modes, {
-          title: "esbuild: Tagged JSX transform (@tagged-jsx/transform)",
-          placeHolder: `Current: ${currentConfig.taggedJsx}`,
-        });
-
-        if (picked == null || picked.value === currentConfig.taggedJsx) {
-          return;
-        }
-
-        const merged = await updateEsbuildConfig(vscode, context.workspaceRootUri, {
-          taggedJsx: picked.value,
-        });
-
-        currentConfig = merged;
-
-        await vscode.window.showInformationMessage(
-          `esbuild: taggedJsx set to "${picked.value}" in esbuild.config.json.`,
-        );
-      },
-    );
-
     const outputChannelCommand = vscode.commands.registerCommand(
       "dataverseIde.esbuild.showOutput",
       () => {
@@ -887,6 +851,128 @@ export default {
       },
     );
 
+    const ESBUILD_TERMINAL_HELP = `usage: esbuild [command] [entry...] [options]
+
+Commands:
+  esbuild [entry...]      build entries (defaults to esbuild.config.json)
+  esbuild build [entry...] same, with esbuild-style flags
+  esbuild workspace       pick a workspace entry point
+  esbuild watch           start watch mode
+  esbuild stop            stop watch mode
+  esbuild config          open esbuild.config.json
+  esbuild output          show the esbuild output channel
+  esbuild guide           open the esbuild guide
+
+Supported esbuild flags (https://esbuild.github.io/api/):
+  --bundle / --no-bundle        --minify / --no-minify
+  --sourcemap[=inline|external|both|linked]
+  --sources-content / --no-sources-content
+  --format=esm|iife|cjs         --platform=browser|node|neutral
+  --target=...                  --charset=ascii|utf8
+  --global-name=...             --legal-comments=...
+  --line-limit=N                --source-root=...
+  --tree-shaking / --no-tree-shaking
+  --keep-names                  --splitting / --no-splitting
+  --jsx=transform|preserve|automatic
+  --jsx-factory=...             --jsx-fragment=...
+  --jsx-import-source=...       --jsx-dev / --no-jsx-dev
+  --jsx-side-effects / --no-jsx-side-effects
+  --outfile=...                 --outdir=...
+  --entry-names=...             --chunk-names=...
+  --out-extension:.js=.mjs      --define:KEY=VALUE
+  --external:PACKAGE            --pure:EXPRESSION
+  --drop:console|debugger       --loader:.ext=LOADER
+  --banner:js=...               --banner:css=...
+  --footer:js=...               --footer:css=...
+`;
+
+    const terminalCommand = registerTerminalCommand({
+      name: "esbuild",
+      description: "Build workspace entries with esbuild.",
+      async execute(args) {
+        const [first] = args;
+
+        try {
+          if (first === "help" || first === "--help" || first === "-h") {
+            return { stdout: ESBUILD_TERMINAL_HELP, stderr: "", exitCode: 0 };
+          }
+
+          if (first === "watch" || first === "start") {
+            await setWatchEnabled(true);
+
+            return { stdout: "esbuild: watching.\n", stderr: "", exitCode: 0 };
+          }
+
+          if (first === "stop") {
+            await setWatchEnabled(false);
+
+            return { stdout: "esbuild: watch stopped.\n", stderr: "", exitCode: 0 };
+          }
+
+          if (first === "config") {
+            await vscode.commands.executeCommand("dataverseIde.esbuild.openConfig");
+
+            return { stdout: "", stderr: "", exitCode: 0 };
+          }
+
+          if (first === "guide") {
+            await vscode.commands.executeCommand("dataverseIde.esbuild.openGuide");
+
+            return { stdout: "", stderr: "", exitCode: 0 };
+          }
+
+          if (first === "output") {
+            await vscode.commands.executeCommand("dataverseIde.esbuild.showOutput");
+
+            return { stdout: "", stderr: "", exitCode: 0 };
+          }
+
+          if (first === "workspace") {
+            await vscode.commands.executeCommand("dataverseIde.esbuild.buildWorkspace");
+
+            return { stdout: "", stderr: "", exitCode: 0 };
+          }
+
+          const buildArgs = first === "build" ? args.slice(1) : args;
+          const parsed = parseEsbuildCliArgs(buildArgs);
+
+          if (parsed.error != null) {
+            return { stdout: "", stderr: `esbuild: ${parsed.error}\n`, exitCode: 2 };
+          }
+
+          if (parsed.help) {
+            return { stdout: ESBUILD_TERMINAL_HELP, stderr: "", exitCode: 0 };
+          }
+
+          const { config } = await readEsbuildConfig(vscode, context.workspaceRootUri);
+          const entries = parsed.entries.length > 0 ? parsed.entries : [config.entryPoints[0]];
+
+          let stdout = "";
+          let stderr = "";
+          let exitCode = 0;
+
+          for (const entry of entries) {
+            const success = await runBuild(entry, { override: parsed.override });
+
+            if (success) {
+              stdout += `Built ${entry}.\n`;
+            } else {
+              stderr += `esbuild: build failed for ${entry} (see the esbuild output channel)\n`;
+              exitCode = 1;
+            }
+          }
+
+          return { stdout, stderr, exitCode };
+        } catch (error) {
+          return {
+            stdout: "",
+            stderr: `esbuild: ${error instanceof Error ? error.message : String(error)}\n`,
+            exitCode: 1,
+          };
+        }
+      },
+    });
+
     outputChannel.appendLine("[esbuild] commands registered.");
 
     return {
@@ -906,10 +992,10 @@ export default {
         toggleWatchCommand.dispose();
 
         openConfigCommand.dispose();
-        configureTaggedJsxCommand.dispose();
         configureSolidCommand.dispose();
         outputChannelCommand.dispose();
         reloadConfigCommand.dispose();
+        terminalCommand.dispose();
 
         guideRegistration.dispose();
 

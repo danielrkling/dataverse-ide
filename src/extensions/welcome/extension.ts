@@ -226,7 +226,7 @@ const SECTIONS: WelcomeSection[] = [
       {
         title: "esbuild, Solid & JSX",
         description:
-          "Bundle TypeScript, TSX and JSX with esbuild-wasm. Resolve npm imports from the workspace, compile Solid v1/v2 with Babel, and optionally run the Tagged JSX transform before bundling.",
+          "Bundle TypeScript, TSX and JSX with esbuild-wasm. Resolve npm imports from the workspace, compile Solid v1/v2 with Babel before bundling.",
         icon: "zap",
         guide: "dataverseIde.esbuild.openGuide",
         actions: [
@@ -397,20 +397,6 @@ const SECTIONS: WelcomeSection[] = [
           {
             label: "Flatten Configured",
             command: "dataverseIde.flatten.configured",
-          },
-        ],
-      },
-      {
-        title: "Scripts",
-        description:
-          "Run command chains from a dataverseIde.scripts.scripts setting: steps run in series, arrays run in parallel, and failures can abort or continue per script.",
-        icon: "run-all",
-        guide: "dataverseIde.scripts.openGuide",
-        actions: [
-          {
-            label: "Run Script…",
-            command: "dataverseIde.scripts.run",
-            primary: true,
           },
         ],
       },

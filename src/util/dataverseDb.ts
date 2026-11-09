@@ -6,6 +6,7 @@ import { deleteDB, openDB, type Db } from "./db.js";
  * - `workspaces`      — recent workspace records and folder handles
  * - `vsix`            — installed VSIX archives
  * - `terminalHistory` — shell command history, keyed by workspace URI
+ * - `chats`           — AI chat sessions, keyed by chat id
  *
  * Earlier builds used one database per feature (`dataverse-ide-recents` and
  * `dataverse-ide-vsix`). They are copied into this database and then removed
@@ -13,11 +14,12 @@ import { deleteDB, openDB, type Db } from "./db.js";
  */
 
 const DB_NAME = "dataverse-ide";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export const WORKSPACE_STORE = "workspaces";
 export const VSIX_STORE = "vsix";
 export const TERMINAL_HISTORY_STORE = "terminalHistory";
+export const CHAT_STORE = "chats";
 
 type LegacyDatabase = {
   name: string;
@@ -49,6 +51,7 @@ async function openDataverseDB(): Promise<Db> {
     WORKSPACE_STORE,
     VSIX_STORE,
     TERMINAL_HISTORY_STORE,
+    CHAT_STORE,
   ]);
 
   for (const legacy of LEGACY_DATABASES) {

@@ -26,6 +26,9 @@ other workspace tool. No Node process or virtual filesystem is involved.
 
 For an existing `package.json`, run `npm: Install All Dependencies (package.json)`.
 
+The `Scripts` section lists the scripts in `package.json`. Press the play button on a script
+to run `npm run <name>` in a new Dataverse shell.
+
 ## Commands
 
 | Command                                        | What it does                                                       |
@@ -36,6 +39,7 @@ For an existing `package.json`, run `npm: Install All Dependencies (package.json
 | `npm: Add Dev Dependency…`                     | Prompt for a spec and save it under `devDependencies`.             |
 | `npm: Install Specific Dependency Version…`    | Pick a published version for an existing dependency.               |
 | `npm: Uninstall Dependency`                    | Remove a package from `package.json` and `node_modules`.           |
+| `npm: Run Script`                              | Run a `package.json` script in the terminal.                       |
 | `npm: Open Dependency Registry Page`           | Open the package page on npmjs.com.                                |
 | `npm: Refresh Package Tree`                    | Re-read `package.json`.                                            |
 | `npm: List Installed Packages`                 | Show installed top-level packages.                                 |
@@ -92,8 +96,10 @@ Run `npm: Check Outdated Dependencies` to see drift, then
 
 - Registry is fixed to `https://registry.npmjs.org`; private registries and auth are not
   configurable.
-- No lifecycle scripts (`preinstall`, `postinstall`, build scripts) and no `npm run`.
-  Use the Scripts extension for command chains.
+- No lifecycle scripts (`preinstall`, `postinstall`, build scripts) during install. Use the
+  terminal — or the play button in the `Scripts` section — for `npm run` scripts.
+- `node_modules/.bin` shims are not generated. Use `npx <tool>` in the terminal to run a
+  package binary; `npx` installs it on demand without saving it to `package.json`.
 - No `package-lock.json` generation at the workspace root; resolved versions live in
   `node_modules/.package-lock.json`.
 - Packages are installed into the workspace (or its `node_modules` OPFS overlay), not into a

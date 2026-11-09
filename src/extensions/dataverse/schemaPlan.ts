@@ -92,13 +92,18 @@ function columnItem(
   action: SchemaPlanAction,
   reason: string,
 ): SchemaPlanItem {
+  const autoNumber =
+    action === "create" && column.autoNumberFormat != null
+      ? `; autonumber ${column.autoNumberFormat}`
+      : "";
+
   return {
     kind: columnKind(column),
     action,
     table: table.logicalName,
     column: column.logicalName,
     label: column.displayName,
-    reason,
+    reason: `${reason}${autoNumber}`,
   };
 }
 
@@ -151,7 +156,10 @@ export async function buildSchemaPlan(
         table: table.logicalName,
         column: table.primaryName.logicalName,
         label: table.primaryName.displayName,
-        reason: "primary name column, created with the table",
+        reason:
+          table.primaryName.autoNumberFormat == null
+            ? "primary name column, created with the table"
+            : `primary name column, created with the table; autonumber ${table.primaryName.autoNumberFormat}`,
       });
 
       for (const column of table.columns) {

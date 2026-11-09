@@ -508,6 +508,201 @@ function createConsoleModule(runtimeConsole: Console): Record<string, unknown> {
 export function createBuiltins(options: BuiltinOptions): Builtins {
   const runtimeConsole = createConsole(options.onConsole);
 
+  /*
+   * almostnode's path.resolve() reads globalThis.process.cwd(). In the
+   * browser that may be undefined or a bundler polyfill, and in test hosts it
+   * is the real Node process — neither matches the runtime cwd. Bind resolve
+   * to the runtime process so `cd src && node script.js` resolves relative
+   * paths correctly and package config lookups stay inside the workspace.
+   */
+  function createPathShim(): typeof pathShim {
+    const resolve = (...parts: string[]): string => {
+      let resolved = "";
+
+      for (let index = parts.length - 1; index >= 0 && !resolved.startsWith("/"); index -= 1) {
+        const part = parts[index];
+
+        if (!part) {
+          continue;
+        }
+
+        resolved = part + (resolved ? `/${resolved}` : "");
+      }
+
+      if (!resolved.startsWith("/")) {
+        const cwd = options.process.cwd();
+
+        resolved = `${cwd}${resolved ? `/${resolved}` : ""}`;
+      }
+
+      return pathShim.normalize(resolved);
+    };
+
+    return {
+      ...pathShim,
+      resolve,
+      posix: { ...pathShim.posix, resolve },
+      win32: { ...pathShim.win32, resolve },
+      default: { ...pathShim.default, resolve },
+    } as typeof pathShim;
+  }
+
+  const pathModule = createPathShim();
+
+  /*
+   * almostnode's PassThrough ignores a user-assigned `_write` and never emits
+   * `end`. fast-glob (used by prettier's CLI) builds a PassThrough, assigns
+   * `_write`, then waits for `end`; without this subclass the promise never
+   * settles and the command hangs.
+   */
+  class DataversePassThrough extends streamShim.PassThrough {
+    _write?: (chunk: unknown, encoding: unknown, callback: (error?: Error | null) => void) => void;
+
+    override write(chunk: unknown, encodingOrCallback?: unknown, callback?: unknown): boolean {
+      if (typeof this._write !== "function") {
+        return (super.write as unknown as (...args: unknown[]) => boolean)(
+          chunk,
+          encodingOrCallback,
+          callback,
+        );
+      }
+
+      const cb = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+      const done = (error?: Error | null): void => {
+        if (typeof cb === "function") {
+          cb(error ?? null);
+        }
+      };
+
+      this._write(chunk, encodingOrCallback, done);
+
+      return true;
+    }
+
+    override push(chunk: unknown, encoding?: unknown): boolean {
+      if (typeof this._write !== "function") {
+        return (super.push as unknown as (value: unknown) => boolean)(chunk);
+      }
+
+      if (chunk != null) {
+        this.emit("data", chunk);
+      }
+
+      return true;
+    }
+
+    override end(
+      chunkOrCallback?: unknown,
+      encodingOrCallback?: unknown,
+      callback?: unknown,
+    ): this {
+      if (typeof this._write !== "function") {
+        return (super.end as unknown as (...args: unknown[]) => this)(
+          chunkOrCallback,
+          encodingOrCallback,
+          callback,
+        );
+      }
+
+      if (typeof chunkOrCallback === "function") {
+        chunkOrCallback();
+      } else if (chunkOrCallback !== undefined) {
+        this.push(chunkOrCallback);
+      }
+
+      this.emit("end");
+
+      return this;
+    }
+  }
+
+  const streamModule = {
+    ...streamShim,
+    PassThrough: DataversePassThrough,
+    default: {
+      ...streamShim.default,
+      PassThrough: DataversePassThrough,
+    },
+  };
+
+  const v8Shim = {
+    startupSnapshot: {
+      isBuildingSnapshot: () => false,
+    },
+    serialize: (value: unknown) => new TextEncoder().encode(JSON.stringify(value)),
+    deserialize: (value: Uint8Array) => JSON.parse(new TextDecoder().decode(value)) as unknown,
+    cachedDataVersionTag: () => 0,
+    getHeapStatistics: () => ({
+      total_heap_size: 0,
+      total_heap_size_executable: 0,
+      total_physical_size: 0,
+      total_available_size: 0,
+      used_heap_size: 0,
+      heap_size_limit: 0,
+      malloced_memory: 0,
+      peak_malloced_memory: 0,
+      does_zap_garbage: 0,
+      number_of_native_contexts: 0,
+      number_of_detached_contexts: 0,
+    }),
+    getHeapSpaceStatistics: () => [],
+    setFlagsFromString: () => {},
+  };
+
+  /*
+   * Bundled CLIs import readline for TTY status output. The shell has no
+   * real TTY, so cursor helpers are no-ops and question() completes with an
+   * empty answer instead of hanging.
+   */
+  const readlineShim = {
+    createInterface: () => {
+      const listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+
+      const interfaceShim = {
+        question: (_query: string, callback: (answer: string) => void) => callback(""),
+        close: () => {},
+        pause: () => {},
+        resume: () => {},
+        prompt: () => {},
+        setPrompt: () => {},
+        on(event: string, listener: (...args: unknown[]) => void) {
+          const entries = listeners.get(event) ?? [];
+
+          entries.push(listener);
+          listeners.set(event, entries);
+
+          return interfaceShim;
+        },
+        once(event: string, listener: (...args: unknown[]) => void) {
+          return interfaceShim.on(event, listener);
+        },
+        off(event: string, listener: (...args: unknown[]) => void) {
+          const entries = listeners.get(event) ?? [];
+
+          listeners.set(
+            event,
+            entries.filter((entry) => entry !== listener),
+          );
+
+          return interfaceShim;
+        },
+        removeListener(event: string, listener: (...args: unknown[]) => void) {
+          return interfaceShim.off(event, listener);
+        },
+        async *[Symbol.asyncIterator]() {
+          /* No stdin in the browser terminal. */
+        },
+      };
+
+      return interfaceShim;
+    },
+    emitKeypressEvents: () => {},
+    cursorTo: () => {},
+    moveCursor: () => {},
+    clearLine: () => {},
+    clearScreenDown: () => {},
+  };
+
   const moduleBuiltin = {
     ...moduleShim,
     createRequire: (filenameOrUrl: string) => {
@@ -530,12 +725,12 @@ export function createBuiltins(options: BuiltinOptions): Builtins {
   const modules: Record<string, unknown> = {
     fs: options.fs,
     "fs/promises": options.fsPromises,
-    path: pathShim,
-    "path/posix": pathShim,
-    "path/win32": pathShim.win32,
+    path: pathModule,
+    "path/posix": pathModule.posix,
+    "path/win32": pathModule.win32,
     process: options.process,
     events: eventsShim,
-    stream: streamShim,
+    stream: streamModule,
     "stream/promises": streamShim.promises,
     buffer: { ...bufferShim, default: bufferShim },
     url: urlShim,
@@ -578,6 +773,9 @@ export function createBuiltins(options: BuiltinOptions): Builtins {
     dgram: createDgramShim(),
     http2: createHttp2Shim(),
     vm: createVmShim(),
+    readline: readlineShim,
+    "readline/promises": readlineShim,
+    v8: v8Shim,
     chokidar: chokidarShim,
     ws: wsShim,
     fsevents: fseventsShim,

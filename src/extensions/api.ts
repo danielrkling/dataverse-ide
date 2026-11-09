@@ -192,6 +192,13 @@ export type KeybindingContribution = {
   when?: string;
 };
 
+export type LanguageModelChatProviderContribution = {
+  vendor: string;
+  displayName: string;
+  configuration?: unknown;
+  when?: string;
+};
+
 export async function contributeExtensionManifest(input: {
   id: string;
   displayName: string;
@@ -206,6 +213,7 @@ export async function contributeExtensionManifest(input: {
   configuration?: ConfigurationContribution;
   menus?: MenuContribution[];
   submenus?: SubmenuContribution[];
+  languageModelChatProviders?: LanguageModelChatProviderContribution[];
 }): Promise<void> {
   const contributes: Record<string, unknown> = {
     commands: input.commands,
@@ -248,6 +256,10 @@ export async function contributeExtensionManifest(input: {
 
   if (input.submenus != null && input.submenus.length > 0) {
     contributes.submenus = input.submenus;
+  }
+
+  if (input.languageModelChatProviders != null && input.languageModelChatProviders.length > 0) {
+    contributes.languageModelChatProviders = input.languageModelChatProviders;
   }
 
   if (input.views != null) {

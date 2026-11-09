@@ -47,8 +47,8 @@ The **Extensions** view lists the in-house extensions. Each one has:
 - an output channel named `Dataverse IDE: <id>` under **Output**.
 
 Configuration files such as `dataverse.config.json`, `esbuild.config.json`,
-`html.config.json`, `tailwind.config.json` and `dataverseIde.scripts.scripts` are validated
-with JSON Schema, so the editor completes keys and shows descriptions.
+`html.config.json` and `tailwind.config.json` are validated with JSON Schema, so the editor
+completes keys and shows descriptions.
 
 To diagnose an extension, open its output channel first; most actions log there even when
 they fail silently in the UI.
