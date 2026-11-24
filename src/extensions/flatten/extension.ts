@@ -2,10 +2,9 @@ import type * as vscodeType from "vscode";
 
 import { contributeExtensionManifest } from "../api.js";
 
-import guideContent from "./GUIDE.md?raw";
 import { createGlobMatcher, globBaseSegments, globStartsInside, isGlobPattern } from "./glob.js";
 
-import { registerGuide } from "../shared/guide.js";
+import { ensureWorkspaceDirectory } from "../../workspace/workspaceFs.js";
 
 import { registerFlattenTerminalCommands } from "./terminal.js";
 
@@ -26,7 +25,15 @@ const COMMAND_FLATTEN_CONFIGURED = "dataverseIde.flatten.configured";
 const CONFIG_SECTION = "dataverseIde.flatten";
 const SETTING_NAME = "name";
 const SETTING_INCLUDE = "include";
+const SETTING_EXCLUDE = "exclude";
+const SETTING_MAX_FILE_BYTES = "maxFileBytes";
+const SETTING_OUTPUT_DIRECTORY = "outputDirectory";
+const SETTING_INCLUDE_HIDDEN = "includeHidden";
+const SETTING_HEADER = "header";
+const SETTING_LINE_NUMBERS = "lineNumbers";
+const SETTING_MANIFEST = "manifest";
 const DEFAULT_CONFIGURED_NAME = "flatten";
+const DEFAULT_MAX_FILE_BYTES = 400_000;
 
 /*
  * Output files are written to the workspace root as
@@ -130,6 +137,121 @@ function workspaceRelativePath(
 }
 
 /*
+ * Settings shared by both flatten commands. `exclude` is compiled to
+ * matchers up front so traversal never re-parses the same patterns for
+ * every file.
+ */
+type FlattenSettings = {
+  exclude: Array<(path: string) => boolean>;
+  maxFileBytes: number;
+  outputSegments: string[];
+  includeHidden: boolean;
+  header: boolean;
+  lineNumbers: boolean;
+  manifest: boolean;
+};
+
+function normalizedPattern(value: string): string {
+  return value
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/^\.?\//, "")
+    .replace(/\/+$/, "");
+}
+
+function stringEntries(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+/*
+ * The configured output folder is a workspace-relative path. `.` and `..`
+ * segments are dropped so a bundle can never be written outside the
+ * workspace, and characters that are awkward in browser or Windows file
+ * systems are replaced with `-`.
+ */
+function outputDirectorySegments(value: string | undefined): string[] {
+  return (value ?? "")
+    .trim()
+    .replaceAll("\\", "/")
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter((segment) => segment !== "" && segment !== "." && segment !== "..")
+    .map((segment) => segment.replace(/[<>:"|?*~]+/g, "-").replace(/[.\s]+$/g, ""))
+    .filter((segment) => segment !== "");
+}
+
+function readFlattenSettings(
+  vscode: typeof vscodeType,
+  workspaceRootUri: vscodeType.Uri,
+): FlattenSettings {
+  const config = vscode.workspace.getConfiguration(CONFIG_SECTION, workspaceRootUri);
+
+  const exclude = stringEntries(config.get<unknown>(SETTING_EXCLUDE, []))
+    .map(normalizedPattern)
+    .filter((pattern) => pattern !== "")
+    .map((pattern) => createGlobMatcher(pattern));
+
+  const rawMaxFileBytes = config.get<number>(SETTING_MAX_FILE_BYTES, DEFAULT_MAX_FILE_BYTES);
+  const maxFileBytes =
+    typeof rawMaxFileBytes === "number" && Number.isFinite(rawMaxFileBytes) && rawMaxFileBytes >= 0
+      ? Math.floor(rawMaxFileBytes)
+      : DEFAULT_MAX_FILE_BYTES;
+
+  return {
+    exclude,
+    maxFileBytes,
+    outputSegments: outputDirectorySegments(config.get<string>(SETTING_OUTPUT_DIRECTORY, "")),
+    includeHidden: config.get<boolean>(SETTING_INCLUDE_HIDDEN, true),
+    header: config.get<boolean>(SETTING_HEADER, true),
+    lineNumbers: config.get<boolean>(SETTING_LINE_NUMBERS, false),
+    manifest: config.get<boolean>(SETTING_MANIFEST, false),
+  };
+}
+
+function outputDirectoryUri(
+  vscode: typeof vscodeType,
+  workspaceRootUri: vscodeType.Uri,
+  settings: FlattenSettings,
+): vscodeType.Uri {
+  return settings.outputSegments.length > 0
+    ? vscode.Uri.joinPath(workspaceRootUri, ...settings.outputSegments)
+    : workspaceRootUri;
+}
+
+function isHiddenName(name: string): boolean {
+  return name.startsWith(".");
+}
+
+function isExcludedFile(
+  vscode: typeof vscodeType,
+  workspaceRootUri: vscodeType.Uri,
+  settings: FlattenSettings,
+  uri: vscodeType.Uri,
+): boolean {
+  if (settings.exclude.length === 0) {
+    return false;
+  }
+
+  const relativePath = workspaceRelativePath(vscode, workspaceRootUri, uri);
+
+  return settings.exclude.some((matches) => matches(relativePath));
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} bytes`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/*
  * Walk a selected folder through the file system provider directly.
  *
  * vscode.workspace.findFiles() is backed by the workbench search service in
@@ -139,7 +261,9 @@ function workspaceRelativePath(
  */
 async function collectDirectoryFiles(
   vscode: typeof vscodeType,
+  workspaceRootUri: vscodeType.Uri,
   directory: vscodeType.Uri,
+  settings: FlattenSettings,
   outputChannel: vscodeType.OutputChannel,
 ): Promise<vscodeType.Uri[]> {
   const files: vscodeType.Uri[] = [];
@@ -165,14 +289,22 @@ async function collectDirectoryFiles(
       const child = vscode.Uri.joinPath(current, name);
 
       if ((type & vscode.FileType.Directory) !== 0) {
-        if (!EXCLUDED_DIRECTORY_NAMES.has(name.toLowerCase())) {
+        if (
+          !EXCLUDED_DIRECTORY_NAMES.has(name.toLowerCase()) &&
+          (settings.includeHidden || !isHiddenName(name))
+        ) {
           pending.push(child);
         }
 
         continue;
       }
 
-      if ((type & vscode.FileType.File) === 0 || isGeneratedFlattenFile(child)) {
+      if (
+        (type & vscode.FileType.File) === 0 ||
+        isGeneratedFlattenFile(child) ||
+        (!settings.includeHidden && isHiddenName(name)) ||
+        isExcludedFile(vscode, workspaceRootUri, settings, child)
+      ) {
         continue;
       }
 
@@ -203,6 +335,7 @@ async function collectGlobFiles(
   workspaceRootUri: vscodeType.Uri,
   pattern: string,
   baseUri: vscodeType.Uri,
+  settings: FlattenSettings,
   outputChannel: vscodeType.OutputChannel,
 ): Promise<vscodeType.Uri[]> {
   const matches = createGlobMatcher(pattern);
@@ -244,14 +377,22 @@ async function collectGlobFiles(
       const child = vscode.Uri.joinPath(current, name);
 
       if ((type & vscode.FileType.Directory) !== 0) {
-        if (insideExcludedTree || !EXCLUDED_DIRECTORY_NAMES.has(name.toLowerCase())) {
+        if (
+          (insideExcludedTree || !EXCLUDED_DIRECTORY_NAMES.has(name.toLowerCase())) &&
+          (settings.includeHidden || !isHiddenName(name))
+        ) {
           pending.push(child);
         }
 
         continue;
       }
 
-      if ((type & vscode.FileType.File) === 0 || isGeneratedFlattenFile(child)) {
+      if (
+        (type & vscode.FileType.File) === 0 ||
+        isGeneratedFlattenFile(child) ||
+        (!settings.includeHidden && isHiddenName(name)) ||
+        isExcludedFile(vscode, workspaceRootUri, settings, child)
+      ) {
         continue;
       }
 
@@ -409,12 +550,12 @@ function selectionSlug(
 
 async function nextBundleNumber(
   vscode: typeof vscodeType,
-  workspaceRoot: vscodeType.Uri,
+  outputDirectory: vscodeType.Uri,
 ): Promise<number> {
   let entries: Array<[string, vscodeType.FileType]>;
 
   try {
-    entries = await vscode.workspace.fs.readDirectory(workspaceRoot);
+    entries = await vscode.workspace.fs.readDirectory(outputDirectory);
   } catch {
     return 1;
   }
@@ -434,13 +575,22 @@ async function nextBundleNumber(
 
 async function outputFileName(
   vscode: typeof vscodeType,
-  workspaceRoot: vscodeType.Uri,
+  outputDirectory: vscodeType.Uri,
   selections: Array<{ path: string; isDirectory: boolean }>,
 ): Promise<string> {
   const slug = selectionSlug(selections);
-  const number = await nextBundleNumber(vscode, workspaceRoot);
+  const number = await nextBundleNumber(vscode, outputDirectory);
 
   return `#${slug != null ? `${slug}#` : ""}${number}.md`;
+}
+
+function withLineNumbers(content: string): string {
+  const lines = content.split(/\r\n|\r|\n/);
+  const width = String(lines.length).length;
+
+  return lines
+    .map((line, index) => `${String(index + 1).padStart(width, " ")} | ${line}`)
+    .join("\n");
 }
 
 function fencedBlock(language: string, content: string): string {
@@ -458,6 +608,14 @@ function fencedBlock(language: string, content: string): string {
 
 type FlattenSelection = { path: string; isDirectory: boolean };
 
+/* One bundled file: the rendered section plus what the manifest needs. */
+type FlattenFile = {
+  path: string;
+  section: string;
+  lines: number;
+  bytes: number;
+};
+
 /*
  * A configured include is either a concrete path or a glob rooted at its
  * literal prefix. Selected-file invocations only ever use `path`.
@@ -467,7 +625,7 @@ type FlattenSource =
   | { kind: "glob"; pattern: string; baseUri: vscodeType.Uri };
 
 type FlattenResult = {
-  sections: string[];
+  files: FlattenFile[];
   selections: FlattenSelection[];
   included: number;
   skipped: number;
@@ -482,29 +640,30 @@ async function collectSections(
   vscode: typeof vscodeType,
   workspaceRootUri: vscodeType.Uri,
   sources: FlattenSource[],
+  settings: FlattenSettings,
   outputChannel: vscodeType.OutputChannel,
 ): Promise<FlattenResult> {
-  const sections: string[] = [];
+  const files: FlattenFile[] = [];
   const selections: FlattenSelection[] = [];
   const seenFiles = new Set<string>();
   let included = 0;
   let skipped = 0;
 
-  const addFiles = async (files: vscodeType.Uri[]): Promise<void> => {
-    for (const file of files) {
+  const addFiles = async (uris: vscodeType.Uri[]): Promise<void> => {
+    for (const uri of uris) {
       /*
        * A file can appear twice when the user selects a folder and one of its
        * descendants, when a glob overlaps another include, or when the same
        * resource is forwarded twice.
        */
-      if (!seenFiles.add(file.toString())) {
+      if (!seenFiles.add(uri.toString())) {
         continue;
       }
 
-      const section = await readSection(vscode, workspaceRootUri, file);
+      const file = await readSection(vscode, workspaceRootUri, uri, settings);
 
-      if (section != null) {
-        sections.push(section);
+      if (file != null) {
+        files.push(file);
         included++;
       } else {
         skipped++;
@@ -514,15 +673,16 @@ async function collectSections(
 
   for (const source of sources) {
     if (source.kind === "glob") {
-      const files = await collectGlobFiles(
+      const uris = await collectGlobFiles(
         vscode,
         workspaceRootUri,
         source.pattern,
         source.baseUri,
+        settings,
         outputChannel,
       );
 
-      await addFiles(files);
+      await addFiles(uris);
       continue;
     }
 
@@ -542,39 +702,79 @@ async function collectSections(
     const isDirectory = (stat.type & vscode.FileType.Directory) !== 0;
     selections.push({ path: relativePath, isDirectory });
 
-    await addFiles(isDirectory ? await collectDirectoryFiles(vscode, uri, outputChannel) : [uri]);
+    await addFiles(
+      isDirectory
+        ? await collectDirectoryFiles(vscode, workspaceRootUri, uri, settings, outputChannel)
+        : [uri],
+    );
   }
 
-  return { sections, selections, included, skipped };
+  return { files, selections, included, skipped };
 }
 
-function bundleMarkdown(result: FlattenResult): string {
-  const header =
-    `# Flattened workspace files\n\n` +
-    `Generated ${new Date().toISOString()} — ` +
-    `${result.included} file(s)` +
-    (result.skipped > 0 ? `, ${result.skipped} skipped (binary or unreadable)` : "") +
-    `\n`;
+function bundleMarkdown(result: FlattenResult, settings: FlattenSettings): string {
+  const parts: string[] = [];
 
-  return `${header}\n${result.sections.join("\n\n")}\n`;
+  if (settings.header) {
+    parts.push(
+      `# Flattened workspace files\n\n` +
+        `Generated ${new Date().toISOString()} — ` +
+        `${result.included} file(s)` +
+        (result.skipped > 0 ? `, ${result.skipped} skipped (binary or unreadable)` : ""),
+    );
+  }
+
+  if (settings.manifest && result.files.length > 0) {
+    const entries = result.files.map((file) => {
+      const details: string[] = [];
+
+      if (file.lines > 0) {
+        details.push(`${file.lines} line${file.lines === 1 ? "" : "s"}`);
+      }
+
+      if (file.bytes > 0) {
+        details.push(formatBytes(file.bytes));
+      }
+
+      return `- ${file.path}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
+    });
+
+    parts.push(`## Files\n\n${entries.join("\n")}`);
+  }
+
+  for (const file of result.files) {
+    parts.push(file.section);
+  }
+
+  return `${parts.join("\n\n")}\n`;
 }
 
 async function writeBundle(
   vscode: typeof vscodeType,
-  workspaceRootUri: vscodeType.Uri,
+  outputDirectory: vscodeType.Uri,
+  outputSegments: string[],
   fileName: string,
   result: FlattenResult,
+  settings: FlattenSettings,
   outputChannel: vscodeType.OutputChannel,
 ): Promise<string> {
-  const outFile = vscode.Uri.joinPath(workspaceRootUri, fileName);
+  if (outputSegments.length > 0) {
+    await ensureWorkspaceDirectory(vscode, outputDirectory);
+  }
 
-  await vscode.workspace.fs.writeFile(outFile, new TextEncoder().encode(bundleMarkdown(result)));
+  const outFile = vscode.Uri.joinPath(outputDirectory, fileName);
+  const relativePath = [...outputSegments, fileName].join("/");
 
-  outputChannel.appendLine(`[flatten] wrote ${result.included} file(s) to ${fileName}.`);
+  await vscode.workspace.fs.writeFile(
+    outFile,
+    new TextEncoder().encode(bundleMarkdown(result, settings)),
+  );
+
+  outputChannel.appendLine(`[flatten] wrote ${result.included} file(s) to ${relativePath}.`);
 
   await vscode.window.showTextDocument(outFile);
 
-  return fileName;
+  return relativePath;
 }
 
 /*
@@ -611,11 +811,7 @@ async function resolveConfiguredIncludes(
   };
 
   for (const include of includes) {
-    const normalized = include
-      .trim()
-      .replaceAll("\\", "/")
-      .replace(/^\.?\//, "")
-      .replace(/\/+$/, "");
+    const normalized = normalizedPattern(include);
 
     const segments = normalized.split("/").filter(Boolean);
 
@@ -673,12 +869,6 @@ export default {
   async activate(context: ExtensionContext): Promise<vscodeType.Disposable | void> {
     const { vscode, outputChannel } = context;
 
-    const guideRegistration = registerGuide({
-      vscode,
-      extensionId: "flatten",
-      content: guideContent,
-    });
-
     await contributeExtensionManifest({
       id: "flatten",
       displayName: "Dataverse IDE Flatten",
@@ -692,10 +882,6 @@ export default {
           command: COMMAND_FLATTEN_CONFIGURED,
           title: "Flatten: Combine Configured Files into Markdown",
         },
-        {
-          command: "dataverseIde.flatten.openGuide",
-          title: "Flatten: How-to Guide",
-        },
       ],
       configuration: {
         title: "Dataverse IDE Flatten",
@@ -706,7 +892,8 @@ export default {
             scope: "window",
             markdownDescription:
               "Output file name used by `Flatten: Combine Configured Files into Markdown`. " +
-              "`.md` is appended when omitted. The bundle is written to the workspace root " +
+              "`.md` is appended when omitted. The bundle is written to " +
+              "`dataverseIde.flatten.outputDirectory` (the workspace root by default) " +
               "and replaced on each run.",
           },
 
@@ -722,6 +909,76 @@ export default {
               "a glob starts inside them. Globs use picomatch syntax (`*`, `**`, `?`, " +
               '`{a,b}`, `[...]`). Example: `["src", "node_modules/**/*.{md,d.ts}"]`.',
           },
+
+          [`${CONFIG_SECTION}.${SETTING_EXCLUDE}`]: {
+            type: "array",
+            items: { type: "string" },
+            default: [],
+            scope: "window",
+            markdownDescription:
+              "Glob patterns skipped while expanding selected folders and includes, matched " +
+              "against workspace-relative paths. Useful for generated or noisy files such as " +
+              '`["**/*.map", "**/*.min.*", "**/package-lock.json"]`. Explicitly selected ' +
+              "files are always included.",
+          },
+
+          [`${CONFIG_SECTION}.${SETTING_MAX_FILE_BYTES}`]: {
+            type: "number",
+            default: DEFAULT_MAX_FILE_BYTES,
+            minimum: 0,
+            scope: "window",
+            markdownDescription:
+              "Files larger than this many bytes are replaced by a short note instead of " +
+              "having their full text embedded. Prevents a single minified or generated file " +
+              "from filling the bundle. Set to `0` for no limit.",
+          },
+
+          [`${CONFIG_SECTION}.${SETTING_OUTPUT_DIRECTORY}`]: {
+            type: "string",
+            default: "",
+            scope: "window",
+            markdownDescription:
+              "Workspace-relative folder where bundles are written. Empty writes to the " +
+              "workspace root. Missing folders are created, and `.`/`..` segments are ignored. " +
+              "Example: `.flatten`.",
+          },
+
+          [`${CONFIG_SECTION}.${SETTING_INCLUDE_HIDDEN}`]: {
+            type: "boolean",
+            default: true,
+            scope: "window",
+            markdownDescription:
+              "Include dotfiles and dot-folders when expanding a selected folder or a glob " +
+              "include. Explicitly selected paths are always included.",
+          },
+
+          [`${CONFIG_SECTION}.${SETTING_HEADER}`]: {
+            type: "boolean",
+            default: true,
+            scope: "window",
+            markdownDescription:
+              "Write the generated title and timestamp at the top of the bundle. Disable for " +
+              "reproducible output that diffs cleanly between runs.",
+          },
+
+          [`${CONFIG_SECTION}.${SETTING_LINE_NUMBERS}`]: {
+            type: "boolean",
+            default: false,
+            scope: "window",
+            markdownDescription:
+              "Prefix every bundled line with its line number. Handy when the bundle is chat " +
+              "context you want to refer to by line, but the numbers become part of the code " +
+              "text, so leave this off when the model should copy code verbatim.",
+          },
+
+          [`${CONFIG_SECTION}.${SETTING_MANIFEST}`]: {
+            type: "boolean",
+            default: false,
+            scope: "window",
+            markdownDescription:
+              "Add a `## Files` summary listing each bundled path, line count and size before " +
+              "the file sections. Useful when a chat client may truncate the bundle.",
+          },
         },
       },
       menus: [
@@ -731,6 +988,7 @@ export default {
           group: "dataverse@70",
         },
       ],
+      readme: true,
     });
 
     const flattenCommand = vscode.commands.registerCommand(
@@ -785,14 +1043,17 @@ export default {
           return;
         }
 
+        const settings = readFlattenSettings(vscode, context.workspaceRootUri);
+
         const result = await collectSections(
           vscode,
           context.workspaceRootUri,
           uris.map((uri) => ({ kind: "path" as const, uri })),
+          settings,
           outputChannel,
         );
 
-        if (result.sections.length === 0) {
+        if (result.files.length === 0) {
           await vscode.window.showWarningMessage(
             "Flatten: no readable text files in the selection.",
           );
@@ -800,9 +1061,18 @@ export default {
           return;
         }
 
-        const fileName = await outputFileName(vscode, context.workspaceRootUri, result.selections);
+        const outputDirectory = outputDirectoryUri(vscode, context.workspaceRootUri, settings);
+        const fileName = await outputFileName(vscode, outputDirectory, result.selections);
 
-        return writeBundle(vscode, context.workspaceRootUri, fileName, result, outputChannel);
+        return writeBundle(
+          vscode,
+          outputDirectory,
+          settings.outputSegments,
+          fileName,
+          result,
+          settings,
+          outputChannel,
+        );
       },
     );
 
@@ -810,6 +1080,7 @@ export default {
       COMMAND_FLATTEN_CONFIGURED,
       async () => {
         const config = vscode.workspace.getConfiguration(CONFIG_SECTION, context.workspaceRootUri);
+        const settings = readFlattenSettings(vscode, context.workspaceRootUri);
         const rawIncludes = config.get<unknown>(SETTING_INCLUDE, []);
         const problems: string[] = [];
 
@@ -860,10 +1131,11 @@ export default {
           vscode,
           context.workspaceRootUri,
           resolved.sources,
+          settings,
           outputChannel,
         );
 
-        if (result.sections.length === 0) {
+        if (result.files.length === 0) {
           await vscode.window.showWarningMessage(
             "Flatten: no readable text files in the configured includes.",
           );
@@ -872,8 +1144,17 @@ export default {
         }
 
         const fileName = configuredFileName(config.get<string>(SETTING_NAME));
+        const outputDirectory = outputDirectoryUri(vscode, context.workspaceRootUri, settings);
 
-        return writeBundle(vscode, context.workspaceRootUri, fileName, result, outputChannel);
+        return writeBundle(
+          vscode,
+          outputDirectory,
+          settings.outputSegments,
+          fileName,
+          result,
+          settings,
+          outputChannel,
+        );
       },
     );
 
@@ -886,7 +1167,6 @@ export default {
         flattenCommand.dispose();
         flattenConfiguredCommand.dispose();
         terminalCommand.dispose();
-        guideRegistration.dispose();
       },
     };
   },
@@ -896,19 +1176,44 @@ async function readSection(
   vscode: typeof vscodeType,
   workspaceRootUri: vscodeType.Uri,
   uri: vscodeType.Uri,
-): Promise<string | undefined> {
+  settings: FlattenSettings,
+): Promise<FlattenFile | undefined> {
   const relativePath = workspaceRelativePath(vscode, workspaceRootUri, uri);
 
   if (!TEXT_EXTENSIONS.has(extensionOf(uri))) {
-    return `## ${relativePath}\n\n_(binary or unsupported file type - skipped)_`;
+    return {
+      path: relativePath,
+      section: `## ${relativePath}\n\n_(binary or unsupported file type - skipped)_`,
+      lines: 0,
+      bytes: 0,
+    };
   }
 
   try {
     const bytes = await vscode.workspace.fs.readFile(uri);
-    const text = new TextDecoder().decode(bytes);
 
-    return `## ${relativePath}\n\n${fencedBlock(languageTag(uri), text)}`;
+    if (settings.maxFileBytes > 0 && bytes.byteLength > settings.maxFileBytes) {
+      return {
+        path: relativePath,
+        section:
+          `## ${relativePath}\n\n_(file is ${formatBytes(bytes.byteLength)}, above the ` +
+          `dataverseIde.flatten.maxFileBytes limit - skipped)_`,
+        lines: 0,
+        bytes: bytes.byteLength,
+      };
+    }
+
+    const text = new TextDecoder().decode(bytes).replace(/\s+$/, "");
+    const lines = text === "" ? 0 : text.split(/\r\n|\r|\n/).length;
+    const body = settings.lineNumbers ? withLineNumbers(text) : text;
+
+    return {
+      path: relativePath,
+      section: `## ${relativePath}\n\n${fencedBlock(languageTag(uri), body)}`,
+      lines,
+      bytes: bytes.byteLength,
+    };
   } catch {
-    return `## ${relativePath}\n\n_(unreadable - skipped)_`;
+    return undefined;
   }
 }

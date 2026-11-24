@@ -27,6 +27,9 @@ import type {
   IdeExtensionSecretStore,
 } from "./api.js";
 import { markPlaceholder } from "./placeholders.js";
+import { registerExtensionIcon, withExtensionIcon } from "./icons.js";
+import { extensionReadmes } from "./readmes.js";
+import { EXTENSION_README_PATH, registerExtensionReadme } from "./shared/readme.js";
 import { saveAllBeforeReload } from "../workspace/saveAll.js";
 
 /*
@@ -159,18 +162,23 @@ export function extensionId(identity: ExtensionManifestIdentity): string {
   return `${identity.publisher}.${identity.name}`.toLowerCase();
 }
 
+/** Full `<publisher>.<name>` id for a registry key. */
+export function extensionManifestId(key: string): string {
+  const identity = extensionManifests[key];
+
+  return identity == null ? key : extensionId(identity);
+}
+
 /*
  * Minimal local-extension shape for enablement checks. We deliberately do not
  * wait for the management service to scan installed extensions: that scan can
  * be slow (or never complete in some sandboxed environments), and enablement
  * only needs the identifier, manifest, location and type.
  */
-function placeholderExtension(identity: ExtensionManifestIdentity): ILocalExtension {
-  const id = extensionId(identity);
-
-  return {
-    identifier: { id },
-    manifest: {
+function placeholderExtension(identity: ExtensionManifestIdentity, id: string): ILocalExtension {
+  const extensionFullId = extensionId(identity);
+  const manifest = withExtensionIcon(
+    {
       name: identity.name,
       publisher: identity.publisher,
       version: "0.1.0",
@@ -180,7 +188,17 @@ function placeholderExtension(identity: ExtensionManifestIdentity): ILocalExtens
       displayName: identity.displayName,
       description: identity.description,
     },
-    location: URI.from({ scheme: "extension-file", authority: id, path: "/extension" }),
+    id,
+  );
+
+  return {
+    identifier: { id: extensionFullId },
+    manifest,
+    location: URI.from({
+      scheme: "extension-file",
+      authority: extensionFullId,
+      path: "/extension",
+    }),
     type: ExtensionType.User,
     isBuiltin: true,
     isValid: true,
@@ -196,11 +214,15 @@ function placeholderExtension(identity: ExtensionManifestIdentity): ILocalExtens
  * extensions are activated manually, so a built-in entry would never appear
  * in that list.
  */
-function placeholderScanEntry(identity: ExtensionManifestIdentity): IExtension {
-  const id = extensionId(identity);
-
-  return {
-    manifest: {
+function placeholderScanEntry(identity: ExtensionManifestIdentity, id: string): IExtension {
+  const extensionFullId = extensionId(identity);
+  const location = URI.from({
+    scheme: "extension-file",
+    authority: extensionFullId,
+    path: "/extension",
+  });
+  const manifest = withExtensionIcon(
+    {
       name: identity.name,
       publisher: identity.publisher,
       version: "0.1.0",
@@ -210,10 +232,16 @@ function placeholderScanEntry(identity: ExtensionManifestIdentity): IExtension {
       displayName: identity.displayName,
       description: identity.description,
     },
+    id,
+  );
+
+  return {
+    manifest,
     type: ExtensionType.User,
     isBuiltin: false,
-    identifier: { id },
-    location: URI.from({ scheme: "extension-file", authority: id, path: "/extension" }),
+    identifier: { id: extensionFullId },
+    location,
+    readmeUrl: URI.joinPath(location, EXTENSION_README_PATH),
     targetPlatform: TargetPlatform.WEB,
     isValid: true,
     validations: [],
@@ -237,7 +265,7 @@ export function registerExtensionPlaceholders(): void {
     servicesInitialized,
   );
 
-  for (const identity of Object.values(extensionManifests)) {
+  for (const [key, identity] of Object.entries(extensionManifests)) {
     const manifest: IExtensionManifest = {
       name: identity.name,
       publisher: identity.publisher,
@@ -249,10 +277,21 @@ export function registerExtensionPlaceholders(): void {
       description: identity.description,
     };
 
+    withExtensionIcon(manifest, key);
+
     const id = extensionId(identity);
 
+    const readme = extensionReadmes[key];
+
     markPlaceholder(id);
-    registerExtension(manifest, ExtensionHostKind.LocalProcess);
+    const { registerFileUrl } = registerExtension(manifest, ExtensionHostKind.LocalProcess, {
+      readmePath: readme != null ? EXTENSION_README_PATH : undefined,
+    });
+    registerExtensionIcon(key, registerFileUrl);
+
+    if (readme != null) {
+      registerExtensionReadme(registerFileUrl, readme);
+    }
 
     const builtins = getBuiltinExtensions();
     const entry = builtins.find((extension) => extension.identifier.id.toLowerCase() === id);
@@ -266,7 +305,7 @@ export function registerExtensionPlaceholders(): void {
       mutable.isBuiltin = false;
       mutable.type = ExtensionType.User;
     } else {
-      builtins.push(placeholderScanEntry(identity));
+      builtins.push(placeholderScanEntry(identity, key));
     }
   }
 
@@ -404,7 +443,7 @@ export async function activateExtensions(
 
     if (identity != null && enablementService != null) {
       try {
-        if (!enablementService.isEnabled(placeholderExtension(identity))) {
+        if (!enablementService.isEnabled(placeholderExtension(identity, id))) {
           console.info(`[Dataverse IDE] Extension "${id}" is disabled.`);
           continue;
         }
@@ -422,6 +461,7 @@ export async function activateExtensions(
 
       const context: ExtensionContext = {
         id,
+        fullId: identity == null ? id : extensionId(identity),
         vscode: options.vscode,
         workspaceRootUri: options.workspaceRootUri,
         workspaceDirectoryHandle: options.workspaceDirectoryHandle,

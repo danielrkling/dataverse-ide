@@ -177,7 +177,6 @@ project).
 - **AI Chat: Clear API Key**
 - **AI Chat: Diagnose**
 - **AI Chat: Test Connection**
-- **AI Chat: How-to Guide**
 
 ## Troubleshooting
 

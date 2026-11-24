@@ -2,10 +2,8 @@ import type * as vscodeType from "vscode";
 import type { IExtensionManifest } from "@codingame/monaco-vscode-api/extensions";
 
 import { registerExtensionReplacingPlaceholder } from "../api.js";
-
-import guideContent from "./GUIDE.md?raw";
-
-import { registerGuide } from "../shared/guide.js";
+import { registerExtensionIcon, withExtensionIcon } from "../icons.js";
+import { EXTENSION_README_PATH } from "../shared/readme.js";
 
 import {
   addRemote,
@@ -299,7 +297,7 @@ export async function installDataverseGitExtension(
     }
   }
 
-  const { getApi } = await registerExtensionReplacingPlaceholder({
+  const manifest = {
     name: "dataverse-git",
     publisher: "dataverse",
     version: "0.1.0",
@@ -511,10 +509,6 @@ export async function installDataverseGitExtension(
         {
           command: "dataverseGit.forgetCredentials",
           title: "Git: Forget Stored Remote Credentials",
-        },
-        {
-          command: "dataverseIde.git.openGuide",
-          title: "Git: How-to Guide",
         },
       ],
 
@@ -819,7 +813,14 @@ export async function installDataverseGitExtension(
         ],
       },
     },
-  } as unknown as IExtensionManifest);
+  } as unknown as IExtensionManifest;
+
+  const { getApi, registerFileUrl } = await registerExtensionReplacingPlaceholder(
+    withExtensionIcon(manifest, "git"),
+    { readmePath: EXTENSION_README_PATH },
+  );
+
+  registerExtensionIcon("git", registerFileUrl);
 
   const vscode = await getApi();
 
@@ -3247,16 +3248,9 @@ export default {
 
   async activate(context: ExtensionContext): Promise<vscodeType.Disposable | void> {
     /*
-     * Register the guide before the workspace guard: the guide explains that
-     * Git needs a local folder, so it should still open in an OPFS workspace
-     * where activation stops below.
+     * The README explains that Git needs a local folder, so keep it available
+     * in the Extensions view even when activation stops in an OPFS workspace.
      */
-    const guideRegistration = registerGuide({
-      vscode: context.vscode,
-      extensionId: "git",
-      content: guideContent,
-    });
-
     const handle = context.workspaceDirectoryHandle;
 
     if (handle == null) {
@@ -3280,7 +3274,6 @@ export default {
 
     return {
       dispose() {
-        guideRegistration.dispose();
         controller.dispose();
       },
     };

@@ -247,37 +247,22 @@ in the command palette (Ctrl+Shift+P / Cmd+Shift+P) via `contributes.commands` m
 | Welcome      | `Welcome: Show Welcome Page`                                                                                                                                                                   | opens automatically on startup when no editor is active; uncheck **Show this page on startup** on the page or set `dataverseIde.welcome.showOnStartup` to `false`. Also available under Help → Welcome                                                                                                |
 | VSIX         | `VSIX: Install Extension from File…`, `VSIX: Install Extension from URL…`, `VSIX: Uninstall Extension…`, `VSIX: Show Installed Extensions`                                                     | the Extensions view browses Open VSX; file/URL installs need a `browser` entry point or no code entry point and persist in IndexedDB; the Welcome page has a recommended official Prettier install                                                                                                    |
 
-### How-to guides
+### Extension READMEs
 
-Each extension keeps its detailed guide next to its code as
-`src/extensions/<id>/GUIDE.md`. Guides are bundled with the app (`?raw`), served as
-read-only virtual documents (`dataverse-ide-guide:/<id>.md`), and opened in the markdown
-preview. Every extension that ships a guide contributes a `<Feature>: How-to Guide`
-command, also linked from the welcome page:
+Each extension keeps its documentation next to its code as
+`src/extensions/<id>/README.md`. The registry bundles every README with the app (`?raw`),
+serves it at boot through `registerFileUrl()`, and each manifest points at it with
+`readmePath: "README.md"`. Selecting the extension in the **Extensions** view shows the
+README in the details pane; the welcome page's **Read README →** links open the same tab.
 
-| Extension    | Command                   |
-| ------------ | ------------------------- |
-| Dataverse    | `Dataverse: How-to Guide` |
-| esbuild      | `esbuild: How-to Guide`   |
-| Flatten      | `Flatten: How-to Guide`   |
-| Git          | `Git: How-to Guide`       |
-| GitLab       | `GitLab: How-to Guide`    |
-| HTML         | `HTML: How-to Guide`      |
-| Node runtime | `Node: How-to Guide`      |
-| npm          | `npm: How-to Guide`       |
-| Tailwind     | `Tailwind: How-to Guide`  |
-| VSIX         | `VSIX: How-to Guide`      |
-| Welcome      | `Welcome: How-to Guide`   |
+To add or update a README:
 
-To add a guide:
-
-1. Create `src/extensions/<id>/GUIDE.md`.
-2. Import it with `import guideContent from "./GUIDE.md?raw";`.
-3. Call
-   `registerGuide({ vscode, extensionId: "<id>", content: guideContent })` during
-   activation and dispose the returned registration.
-4. Add `dataverseIde.<id>.openGuide` to the extension's contributed commands.
-5. Optionally link it from a welcome feature with `guide: "dataverseIde.<id>.openGuide"`.
+1. Create `src/extensions/<id>/README.md`.
+2. Add its `?raw` import to the `extensionReadmes` map in
+   `src/extensions/readmes.ts`.
+3. Pass `readme: true` when contributing the manifest, or
+   `{ readmePath: EXTENSION_README_PATH }` to `registerExtensionReplacingPlaceholder`.
+4. Optionally link it from a welcome feature with `readme: "<id>"`.
 
 ### Sidebars (activity bar → "Dataverse IDE")
 

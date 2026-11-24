@@ -1,12 +1,12 @@
 import type * as vscodeType from "vscode";
 
-import { EsbuildBuildRunner, type BuildOutputFile } from "./buildRunner.js";
+import { EsbuildBuildRunner, type BuildOutputFile, type EntryPoint } from "./buildRunner.js";
 
-import guideContent from "./GUIDE.md?raw";
+import { createWorkspaceReader, resolveWorkspaceEntry } from "./compiler.js";
 
 import { contributeExtensionManifest } from "../api.js";
 
-import { registerGuide } from "../shared/guide.js";
+import { openExtensionReadme } from "../shared/readme.js";
 
 import { createWatchStatus } from "../watchStatus.js";
 
@@ -58,21 +58,86 @@ function getAutoStartWatchSetting(vscode: typeof vscodeType): boolean {
     .get<boolean>("autoStartWatch", false);
 }
 
+function normalizeEntryPath(path: string): string {
+  return path
+    .replaceAll("\\", "/")
+    .replace(/^(?:\.{1,2}\/)+/, "")
+    .replace(/^\/+/, "");
+}
+
+/**
+ * Normalize one or more entry points: forward slashes, no relative prefixes,
+ * no duplicates, and no empty values.
+ */
+function normalizeEntryPaths(entries: string | readonly EntryPoint[]): EntryPoint[] {
+  const list = typeof entries === "string" ? [entries] : entries;
+  const seen = new Set<string>();
+  const normalized: EntryPoint[] = [];
+
+  for (const entry of list) {
+    if (typeof entry === "string") {
+      const path = normalizeEntryPath(entry);
+
+      if (path.length > 0 && !seen.has(path)) {
+        seen.add(path);
+        normalized.push(path);
+      }
+
+      continue;
+    }
+
+    const input = normalizeEntryPath(entry.in);
+
+    if (input.length === 0) {
+      continue;
+    }
+
+    const output = entry.out == null ? "" : normalizeEntryPath(entry.out);
+    const key = output.length > 0 ? `${input}\0${output}` : input;
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      normalized.push(output.length > 0 ? { in: input, out: output } : input);
+    }
+  }
+
+  return normalized;
+}
+
+function entryPaths(entries: readonly EntryPoint[]): string[] {
+  return entries.map((entry) => (typeof entry === "string" ? entry : entry.in));
+}
+
+function outDirForConfig(config: EsbuildConfig): string {
+  if (config.outfile != null) {
+    const normalized = config.outfile.replaceAll("\\", "/");
+    const slash = normalized.lastIndexOf("/");
+
+    return slash === -1 ? "" : normalized.slice(0, slash);
+  }
+
+  return config.outdir;
+}
+
 function outputPathSegments(outputPath: string): string[] {
-  const normalized = outputPath.replaceAll("\\", "/");
-
-  /*
-   * esbuild is called with outdir "out"; keep everything after it so source
-   * maps, legal-comment files, CSS output, and code-split chunks all land
-   * beside the JavaScript instead of overwriting each other.
-   */
-  const relative = normalized.startsWith("out/")
-    ? normalized.slice("out/".length)
-    : (normalized.split("/").pop() ?? normalized);
-
-  return relative
+  return outputPath
+    .replaceAll("\\", "/")
     .split("/")
     .filter((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /*
@@ -80,12 +145,11 @@ function outputPathSegments(outputPath: string): string[] {
  * produce byte-identical output; remembering it avoids both a disk read and a
  * slow File System Access write on synced folders.
  */
-const lastWrittenOutputs = new Map<string, string>();
+const lastWrittenOutputs = new Map<string, Uint8Array>();
 
 async function writeOutputs(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
-  outDir: string,
   outputs: BuildOutputFile[],
 ): Promise<{
   written: vscodeType.Uri[];
@@ -97,9 +161,18 @@ async function writeOutputs(
   const started = performance.now();
   const written: vscodeType.Uri[] = [];
   const ensuredDirectories = new Set<string>();
+  const writtenDestinations = new Set<string>();
   const slow: { path: string; bytes: number; ms: number; ensureMs: number }[] = [];
   let skipped = 0;
   let bytes = 0;
+
+  /*
+   * Multi-entry builds emit several files in one pass. Refuse to continue if
+   * two different outputs resolve to the same workspace path: one would
+   * silently overwrite the other. This is usually a too-specific entryNames
+   * template.
+   */
+  const destinations = new Map<string, string>();
 
   for (const output of outputs) {
     const segments = outputPathSegments(output.path);
@@ -108,25 +181,58 @@ async function writeOutputs(
       continue;
     }
 
-    const outFile = vscode.Uri.joinPath(rootUri, outDir, ...segments);
+    const relativePath = segments.join("/");
+    const existing = destinations.get(relativePath);
 
-    const parent = vscode.Uri.joinPath(rootUri, outDir, ...segments.slice(0, -1));
+    if (existing != null && existing !== output.path) {
+      throw new Error(
+        `esbuild produced multiple outputs for "${relativePath}" ` +
+          `(${existing} and ${output.path}). Adjust entryNames or the entry points.`,
+      );
+    }
 
-    const encoded = new TextEncoder().encode(output.text);
+    destinations.set(relativePath, output.path);
+  }
+
+  for (const output of outputs) {
+    const segments = outputPathSegments(output.path);
+
+    if (segments.length === 0) {
+      continue;
+    }
+
+    const relativePath = segments.join("/");
+
+    /* esbuild should not repeat a path, but never write the same file twice. */
+    if (writtenDestinations.has(relativePath)) {
+      continue;
+    }
+
+    writtenDestinations.add(relativePath);
+
+    const outFile = vscode.Uri.joinPath(rootUri, ...segments);
+
+    const parent = vscode.Uri.joinPath(rootUri, ...segments.slice(0, -1));
+
+    const encoded = output.contents;
 
     bytes += encoded.length;
 
     const key = outFile.toString();
+    const previous = lastWrittenOutputs.get(key);
 
-    if (lastWrittenOutputs.get(key) === output.text) {
+    if (previous != null && bytesEqual(previous, encoded)) {
       /*
-       * Verify the file still exists (it may have been deleted externally)
-       * without reading the whole output back.
+       * Verify the file still has the bytes we wrote. Checking existence alone
+       * would leave an externally modified output in place.
        */
       try {
-        await vscode.workspace.fs.stat(outFile);
-        skipped += 1;
-        continue;
+        const current = await vscode.workspace.fs.readFile(outFile);
+
+        if (bytesEqual(current, encoded)) {
+          skipped += 1;
+          continue;
+        }
       } catch {
         // Fall through and rewrite it.
       }
@@ -157,7 +263,7 @@ async function writeOutputs(
       });
     }
 
-    lastWrittenOutputs.set(key, output.text);
+    lastWrittenOutputs.set(key, encoded);
 
     written.push(outFile);
   }
@@ -171,25 +277,6 @@ async function writeOutputs(
   };
 }
 
-async function workspaceFileExists(
-  vscode: typeof vscodeType,
-  rootUri: vscodeType.Uri,
-  relativePath: string,
-): Promise<boolean> {
-  try {
-    await vscode.workspace.fs.stat(
-      vscode.Uri.joinPath(
-        rootUri,
-        ...relativePath.split("/").filter((segment) => segment.length > 0),
-      ),
-    );
-
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export default {
   id: "esbuild",
 
@@ -199,6 +286,7 @@ export default {
     let currentConfig: EsbuildConfig = ESBUILD_DEFAULT_CONFIG;
     let watcher: EsbuildWatcher | undefined;
     let watchEnabled = false;
+    let lastOutputPaths: string[] = [];
 
     let lastStatus: "idle" | "building" | "ok" | "error" = "idle";
     let lastMessage = "No build run yet.";
@@ -230,7 +318,7 @@ export default {
         },
         {
           command: "dataverseIde.esbuild.buildConfigured",
-          title: "esbuild: Build Configured Entry",
+          title: "esbuild: Build Configured Entries",
         },
         {
           command: "dataverseIde.esbuild.startWatch",
@@ -259,10 +347,6 @@ export default {
         {
           command: "dataverseIde.esbuild.reloadConfig",
           title: "esbuild: Reload Config",
-        },
-        {
-          command: "dataverseIde.esbuild.openGuide",
-          title: "esbuild: How-to Guide",
         },
       ],
       configuration: {
@@ -298,12 +382,7 @@ export default {
           },
         },
       },
-    });
-
-    const guideRegistration = registerGuide({
-      vscode,
-      extensionId: "esbuild",
-      content: guideContent,
+      readme: true,
     });
 
     const runner = new EsbuildBuildRunner(vscode, context.workspaceRootUri, outputChannel);
@@ -334,7 +413,7 @@ export default {
       },
       extraItems: () => [
         {
-          label: "$(zap) Build configured entry",
+          label: "$(zap) Build configured entries",
           run: () => {
             void vscode.commands.executeCommand("dataverseIde.esbuild.buildConfigured");
           },
@@ -365,7 +444,7 @@ export default {
     let buildActive = false;
     let pendingBuild:
       | {
-          entry: string;
+          entries: EntryPoint[];
           options?: BuildRunOptions;
         }
       | undefined;
@@ -374,17 +453,19 @@ export default {
      * Single-flight coordinator. Manual builds, watch-triggered builds and the
      * initial watch build all funnel through here: only one build/write runs at
      * a time, and requests that arrive mid-build collapse into one follow-up
-     * build using the latest entry. Without this, overlapping builds raced to
-     * write the same output file through the File System Access API.
+     * build using the latest entry set. Without this, overlapping builds raced
+     * to write the same output file through the File System Access API.
      */
     async function runBuild(
-      requestedEntryPath: string,
+      requestedEntries: string | readonly EntryPoint[],
       options?: BuildRunOptions,
     ): Promise<boolean> {
-      if (buildActive) {
-        outputChannel.appendLine(`[esbuild] build queued: ${requestedEntryPath}`);
+      const entries = normalizeEntryPaths(requestedEntries);
 
-        pendingBuild = { entry: requestedEntryPath, options };
+      if (buildActive) {
+        outputChannel.appendLine(`[esbuild] build queued: ${entryPaths(entries).join(", ")}`);
+
+        pendingBuild = { entries, options };
 
         return true;
       }
@@ -394,16 +475,16 @@ export default {
       try {
         let next:
           | {
-              entry: string;
+              entries: EntryPoint[];
               options?: BuildRunOptions;
             }
-          | undefined = { entry: requestedEntryPath, options };
+          | undefined = { entries, options };
 
         let result = true;
 
         while (next != null) {
           pendingBuild = undefined;
-          result = await performBuild(next.entry, next.options);
+          result = await performBuild(next.entries, next.options);
           next = pendingBuild;
         }
 
@@ -414,14 +495,21 @@ export default {
     }
 
     async function performBuild(
-      requestedEntryPath: string,
+      requestedEntries: readonly EntryPoint[],
       options?: BuildRunOptions,
     ): Promise<boolean> {
       const started = performance.now();
 
-      const entryPath = requestedEntryPath.replaceAll("\\", "/").replace(/^(?:\.{1,2}\/)+/, "");
+      const entries = normalizeEntryPaths(requestedEntries);
+      const entryLabel = entryPaths(entries).join(", ");
 
       try {
+        if (entries.length === 0) {
+          throw new Error(
+            "No entry points configured. Add at least one path to entryPoints in esbuild.config.json.",
+          );
+        }
+
         const configStarted = performance.now();
 
         await reloadConfigFromDisk();
@@ -433,27 +521,37 @@ export default {
         const configMs = performance.now() - configStarted;
 
         lastStatus = "building";
-        lastMessage = `Building ${entryPath}…`;
+        lastMessage = `Building ${entryLabel}…`;
         notifyStatus();
 
         if (options?.silent !== true) {
           outputChannel.show(true);
         }
 
-        outputChannel.appendLine(`[esbuild] Building ${entryPath}…`);
+        outputChannel.appendLine(`[esbuild] Building ${entryLabel}…`);
 
         const entryStarted = performance.now();
 
         /*
-         * The compiler now reads the workspace itself. Verify the entry
+         * The compiler now reads the workspace itself. Verify every entry
          * early so users receive a useful configuration error rather than
          * a lower-level esbuild resolution error.
          */
-        if (!(await workspaceFileExists(vscode, context.workspaceRootUri, entryPath))) {
-          throw new Error(
-            `Entry "${entryPath}" was not found in the workspace. ` +
-              "Check the entry setting in esbuild.config.json.",
+        const entryReader = createWorkspaceReader(vscode, context.workspaceRootUri);
+
+        for (const entryPath of entryPaths(entries)) {
+          const resolved = await resolveWorkspaceEntry(
+            entryReader,
+            entryPath,
+            config.resolveExtensions,
           );
+
+          if (resolved == null) {
+            throw new Error(
+              `Entry "${entryPath}" was not found in the workspace. ` +
+                "Check the entryPoints setting in esbuild.config.json.",
+            );
+          }
         }
 
         const entryMs = performance.now() - entryStarted;
@@ -461,38 +559,61 @@ export default {
         const compileStarted = performance.now();
 
         const response = await runner.build({
-          entry: entryPath,
+          entries,
           format: config.format,
           platform: config.platform,
           charset: config.charset,
           globalName: config.globalName,
           minify: config.minify,
+          minifyWhitespace: config.minifyWhitespace,
+          minifyIdentifiers: config.minifyIdentifiers,
+          minifySyntax: config.minifySyntax,
           sourcemap: config.sourcemap,
           sourceRoot: config.sourceRoot,
           sourcesContent: config.sourcesContent,
           target: config.target,
           treeShaking: config.treeShaking,
+          ignoreAnnotations: config.ignoreAnnotations,
           keepNames: config.keepNames,
           legalComments: config.legalComments,
           lineLimit: config.lineLimit,
           drop: config.drop,
+          dropLabels: config.dropLabels,
           banner: config.banner,
           footer: config.footer,
           pure: config.pure,
+          mangleProps: config.mangleProps,
+          reserveProps: config.reserveProps,
           jsx: config.jsx,
           jsxFactory: config.jsxFactory,
           jsxFragment: config.jsxFragment,
           jsxImportSource: config.jsxImportSource,
           jsxDev: config.jsxDev,
           jsxSideEffects: config.jsxSideEffects,
+          supported: config.supported,
           bundle: config.bundle,
           splitting: config.splitting,
           external: config.external,
+          alias: config.alias,
           define: config.define,
           loader: config.loader,
+          inject: config.inject,
+          tsconfig: config.tsconfig,
+          tsconfigRaw: config.tsconfigRaw,
+          conditions: config.conditions,
+          mainFields: config.mainFields,
+          resolveExtensions: config.resolveExtensions,
+          nodePaths: config.nodePaths,
+          packages: config.packages,
+          outdir: config.outdir,
+          outfile: config.outfile,
+          outbase: config.outbase,
           entryNames: config.entryNames,
           chunkNames: config.chunkNames,
+          assetNames: config.assetNames,
+          publicPath: config.publicPath,
           outExtension: config.outExtension,
+          allowOverwrite: config.allowOverwrite,
           solid: config.solid,
         });
 
@@ -534,14 +655,23 @@ export default {
           return true;
         }
 
+        if (config.allowOverwrite !== true) {
+          const inputs = new Set(response.dependencies);
+          const overwritten = response.outputs.find((output) => inputs.has(output.path));
+
+          if (overwritten != null) {
+            throw new Error(
+              `Refusing to overwrite input file "${overwritten.path}". ` +
+                "Set allowOverwrite to true if this is intentional.",
+            );
+          }
+        }
+
         const writeStarted = performance.now();
 
-        const writeResult = await writeOutputs(
-          vscode,
-          context.workspaceRootUri,
-          config.outdir,
-          response.outputs,
-        );
+        const writeResult = await writeOutputs(vscode, context.workspaceRootUri, response.outputs);
+
+        lastOutputPaths = response.outputs.map((output) => output.path);
 
         const writeMs = performance.now() - writeStarted;
 
@@ -554,11 +684,11 @@ export default {
                 .join(", ")
             : `${writeResult.skipped} unchanged file(s)`;
 
-        const summary = `Built ${entryPath} in ${elapsed}ms → ${writtenLabel}`;
+        const summary = `Built ${entryLabel} in ${elapsed}ms → ${writtenLabel}`;
 
         outputChannel.appendLine(`[esbuild] ${summary}`);
         outputChannel.appendLine(
-          `[esbuild] stages: config ${Math.round(configMs)}ms, entry ${Math.round(entryMs)}ms, ` +
+          `[esbuild] stages: config ${Math.round(configMs)}ms, entries ${Math.round(entryMs)}ms, ` +
             `compile ${Math.round(compileMs)}ms, write ${Math.round(writeMs)}ms ` +
             `(${writeResult.written.length} written, ${writeResult.skipped} unchanged, ` +
             `${writeResult.bytes} bytes)`,
@@ -611,14 +741,15 @@ export default {
       }
 
       watcher = new EsbuildWatcher(vscode, context.workspaceRootUri, {
-        outDir: () => currentConfig.outdir,
-        entry: () => currentConfig.entryPoints[0],
+        outDir: () => outDirForConfig(currentConfig),
+        outputPaths: () => lastOutputPaths,
+        entries: () => currentConfig.entryPoints,
         configPath: () => configRelativePathFor(vscode, context.workspaceRootUri),
         buildOnChange: true,
         watchFileSystem: true,
         getDependencies: () => runner.dependencies,
-        build: async (entry) => {
-          await runBuild(entry, {
+        build: async (entries) => {
+          await runBuild(entries, {
             silent: true,
           });
         },
@@ -641,7 +772,7 @@ export default {
          * Initial watch build ensures output exists even before the first
          * saved editor change.
          */
-        void runBuild(currentConfig.entryPoints[0], {
+        void runBuild(currentConfig.entryPoints, {
           silent: true,
         });
       } else {
@@ -685,7 +816,7 @@ export default {
             .replaceAll("\\", "/");
         }
 
-        await runBuild(entryPath);
+        await runBuild([entryPath]);
       },
     );
 
@@ -720,7 +851,7 @@ export default {
 
         currentConfig = config;
 
-        await runBuild(config.entryPoints[0]);
+        await runBuild(config.entryPoints);
       },
     );
 
@@ -770,7 +901,7 @@ export default {
 
         lastWorkspaceEntry = picked;
 
-        await runBuild(picked);
+        await runBuild([picked]);
       },
     );
 
@@ -854,17 +985,19 @@ export default {
     const ESBUILD_TERMINAL_HELP = `usage: esbuild [command] [entry...] [options]
 
 Commands:
-  esbuild [entry...]      build entries (defaults to esbuild.config.json)
+  esbuild [entry...]      build entries together (defaults to esbuild.config.json)
   esbuild build [entry...] same, with esbuild-style flags
   esbuild workspace       pick a workspace entry point
   esbuild watch           start watch mode
   esbuild stop            stop watch mode
   esbuild config          open esbuild.config.json
   esbuild output          show the esbuild output channel
-  esbuild guide           open the esbuild guide
+  esbuild readme          open the esbuild README in the Extensions view
 
 Supported esbuild flags (https://esbuild.github.io/api/):
   --bundle / --no-bundle        --minify / --no-minify
+  --minify-whitespace           --minify-identifiers
+  --minify-syntax               --ignore-annotations
   --sourcemap[=inline|external|both|linked]
   --sources-content / --no-sources-content
   --format=esm|iife|cjs         --platform=browser|node|neutral
@@ -877,11 +1010,18 @@ Supported esbuild flags (https://esbuild.github.io/api/):
   --jsx-factory=...             --jsx-fragment=...
   --jsx-import-source=...       --jsx-dev / --no-jsx-dev
   --jsx-side-effects / --no-jsx-side-effects
-  --outfile=...                 --outdir=...
+  --outfile=...                 --outdir=... --outbase=...
   --entry-names=...             --chunk-names=...
+  --asset-names=...             --public-path=...
   --out-extension:.js=.mjs      --define:KEY=VALUE
   --external:PACKAGE            --pure:EXPRESSION
-  --drop:console|debugger       --loader:.ext=LOADER
+  --alias:PACKAGE=TARGET        --inject:FILE
+  --drop:console|debugger       --drop-labels=LABEL,...
+  --loader:.ext=LOADER          --supported:FEATURE=true|false
+  --conditions=A,B              --main-fields=A,B
+  --resolve-extensions=A,B      --node-paths=DIR
+  --packages=bundle|external    --tsconfig=FILE
+  --mangle-props=REGEX          --reserve-props=REGEX
   --banner:js=...               --banner:css=...
   --footer:js=...               --footer:css=...
 `;
@@ -915,8 +1055,8 @@ Supported esbuild flags (https://esbuild.github.io/api/):
             return { stdout: "", stderr: "", exitCode: 0 };
           }
 
-          if (first === "guide") {
-            await vscode.commands.executeCommand("dataverseIde.esbuild.openGuide");
+          if (first === "readme" || first === "guide") {
+            await openExtensionReadme(vscode, context.fullId);
 
             return { stdout: "", stderr: "", exitCode: 0 };
           }
@@ -945,24 +1085,27 @@ Supported esbuild flags (https://esbuild.github.io/api/):
           }
 
           const { config } = await readEsbuildConfig(vscode, context.workspaceRootUri);
-          const entries = parsed.entries.length > 0 ? parsed.entries : [config.entryPoints[0]];
+          const entries = normalizeEntryPaths(
+            parsed.entries.length > 0 ? parsed.entries : config.entryPoints,
+          );
 
-          let stdout = "";
-          let stderr = "";
-          let exitCode = 0;
-
-          for (const entry of entries) {
-            const success = await runBuild(entry, { override: parsed.override });
-
-            if (success) {
-              stdout += `Built ${entry}.\n`;
-            } else {
-              stderr += `esbuild: build failed for ${entry} (see the esbuild output channel)\n`;
-              exitCode = 1;
-            }
+          if (entries.length === 0) {
+            return {
+              stdout: "",
+              stderr: "esbuild: no entry points configured\n",
+              exitCode: 1,
+            };
           }
 
-          return { stdout, stderr, exitCode };
+          if (await runBuild(entries, { override: parsed.override })) {
+            return { stdout: `Built ${entries.join(", ")}.\n`, stderr: "", exitCode: 0 };
+          }
+
+          return {
+            stdout: "",
+            stderr: "esbuild: build failed (see the esbuild output channel)\n",
+            exitCode: 1,
+          };
         } catch (error) {
           return {
             stdout: "",
@@ -996,8 +1139,6 @@ Supported esbuild flags (https://esbuild.github.io/api/):
         outputChannelCommand.dispose();
         reloadConfigCommand.dispose();
         terminalCommand.dispose();
-
-        guideRegistration.dispose();
 
         runner.dispose();
       },

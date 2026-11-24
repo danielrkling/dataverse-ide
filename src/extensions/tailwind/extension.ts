@@ -19,10 +19,6 @@ import { loadTailwindClassIndex, type TailwindClassIndex } from "./theme.js";
 
 import { contributeCommandManifest } from "../api.js";
 
-import guideContent from "./GUIDE.md?raw";
-
-import { registerGuide } from "../shared/guide.js";
-
 import { EsbuildWatcher } from "../esbuild/watcher.js";
 
 import { registerTailwindTerminalCommands } from "./terminal.js";
@@ -117,12 +113,6 @@ export default {
 
   async activate(context: ExtensionContext): Promise<vscodeType.Disposable | void> {
     const { vscode, outputChannel } = context;
-
-    const guideRegistration = registerGuide({
-      vscode,
-      extensionId: "tailwind",
-      content: guideContent,
-    });
 
     /*
      * Main-thread esbuild compiler. It reads @plugin modules directly through
@@ -290,10 +280,6 @@ export default {
           command: "dataverseIde.tailwind.showOutput",
           title: "Tailwind: Show Output",
         },
-        {
-          command: "dataverseIde.tailwind.openGuide",
-          title: "Tailwind: How-to Guide",
-        },
       ],
       configuration: {
         title: "Dataverse IDE Tailwind",
@@ -313,6 +299,7 @@ export default {
           },
         },
       },
+      readme: true,
     });
 
     let currentConfig: TailwindConfig = TAILWIND_DEFAULT_CONFIG;
@@ -521,7 +508,7 @@ export default {
 
         outputPaths: () => [currentConfig.output],
 
-        entry: () => currentConfig.input,
+        entries: () => [currentConfig.input],
 
         buildOnChange: true,
         changeDebounceMs: 750,
@@ -622,7 +609,11 @@ export default {
       },
     );
 
-    const terminalCommand = registerTailwindTerminalCommands(vscode, context.workspaceRootUri);
+    const terminalCommand = registerTailwindTerminalCommands(
+      vscode,
+      context.workspaceRootUri,
+      context.fullId,
+    );
 
     await reloadConfigFromDisk();
 
@@ -647,8 +638,6 @@ export default {
 
         completionProviderDisposable.dispose();
         hoverProviderDisposable.dispose();
-
-        guideRegistration.dispose();
       },
     };
   },

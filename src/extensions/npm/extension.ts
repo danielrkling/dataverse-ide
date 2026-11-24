@@ -1,10 +1,6 @@
-﻿import type * as vscodeType from "vscode";
+import type * as vscodeType from "vscode";
 
 import { contributeExtensionManifest } from "../api.js";
-
-import guideContent from "./GUIDE.md?raw";
-
-import { registerGuide } from "../shared/guide.js";
 
 import { createPanelIcon, PANEL_GLYPHS } from "../panels.js";
 
@@ -232,12 +228,6 @@ export default {
   async activate(context: ExtensionContext): Promise<vscodeType.Disposable | void> {
     const { vscode, outputChannel } = context;
 
-    const guideRegistration = registerGuide({
-      vscode,
-      extensionId: "npm",
-      content: guideContent,
-    });
-
     await contributeExtensionManifest({
       id: "npm",
       displayName: "Dataverse IDE npm",
@@ -304,10 +294,6 @@ export default {
           command: COMMAND_PRUNE,
           title: "npm: Prune Extraneous Packages",
           icon: "$(fold-down)",
-        },
-        {
-          command: "dataverseIde.npm.openGuide",
-          title: "npm: How-to Guide",
         },
       ],
       views: {
@@ -444,6 +430,7 @@ export default {
           icon: "$(ellipsis)",
         },
       ],
+      readme: true,
     });
 
     function toDependency(value: unknown): NpmDependency | undefined {
@@ -1038,7 +1025,6 @@ export default {
         lsCommand.dispose();
         viewCommand.dispose();
         outdatedCommand.dispose();
-        guideRegistration.dispose();
       },
     };
   },

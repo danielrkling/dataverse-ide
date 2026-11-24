@@ -1,5 +1,7 @@
 import type * as vscodeType from "vscode";
 
+import type { EntryPoint } from "./compiler.js";
+
 /*
  * esbuild watch engine.
  *
@@ -53,8 +55,9 @@ export class EsbuildWatcher {
       outDir: () => string;
       /** Exact output files to ignore in addition to `outDir`. */
       outputPaths?: () => string[];
-      entry: () => string;
-      build: (entry: string) => Promise<void>;
+      /** All configured entry points; rebuilt together in one build. */
+      entries: () => readonly EntryPoint[];
+      build: (entries: readonly EntryPoint[]) => Promise<void>;
       /**
        * Workspace-relative config file to ignore (may include
        * subdirectories; honors the dataverseIde.<tool>.configPath setting).
@@ -335,7 +338,7 @@ export class EsbuildWatcher {
       do {
         this.pending = false;
         this.rememberBuiltVersions();
-        await this.options.build(this.options.entry());
+        await this.options.build(this.options.entries());
       } while (this.pending);
     } finally {
       this.building = false;

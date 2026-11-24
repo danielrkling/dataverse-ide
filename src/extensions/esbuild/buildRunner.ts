@@ -6,6 +6,7 @@ import {
   runTransform,
   type BuildOutputFile,
   type BuildResponse,
+  type EntryPoint,
   type WorkspaceReader,
 } from "./compiler.js";
 
@@ -42,6 +43,12 @@ function createLiveWorkspaceReader(
   return {
     stats: disk.stats,
 
+    async readBytes(path: string): Promise<Uint8Array | undefined> {
+      const live = dirtyDocumentText(dirtyDocuments, path);
+
+      return live != null ? new TextEncoder().encode(live) : disk.readBytes(path);
+    },
+
     async readText(path: string): Promise<string | undefined> {
       const live = dirtyDocumentText(dirtyDocuments, path);
 
@@ -70,11 +77,14 @@ function formatReaderStats(reader: WorkspaceReader): string {
   );
 }
 
-export type { BuildOutputFile };
+export type { BuildOutputFile, EntryPoint };
 
 export type BuildRequestInput = {
-  /** Workspace-relative or virtual entry point, e.g. src/app.ts. */
-  entry: string;
+  /**
+   * Workspace-relative or virtual entry points. All entries are built by one
+   * esbuild pass.
+   */
+  entries: EntryPoint[];
 
   /*
    * Optional generated source files for this build only. Keys are
@@ -88,19 +98,26 @@ export type BuildRequestInput = {
   globalName?: string;
 
   minify?: boolean;
+  minifyWhitespace?: boolean;
+  minifyIdentifiers?: boolean;
+  minifySyntax?: boolean;
   sourcemap?: boolean | "linked" | "inline" | "external" | "both";
   sourceRoot?: string;
   sourcesContent?: boolean;
 
   target?: string | string[];
   treeShaking?: boolean;
+  ignoreAnnotations?: boolean;
   keepNames?: boolean;
   legalComments?: "none" | "inline" | "eof" | "linked" | "external";
   lineLimit?: number;
   drop?: ("console" | "debugger")[];
-  banner?: { js?: string; css?: string };
-  footer?: { js?: string; css?: string };
+  dropLabels?: string[];
+  banner?: string | { js?: string; css?: string };
+  footer?: string | { js?: string; css?: string };
   pure?: string[];
+  mangleProps?: string;
+  reserveProps?: string;
 
   jsx?: "transform" | "preserve" | "automatic";
   jsxFactory?: string;
@@ -108,15 +125,33 @@ export type BuildRequestInput = {
   jsxImportSource?: string;
   jsxDev?: boolean;
   jsxSideEffects?: boolean;
+  supported?: Record<string, boolean>;
 
   bundle?: boolean;
   splitting?: boolean;
   external?: string[];
+  alias?: Record<string, string>;
   define?: Record<string, string>;
   loader?: Record<string, string>;
+  inject?: string[];
+  tsconfig?: string;
+  tsconfigRaw?: string | Record<string, unknown>;
+
+  conditions?: string[];
+  mainFields?: string[];
+  resolveExtensions?: string[];
+  nodePaths?: string[];
+  packages?: "bundle" | "external";
+
+  outdir?: string;
+  outfile?: string;
+  outbase?: string;
   entryNames?: string;
   chunkNames?: string;
+  assetNames?: string;
+  publicPath?: string;
   outExtension?: Record<string, string>;
+  allowOverwrite?: boolean;
 
   /*
    * Solid JSX compiler backend: "off" (default), "v1" (babel-preset-solid),

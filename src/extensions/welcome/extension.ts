@@ -18,10 +18,8 @@ import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench
 
 import { contributeExtensionManifest } from "../api.js";
 import { RECOMMENDED_EXTENSIONS } from "../vsix/recommended.js";
-
-import guideContent from "./GUIDE.md?raw";
-
-import { registerGuide } from "../shared/guide.js";
+import { extensionManifestId } from "../registry.js";
+import { openExtensionReadme } from "../shared/readme.js";
 
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
@@ -54,8 +52,8 @@ type WelcomeFeature = {
   title: string;
   description: string;
   icon: string;
-  /** Command that opens this feature's colocated GUIDE.md. */
-  guide?: string;
+  /** Registry key of the extension whose README this feature documents. */
+  readme?: string;
   actions?: WelcomeAction[];
 };
 
@@ -114,7 +112,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "Every feature is an IDE extension with its own enable/disable toggle and output channel. Config files such as dataverse.config.json and esbuild.config.json get JSON Schema validation in the editor.",
         icon: "extensions",
-        guide: "dataverseIde.welcome.openGuide",
+        readme: "welcome",
         actions: [
           {
             label: "Open Extensions",
@@ -132,7 +130,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "Bring browser-ready extensions into the IDE from local .vsix files or a direct URL. Packages persist in browser storage and are restored alongside the built-in extension toggles.",
         icon: "cloud-download",
-        guide: "dataverseIde.vsix.openGuide",
+        readme: "vsix",
         actions: [
           {
             label: "Install from VSIX…",
@@ -156,7 +154,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "Push files straight to a Dataverse organisation as web resources, preview the plan, and publish when the upload completes. Watch mode keeps the org in sync while you edit.",
         icon: "cloud-upload",
-        guide: "dataverseIde.dataverse.openGuide",
+        readme: "dataverse",
         actions: [
           {
             label: "Upload Configured Files",
@@ -174,7 +172,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "Declare tables and columns in dataverse.schema.json, preview a +/=/! plan, and create only what is missing. Existing metadata is never updated or deleted.",
         icon: "database",
-        guide: "dataverseIde.dataverse.openGuide",
+        readme: "dataverse",
         actions: [
           {
             label: "Preview Schema Plan",
@@ -192,7 +190,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "Start a debounced watch on the configured files. Uploads and publishing are driven entirely by dataverse.config.json, which has inline JSON Schema validation.",
         icon: "sync",
-        guide: "dataverseIde.dataverse.openGuide",
+        readme: "dataverse",
         actions: [
           {
             label: "Start Watch",
@@ -209,7 +207,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "Resolves the signed-in Dataverse user at startup and uses their name and email for file metadata and commit authorship.",
         icon: "person",
-        guide: "dataverseIde.dataverse.openGuide",
+        readme: "dataverse",
         actions: [
           {
             label: "Load User Identity",
@@ -228,7 +226,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "Bundle TypeScript, TSX and JSX with esbuild-wasm. Resolve npm imports from the workspace, compile Solid v1/v2 with Babel before bundling.",
         icon: "zap",
-        guide: "dataverseIde.esbuild.openGuide",
+        readme: "esbuild",
         actions: [
           {
             label: "Build Workspace…",
@@ -246,7 +244,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "Inline local scripts, stylesheets, SVG, images and media into a single deployable HTML file. Watch mode rebuilds when any inlined dependency changes.",
         icon: "file-code",
-        guide: "dataverseIde.html.openGuide",
+        readme: "html",
         actions: [
           {
             label: "Bundle Workspace…",
@@ -264,7 +262,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "Class completions and hovers generated from the installed design system, with no WASM runtime. Compile the classes actually used in the workspace to CSS on demand.",
         icon: "paintcan",
-        guide: "dataverseIde.tailwind.openGuide",
+        readme: "tailwind",
         actions: [
           {
             label: "Compile CSS",
@@ -288,7 +286,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "Run a workspace module graph directly through the File System Access API. Permission levels control filesystem writes and same-origin network access per run.",
         icon: "play",
-        guide: "dataverseIde.node-runtime.openGuide",
+        readme: "node-runtime",
         actions: [
           {
             label: "Run File…",
@@ -306,7 +304,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "A just-bash shell in the native terminal panel, backed directly by the workspace filesystem. No virtual filesystem mirror or sync-back step; node and npm run through the same direct runtime.",
         icon: "terminal",
-        guide: "dataverseIde.terminal.openGuide",
+        readme: "terminal",
         actions: [
           {
             label: "New Shell",
@@ -324,7 +322,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "Real installs into the workspace node_modules through a local resolver and registry client. Add dependencies, install from package.json, or prune extraneous packages.",
         icon: "package",
-        guide: "dataverseIde.npm.openGuide",
+        readme: "npm",
         actions: [
           {
             label: "Install All",
@@ -342,7 +340,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "isomorphic-git brings clone, fetch, pull and push to the browser. Stage, commit, branch and review history, with PATs cached safely in secret storage.",
         icon: "git-branch",
-        guide: "dataverseIde.git.openGuide",
+        readme: "git",
         actions: [
           {
             label: "Initialize Repository",
@@ -360,7 +358,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "Connect with a personal access token to clone projects, browse merge requests, issues and pipelines, or open a new merge request without leaving the IDE.",
         icon: "git-pull-request",
-        guide: "dataverseIde.gitlab.openGuide",
+        readme: "gitlab",
         actions: [
           {
             label: "Connect…",
@@ -388,7 +386,7 @@ const SECTIONS: WelcomeSection[] = [
         description:
           "Right-click one or more files or folders in the explorer to combine their text into a numbered markdown bundle, or run the configured variant to collect paths from `dataverseIde.flatten.include` — handy as LLM context or for a quick review.",
         icon: "files",
-        guide: "dataverseIde.flatten.openGuide",
+        readme: "flatten",
         actions: [
           {
             label: "Flatten Selection",
@@ -596,8 +594,8 @@ function createFeatureCard(feature: WelcomeFeature): HTMLElement {
     card.append(actions);
   }
 
-  if (feature.guide != null) {
-    card.append(createGuideLink(feature.guide));
+  if (feature.readme != null) {
+    card.append(createReadmeLink(feature.readme));
   }
 
   return card;
@@ -626,14 +624,22 @@ function createButton(action: WelcomeAction): HTMLButtonElement {
   return button;
 }
 
-function createGuideLink(command: string): HTMLButtonElement {
+function createReadmeLink(extensionKey: string): HTMLButtonElement {
   const link = document.createElement("button");
   link.type = "button";
-  link.className = "diw-guide-link";
-  link.textContent = "How-to guide →";
+  link.className = "diw-readme-link";
+  link.textContent = "Read README →";
 
   link.addEventListener("click", () => {
-    runCommand(command);
+    Promise.resolve(openExtensionReadme(vscodeApi(), extensionManifestId(extensionKey))).catch(
+      (error: unknown) => {
+        void vscodeApi().window.showErrorMessage(
+          `Could not open the ${extensionKey} README: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      },
+    );
   });
 
   return link;
@@ -840,7 +846,7 @@ function ensureStyles(): void {
   margin-top: 14px;
 }
 
-.diw-guide-link {
+.diw-readme-link {
   align-self: flex-start;
   margin-top: 12px;
   padding: 0;
@@ -852,12 +858,12 @@ function ensureStyles(): void {
   cursor: pointer;
 }
 
-.diw-guide-link:hover {
+.diw-readme-link:hover {
   color: var(--vscode-textLink-activeForeground);
   text-decoration: underline;
 }
 
-.diw-guide-link:focus-visible {
+.diw-readme-link:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: 1px;
 }
@@ -931,10 +937,6 @@ export default {
           command: COMMAND_OPEN,
           title: "Welcome: Show Welcome Page",
         },
-        {
-          command: "dataverseIde.welcome.openGuide",
-          title: "Welcome: How-to Guide",
-        },
       ],
       configuration: {
         title: "Dataverse IDE Welcome",
@@ -946,12 +948,7 @@ export default {
           },
         },
       },
-    });
-
-    const guideRegistration = registerGuide({
-      vscode: context.vscode,
-      extensionId: "welcome",
-      content: guideContent,
+      readme: true,
     });
 
     const paneRegistration = registerEditorPane(
@@ -1014,7 +1011,6 @@ export default {
         paneRegistration.dispose();
         commandRegistration.dispose();
         menuRegistration.dispose();
-        guideRegistration.dispose();
       },
     };
   },

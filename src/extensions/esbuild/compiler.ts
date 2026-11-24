@@ -28,16 +28,12 @@
 
 import * as esbuild from "esbuild-wasm";
 import esbuildWasmGzipUrl from "virtual:esbuild-wasm-gzip-url";
+import picomatch from "picomatch";
 
 import type * as vscodeType from "vscode";
 
 import {
-  COMPANION_EXTENSIONS,
-  EXPORT_CONDITIONS,
-  INDEX_TRAILS,
   NODE_BUILTINS,
-  RESOLVABLE_EXTENSIONS,
-  hasFileExtension,
   normalizePath,
   parseJsonSafe,
   splitPackageSpec,
@@ -46,9 +42,16 @@ import {
 import { createSolidEsbuildPlugin, type SolidCompilerVersion } from "./solidPlugin.js";
 
 export type BuildOutputFile = {
+  /** Workspace-relative destination path. */
   path: string;
+  /** Raw output bytes (JavaScript, CSS, source maps, or copied assets). */
+  contents: Uint8Array;
+  /** UTF-8 view used by callers that need to inspect JavaScript text. */
   text: string;
 };
+
+/** One esbuild entry point: a path or an esbuild `{ in, out }` pair. */
+export type EntryPoint = string | { in: string; out?: string };
 
 export type WorkspaceEntryKind = "file" | "directory";
 
@@ -64,6 +67,12 @@ export type WorkspaceReaderStats = {
 };
 
 export type WorkspaceReader = {
+  /**
+   * Reads a workspace-relative file as bytes. Returns undefined when the file
+   * does not exist or cannot be read.
+   */
+  readBytes: (path: string) => Promise<Uint8Array | undefined>;
+
   /**
    * Reads a workspace-relative UTF-8 text file. Returns undefined when the
    * file does not exist or cannot be read.
@@ -89,10 +98,11 @@ export type BuildRequest = {
   type: "build";
 
   /**
-   * Workspace-relative or virtual entry point, e.g. src/app.ts or
-   * __tailwind-plugin-entry__.mjs.
+   * Workspace-relative or virtual entry points. All entries are compiled by
+   * one esbuild pass, so shared imports and code-split chunks are linked
+   * together.
    */
-  entry: string;
+  entries: EntryPoint[];
 
   /**
    * The workspace-backed reader is intentionally not serializable. This
@@ -131,8 +141,6 @@ export type BuildRequest = {
   legalComments?: "none" | "inline" | "eof" | "linked" | "external";
   lineLimit?: number;
   drop?: ("console" | "debugger")[];
-  banner?: { js?: string; css?: string };
-  footer?: { js?: string; css?: string };
   pure?: string[];
 
   jsx?: "transform" | "preserve" | "automatic";
@@ -145,12 +153,40 @@ export type BuildRequest = {
   bundle?: boolean;
   splitting?: boolean;
   external?: string[];
+  alias?: Record<string, string>;
   define?: Record<string, string>;
   /** Extension -> esbuild loader overrides, e.g. { ".png": "dataurl" }. */
   loader?: Record<string, string>;
+  inject?: string[];
+  tsconfig?: string;
+  tsconfigRaw?: string | Record<string, unknown>;
+
+  conditions?: string[];
+  mainFields?: string[];
+  resolveExtensions?: string[];
+  nodePaths?: string[];
+  packages?: "bundle" | "external";
+
+  outdir?: string;
+  outfile?: string;
+  outbase?: string;
   entryNames?: string;
   chunkNames?: string;
+  assetNames?: string;
+  publicPath?: string;
   outExtension?: Record<string, string>;
+  allowOverwrite?: boolean;
+
+  minifyWhitespace?: boolean;
+  minifyIdentifiers?: boolean;
+  minifySyntax?: boolean;
+  ignoreAnnotations?: boolean;
+  dropLabels?: string[];
+  mangleProps?: string;
+  reserveProps?: string;
+  supported?: Record<string, boolean>;
+  banner?: string | { js?: string; css?: string };
+  footer?: string | { js?: string; css?: string };
 
   /**
    * Solid JSX compiler backend:
@@ -200,8 +236,29 @@ export type BuildResponse = BuildSuccessResponse | BuildFailureResponse;
 type PackageJson = Record<string, unknown>;
 
 type PackageResolver = {
-  resolveBareImport: (specifier: string) => Promise<string | undefined>;
-  resolvePackageImport: (specifier: string, importer: string) => Promise<string | undefined>;
+  resolveBareImport: (
+    specifier: string,
+    kind: string,
+    depth?: number,
+  ) => Promise<string | undefined>;
+  resolvePackageImport: (
+    specifier: string,
+    importer: string,
+    kind: string,
+    depth?: number,
+  ) => Promise<string | undefined>;
+  applyBrowserSpecifierMapping: (
+    specifier: string,
+    importer: string,
+    kind: string,
+    depth: number,
+  ) => Promise<string | undefined | false>;
+  applyBrowserFileMapping: (
+    path: string,
+    kind: string,
+    depth: number,
+  ) => Promise<string | undefined | false>;
+  sideEffectsFor: (path: string) => Promise<boolean | undefined>;
 };
 
 let initialization: Promise<void> | undefined;
@@ -217,7 +274,8 @@ export function createWorkspaceReader(
   vscode: typeof vscodeType,
   workspaceRootUri: vscodeType.Uri,
 ): WorkspaceReader {
-  const fileCache = new Map<string, Promise<string | undefined>>();
+  const fileCache = new Map<string, Promise<Uint8Array | undefined>>();
+  const textCache = new Map<string, Promise<string | undefined>>();
   const directoryCache = new Map<string, Promise<Map<string, WorkspaceEntryKind> | undefined>>();
 
   const stats: WorkspaceReaderStats = {
@@ -236,7 +294,7 @@ export function createWorkspaceReader(
   return {
     stats,
 
-    readText(path: string): Promise<string | undefined> {
+    readBytes(path: string): Promise<Uint8Array | undefined> {
       const normalized = normalizePath(path);
 
       if (normalized.length === 0) {
@@ -254,15 +312,35 @@ export function createWorkspaceReader(
 
       const pending = (async () => {
         try {
-          const bytes = await vscode.workspace.fs.readFile(uriFor(normalized));
-
-          return new TextDecoder().decode(bytes);
+          return await vscode.workspace.fs.readFile(uriFor(normalized));
         } catch {
           return undefined;
         }
       })();
 
       fileCache.set(normalized, pending);
+
+      return pending;
+    },
+
+    readText(path: string): Promise<string | undefined> {
+      const normalized = normalizePath(path);
+
+      if (normalized.length === 0) {
+        return Promise.resolve(undefined);
+      }
+
+      const existing = textCache.get(normalized);
+
+      if (existing != null) {
+        return existing;
+      }
+
+      const pending = this.readBytes(normalized).then((bytes) =>
+        bytes == null ? undefined : new TextDecoder().decode(bytes),
+      );
+
+      textCache.set(normalized, pending);
 
       return pending;
     },
@@ -330,6 +408,18 @@ function withVirtualFiles(
 
   return {
     stats: workspace.stats,
+
+    async readBytes(path: string): Promise<Uint8Array | undefined> {
+      const normalized = normalizePath(path);
+
+      const virtual = normalizedVirtualFiles.get(normalized);
+
+      if (virtual != null) {
+        return new TextEncoder().encode(virtual);
+      }
+
+      return workspace.readBytes(normalized);
+    },
 
     async readText(path: string): Promise<string | undefined> {
       const normalized = normalizePath(path);
@@ -422,7 +512,10 @@ export async function ensureEsbuildCompilerReady(): Promise<void> {
   await ensureInitialized();
 }
 
-function getLoaderForPath(path: string, loaderOverrides?: Record<string, string>): esbuild.Loader {
+function getLoaderForPath(
+  path: string,
+  loaderOverrides?: Record<string, string>,
+): esbuild.Loader | undefined {
   if (loaderOverrides != null) {
     const slash = path.lastIndexOf("/");
     const dot = path.lastIndexOf(".");
@@ -437,14 +530,6 @@ function getLoaderForPath(path: string, loaderOverrides?: Record<string, string>
     }
   }
 
-  if (path.endsWith(".css")) {
-    return "css";
-  }
-
-  if (path.endsWith(".json")) {
-    return "json";
-  }
-
   if (path.endsWith(".ts") || path.endsWith(".mts") || path.endsWith(".cts")) {
     return "ts";
   }
@@ -457,7 +542,24 @@ function getLoaderForPath(path: string, loaderOverrides?: Record<string, string>
     return "jsx";
   }
 
-  return "js";
+  if (path.endsWith(".js") || path.endsWith(".mjs") || path.endsWith(".cjs")) {
+    return "js";
+  }
+
+  if (path.endsWith(".css")) {
+    return "css";
+  }
+
+  if (path.endsWith(".json")) {
+    return "json";
+  }
+
+  /*
+   * Unknown extensions fall through to esbuild's own loader selection, which
+   * reports "No loader is configured" instead of silently parsing the file as
+   * JavaScript.
+   */
+  return undefined;
 }
 
 /*
@@ -505,6 +607,254 @@ function joinDirectoryAndName(directory: string, name: string): string {
   return directory.length > 0 ? `${directory}/${name}` : name;
 }
 
+const DEFAULT_RESOLVE_EXTENSIONS = [".tsx", ".ts", ".jsx", ".js", ".css", ".json"];
+const EMPTY_MODULE_PATH = "__esbuild_empty_module__.js";
+const BINARY_LOADERS = new Set(["binary", "file", "copy", "dataurl", "base64"]);
+
+type BuildPlatform = "browser" | "node" | "neutral";
+
+type TsconfigResolution = {
+  /** Raw JSON/JSONC passed to esbuild for compilerOptions behavior. */
+  raw?: string;
+  /** Workspace-relative tsconfig path, when one was read from the workspace. */
+  path?: string;
+  /** Workspace-relative directory that owns the tsconfig. */
+  directory: string;
+  /** Workspace-relative baseUrl directory (defaults to `directory`). */
+  baseUrl?: string;
+  paths?: Record<string, string[]>;
+};
+
+type ResolverOptions = {
+  platform: BuildPlatform;
+  external: string[];
+  alias: Record<string, string>;
+  packages: "bundle" | "external";
+  conditions?: string[];
+  mainFields?: string[];
+  resolveExtensions: string[];
+  nodePaths: string[];
+  tsconfig: TsconfigResolution;
+};
+
+/*
+ * tsconfig.json uses JSONC (comments and trailing commas). esbuild accepts
+ * this for tsconfigRaw, and the IDE has to parse the same text to implement
+ * compilerOptions.paths/baseUrl in its workspace resolver.
+ */
+function stripJsonComments(text: string): string {
+  let output = "";
+  let inString = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    const next = text[index + 1];
+
+    if (inLineComment) {
+      if (character === "\n" || character === "\r") {
+        inLineComment = false;
+        output += character;
+      }
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (character === "*" && next === "/") {
+        inBlockComment = false;
+        index += 1;
+      } else if (character === "\n" || character === "\r") {
+        output += character;
+      }
+      continue;
+    }
+
+    if (inString) {
+      output += character;
+
+      if (character === "\\") {
+        output += next ?? "";
+        index += 1;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (character === '"') {
+      inString = true;
+      output += character;
+      continue;
+    }
+
+    if (character === "/" && next === "/") {
+      inLineComment = true;
+      index += 1;
+      continue;
+    }
+
+    if (character === "/" && next === "*") {
+      inBlockComment = true;
+      index += 1;
+      continue;
+    }
+
+    output += character;
+  }
+
+  return output.replace(/,(\s*[}\]])/g, "$1");
+}
+
+function parseJsoncSafe(text: string): Record<string, unknown> | undefined {
+  return parseJsonSafe(stripJsonComments(text));
+}
+
+function directoryOf(path: string): string {
+  const slash = normalizePath(path).lastIndexOf("/");
+
+  return slash === -1 ? "" : path.replaceAll("\\", "/").slice(0, slash);
+}
+
+function joinWorkspacePath(directory: string, path: string): string {
+  if (path.startsWith("/")) {
+    return normalizePath(path);
+  }
+
+  return normalizePath(directory.length > 0 ? `${directory}/${path}` : path);
+}
+
+function normalizeExtensionList(extensions: readonly string[] | undefined): string[] {
+  const normalized = (extensions ?? [])
+    .map((extension) => extension.trim())
+    .filter((extension) => extension.length > 0)
+    .map((extension) => (extension.startsWith(".") ? extension : `.${extension}`));
+
+  return normalized.length > 0 ? normalized : DEFAULT_RESOLVE_EXTENSIONS;
+}
+
+function indexTrailsFor(extensions: readonly string[]): string[] {
+  return extensions.map((extension) => `/index${extension}`);
+}
+
+function hasFileExtension(path: string): boolean {
+  const basename = path.split("/").pop() ?? "";
+
+  return basename.lastIndexOf(".") > 0;
+}
+
+function isRelativeSpecifier(specifier: string): boolean {
+  return (
+    specifier.startsWith("./") ||
+    specifier.startsWith("../") ||
+    specifier === "." ||
+    specifier === ".."
+  );
+}
+
+function isBareSpecifier(specifier: string): boolean {
+  return (
+    !isRelativeSpecifier(specifier) &&
+    !specifier.startsWith("/") &&
+    !/^[A-Za-z]:[\\/]/.test(specifier)
+  );
+}
+
+function applyAlias(specifier: string, alias: Record<string, string>): string {
+  for (const [key, target] of Object.entries(alias)) {
+    if (specifier === key) {
+      return target;
+    }
+
+    if (specifier.startsWith(`${key}/`)) {
+      return `${target}${specifier.slice(key.length)}`;
+    }
+  }
+
+  return specifier;
+}
+
+function matchesExternal(candidate: string, patterns: readonly string[]): boolean {
+  const normalized = candidate.replaceAll("\\", "/");
+  const basename = normalized.split("/").pop() ?? normalized;
+
+  return patterns.some((pattern) => {
+    const external = pattern.replaceAll("\\", "/");
+
+    if (external.includes("*")) {
+      const matches = picomatch(external, { dot: true });
+
+      return matches(normalized) || matches(basename) || matches(`./${normalized}`);
+    }
+
+    if (external.startsWith(".") || external.startsWith("/")) {
+      return normalized === external || normalized.endsWith(`/${external.replace(/^\.?\//, "")}`);
+    }
+
+    return normalized === external || normalized.startsWith(`${external}/`);
+  });
+}
+
+function conditionsForKind(options: ResolverOptions, kind: string): Set<string> {
+  const conditions = new Set<string>();
+
+  if (options.platform === "browser") {
+    conditions.add("browser");
+  } else if (options.platform === "node") {
+    conditions.add("node");
+  }
+
+  if (options.conditions != null) {
+    for (const condition of options.conditions) {
+      conditions.add(condition);
+    }
+  } else {
+    conditions.add("module");
+  }
+
+  conditions.add(kind === "require-call" || kind === "require-resolve" ? "require" : "import");
+  conditions.add("default");
+
+  return conditions;
+}
+
+function mainFieldsFor(
+  options: ResolverOptions,
+  kind: string,
+  packageJson: Record<string, unknown>,
+): string[] {
+  let fields = options.mainFields;
+
+  if (fields == null) {
+    fields =
+      options.platform === "browser"
+        ? ["browser", "module", "main"]
+        : options.platform === "node"
+          ? ["main", "module"]
+          : [];
+  }
+
+  /*
+   * Browser packages that provide module + main but no browser entry use
+   * main for require() calls. This is esbuild's CommonJS compatibility rule.
+   */
+  if (
+    options.platform === "browser" &&
+    kind !== "import-statement" &&
+    kind !== "dynamic-import" &&
+    packageJson.browser == null &&
+    typeof packageJson.module === "string" &&
+    typeof packageJson.main === "string" &&
+    fields.includes("module") &&
+    fields.includes("main")
+  ) {
+    fields = fields.filter((field) => field !== "module");
+    fields.push("module");
+  }
+
+  return fields;
+}
+
 async function readDirectoryListing(
   reader: WorkspaceReader,
   directory: string,
@@ -546,6 +896,7 @@ async function resolveWithListing(
 
   const { directory, name } = splitDirectoryAndName(normalized);
   const listing = await readDirectoryListing(reader, directory);
+  const canAppendExtension = !hasFileExtension(normalized);
 
   if (listing != null) {
     const exact = listing.get(name);
@@ -554,12 +905,8 @@ async function resolveWithListing(
       return normalized;
     }
 
-    if (!hasFileExtension(normalized)) {
+    if (canAppendExtension) {
       for (const extension of extensions) {
-        if (extension.length === 0) {
-          continue;
-        }
-
         const candidate = `${name}${extension}`;
 
         if (listing.get(candidate) === "file") {
@@ -596,18 +943,18 @@ async function resolveWithListing(
     }
   }
 
-  if ((await reader.readText(normalized)) != null) {
+  if ((await reader.readBytes(normalized)) != null) {
     return normalized;
   }
 
-  if (hasFileExtension(normalized)) {
+  if (!canAppendExtension) {
     return undefined;
   }
 
   for (const extension of extensions) {
     const candidate = `${normalized}${extension}`;
 
-    if ((await reader.readText(candidate)) != null) {
+    if ((await reader.readBytes(candidate)) != null) {
       return candidate;
     }
   }
@@ -615,7 +962,7 @@ async function resolveWithListing(
   for (const trail of indexTrails) {
     const candidate = `${normalized}${trail}`;
 
-    if ((await reader.readText(candidate)) != null) {
+    if ((await reader.readBytes(candidate)) != null) {
       return candidate;
     }
   }
@@ -644,14 +991,17 @@ function getPackageJsonPath(packageDirectory: string): string {
  * Node-style conditional exports behavior. Package authors control condition
  * priority by object key order, not by the order of our condition set.
  */
-function resolveConditionalTarget(target: unknown): string | undefined {
+function resolveConditionalTarget(
+  target: unknown,
+  conditions: ReadonlySet<string>,
+): string | undefined {
   if (typeof target === "string") {
     return target;
   }
 
   if (Array.isArray(target)) {
     for (const candidate of target) {
-      const resolved = resolveConditionalTarget(candidate);
+      const resolved = resolveConditionalTarget(candidate, conditions);
 
       if (resolved != null) {
         return resolved;
@@ -666,11 +1016,11 @@ function resolveConditionalTarget(target: unknown): string | undefined {
   }
 
   for (const key of Object.keys(target as Record<string, unknown>)) {
-    if (!EXPORT_CONDITIONS.has(key)) {
+    if (!conditions.has(key)) {
       continue;
     }
 
-    const resolved = resolveConditionalTarget((target as Record<string, unknown>)[key]);
+    const resolved = resolveConditionalTarget((target as Record<string, unknown>)[key], conditions);
 
     if (resolved != null) {
       return resolved;
@@ -695,25 +1045,26 @@ function packageTargetPath(packageDirectory: string, target: string): string | u
  */
 function createPackageResolver(
   getReader: () => WorkspaceReader,
-  getGeneration: () => number = () => 0,
+  getGeneration: () => number,
+  options: ResolverOptions,
 ): PackageResolver {
   const packageJsonCache = new Map<string, Promise<PackageJson | undefined>>();
+  const packageDirectoryCache = new Map<string, Promise<string | undefined>>();
 
   let cacheGeneration = getGeneration();
 
-  async function readPackageJson(packageDirectory: string): Promise<PackageJson | undefined> {
-    const packageJsonPath = getPackageJsonPath(packageDirectory);
-
-    /*
-     * A reused esbuild context keeps this resolver alive across rebuilds.
-     * Package manifests can change (npm install), so discard the cache for
-     * each new build generation.
-     */
+  function resetCachesForGeneration(): void {
     if (cacheGeneration !== getGeneration()) {
       packageJsonCache.clear();
+      packageDirectoryCache.clear();
       cacheGeneration = getGeneration();
     }
+  }
 
+  async function readPackageJson(packageDirectory: string): Promise<PackageJson | undefined> {
+    resetCachesForGeneration();
+
+    const packageJsonPath = getPackageJsonPath(packageDirectory);
     const existing = packageJsonCache.get(packageJsonPath);
 
     if (existing != null) {
@@ -722,21 +1073,52 @@ function createPackageResolver(
 
     const pending = getReader()
       .readText(packageJsonPath)
-      .then((text) => {
-        if (text == null) {
-          return undefined;
-        }
-
-        return parseJsonSafe(text);
-      });
+      .then((text) => (text == null ? undefined : parseJsonSafe(text)));
 
     packageJsonCache.set(packageJsonPath, pending);
 
     return pending;
   }
 
-  async function lookup(path: string): Promise<string | undefined> {
-    return resolveWithListing(getReader(), path, COMPANION_EXTENSIONS, INDEX_TRAILS);
+  async function findContainingPackage(path: string): Promise<string | undefined> {
+    resetCachesForGeneration();
+
+    const normalized = normalizePath(path);
+    const existing = packageDirectoryCache.get(normalized);
+
+    if (existing != null) {
+      return existing;
+    }
+
+    const pending = (async () => {
+      const segments = normalized.split("/").filter((segment) => segment.length > 0);
+
+      segments.pop();
+
+      for (let index = segments.length; index >= 0; index -= 1) {
+        const directory = segments.slice(0, index).join("/");
+        const packageJson = await readPackageJson(directory);
+
+        if (packageJson != null) {
+          return directory;
+        }
+      }
+
+      return undefined;
+    })();
+
+    packageDirectoryCache.set(normalized, pending);
+
+    return pending;
+  }
+
+  function lookup(path: string): Promise<string | undefined> {
+    return resolveWithListing(
+      getReader(),
+      path,
+      options.resolveExtensions,
+      indexTrailsFor(options.resolveExtensions),
+    );
   }
 
   async function resolveExportTarget(
@@ -745,17 +1127,14 @@ function createPackageResolver(
   ): Promise<string | undefined> {
     const path = packageTargetPath(packageDirectory, target);
 
-    if (path == null) {
-      return undefined;
-    }
-
-    return lookup(path);
+    return path == null ? undefined : lookup(path);
   }
 
   async function resolveExportsField(
     exportsField: unknown,
     subpath: string,
     packageDirectory: string,
+    conditions: ReadonlySet<string>,
   ): Promise<string | undefined> {
     if (exportsField == null) {
       return undefined;
@@ -771,7 +1150,12 @@ function createPackageResolver(
 
     if (Array.isArray(exportsField)) {
       for (const candidate of exportsField) {
-        const resolved = await resolveExportsField(candidate, subpath, packageDirectory);
+        const resolved = await resolveExportsField(
+          candidate,
+          subpath,
+          packageDirectory,
+          conditions,
+        );
 
         if (resolved != null) {
           return resolved;
@@ -786,16 +1170,14 @@ function createPackageResolver(
     }
 
     const map = exportsField as Record<string, unknown>;
-
     const requestedSubpath = subpath.length === 0 ? "." : `./${subpath.replace(/^\.\//, "")}`;
-
     const hasSubpathEntries = Object.keys(map).some((key) => key === "." || key.startsWith("./"));
 
     if (hasSubpathEntries) {
       const directTarget = map[requestedSubpath];
 
       if (directTarget != null) {
-        return resolveExportsField(directTarget, "", packageDirectory);
+        return resolveExportsField(directTarget, "", packageDirectory, conditions);
       }
 
       for (const [pattern, target] of Object.entries(map)) {
@@ -819,12 +1201,7 @@ function createPackageResolver(
           prefix.length,
           requestedSubpath.length - suffix.length,
         );
-
-        if (typeof target === "string") {
-          return resolveExportTarget(packageDirectory, target.replaceAll("*", wildcard));
-        }
-
-        const conditionalTarget = resolveConditionalTarget(target);
+        const conditionalTarget = resolveConditionalTarget(target, conditions);
 
         if (conditionalTarget != null) {
           return resolveExportTarget(packageDirectory, conditionalTarget.replaceAll("*", wildcard));
@@ -834,45 +1211,239 @@ function createPackageResolver(
       return undefined;
     }
 
-    const conditionalTarget = resolveConditionalTarget(map);
+    const conditionalTarget = resolveConditionalTarget(map, conditions);
 
-    if (conditionalTarget == null) {
-      return undefined;
-    }
-
-    return resolveExportTarget(packageDirectory, conditionalTarget);
+    return conditionalTarget == null
+      ? undefined
+      : resolveExportTarget(packageDirectory, conditionalTarget);
   }
 
-  async function findPackageRoot(importer: string): Promise<string | undefined> {
-    const segments = normalizePath(importer)
-      .split("/")
-      .filter((segment) => segment.length > 0);
+  async function findPackageDirectory(packageName: string): Promise<string | undefined> {
+    const candidates = [
+      `node_modules/${packageName}`,
+      ...options.nodePaths.map((nodePath) =>
+        nodePath.length > 0 ? `${nodePath}/${packageName}` : packageName,
+      ),
+    ];
 
-    segments.pop();
-
-    for (let index = segments.length; index >= 0; index -= 1) {
-      const directory = segments.slice(0, index).join("/");
-
-      const packageJsonPath = directory.length > 0 ? `${directory}/package.json` : "package.json";
-
-      if ((await getReader().readText(packageJsonPath)) != null) {
-        return directory;
+    for (const candidate of candidates) {
+      if ((await readPackageJson(candidate)) != null) {
+        return candidate;
       }
     }
 
     return undefined;
   }
 
-  async function resolvePackageImport(
-    specifier: string,
-    importer: string,
-    depth = 0,
-  ): Promise<string | undefined> {
-    if (depth > 3) {
+  async function browserMapFor(
+    packageDirectory: string,
+  ): Promise<Record<string, string | false> | undefined> {
+    const packageJson = await readPackageJson(packageDirectory);
+    const browser = packageJson?.browser;
+
+    if (browser == null || typeof browser !== "object" || Array.isArray(browser)) {
       return undefined;
     }
 
-    const packageDirectory = await findPackageRoot(importer);
+    const mappings: Record<string, string | false> = {};
+
+    for (const [key, value] of Object.entries(browser as Record<string, unknown>)) {
+      if (typeof value === "string" || value === false) {
+        mappings[key.replaceAll("\\", "/")] = value;
+      }
+    }
+
+    return Object.keys(mappings).length > 0 ? mappings : undefined;
+  }
+
+  async function resolveBrowserTarget(
+    packageDirectory: string,
+    target: string,
+    kind: string,
+    depth: number,
+  ): Promise<string | undefined> {
+    if (target.startsWith(".")) {
+      return lookup(normalizePath(`${packageDirectory}/${target}`));
+    }
+
+    return resolveBareImport(target, kind, depth + 1);
+  }
+
+  async function applyBrowserFileMapping(
+    path: string,
+    kind: string,
+    depth: number,
+  ): Promise<string | undefined | false> {
+    if (options.platform !== "browser") {
+      return undefined;
+    }
+
+    const packageDirectory = await findContainingPackage(path);
+
+    if (packageDirectory == null) {
+      return undefined;
+    }
+
+    const mappings = await browserMapFor(packageDirectory);
+
+    if (mappings == null) {
+      return undefined;
+    }
+
+    const relative = `./${path.slice(packageDirectory.length + 1)}`;
+    const extensionless = relative.replace(/\.[^./]+$/, "");
+
+    for (const [key, target] of Object.entries(mappings)) {
+      if (key.startsWith(".") || key.startsWith("/")) {
+        const normalizedKey = key.startsWith("/") ? `.${key}` : key;
+
+        if (normalizedKey !== relative && normalizedKey !== extensionless) {
+          continue;
+        }
+
+        if (target === false) {
+          return false;
+        }
+
+        const resolved = await resolveBrowserTarget(packageDirectory, target, kind, depth);
+
+        return resolved ?? undefined;
+      }
+    }
+
+    return undefined;
+  }
+
+  async function applyBrowserSpecifierMapping(
+    specifier: string,
+    importer: string,
+    kind: string,
+    depth: number,
+  ): Promise<string | undefined | false> {
+    if (options.platform !== "browser") {
+      return undefined;
+    }
+
+    const packageDirectory = await findContainingPackage(importer);
+
+    if (packageDirectory == null) {
+      return undefined;
+    }
+
+    const mappings = await browserMapFor(packageDirectory);
+
+    if (mappings == null) {
+      return undefined;
+    }
+
+    const direct = mappings[specifier];
+
+    if (direct == null) {
+      return undefined;
+    }
+
+    if (direct === false) {
+      return false;
+    }
+
+    return (await resolveBrowserTarget(packageDirectory, direct, kind, depth)) ?? undefined;
+  }
+
+  async function resolveBareImport(
+    specifier: string,
+    kind: string,
+    depth = 0,
+  ): Promise<string | undefined> {
+    if (depth > 8) {
+      return undefined;
+    }
+
+    const { packageDir: defaultPackageDir, subpath } = splitPackageSpec(specifier);
+    const packageName = defaultPackageDir.slice("node_modules/".length);
+    const packageDirectory = await findPackageDirectory(packageName);
+    const packageJson =
+      packageDirectory == null ? undefined : await readPackageJson(packageDirectory);
+    const conditions = conditionsForKind(options, kind);
+
+    if (packageDirectory != null && packageJson != null) {
+      if (packageJson.exports != null) {
+        const resolved = await resolveExportsField(
+          packageJson.exports,
+          subpath,
+          packageDirectory,
+          conditions,
+        );
+
+        if (resolved == null) {
+          return undefined;
+        }
+
+        const mapped = await applyBrowserFileMapping(resolved, kind, depth);
+
+        return mapped === false ? EMPTY_MODULE_PATH : (mapped ?? resolved);
+      }
+
+      const browserMappings =
+        options.platform === "browser" ? await browserMapFor(packageDirectory) : undefined;
+      const mappedTarget =
+        browserMappings?.[subpath.length === 0 ? "." : `./${subpath}`] ??
+        (subpath.length === 0 ? browserMappings?.["./"] : undefined);
+
+      if (mappedTarget != null) {
+        if (mappedTarget === false) {
+          return EMPTY_MODULE_PATH;
+        }
+
+        return resolveBrowserTarget(packageDirectory, mappedTarget, kind, depth);
+      }
+
+      if (subpath.length > 0) {
+        const resolved = await lookup(`${packageDirectory}/${subpath}`);
+
+        if (resolved == null) {
+          return undefined;
+        }
+
+        const mapped = await applyBrowserFileMapping(resolved, kind, depth);
+
+        return mapped === false ? EMPTY_MODULE_PATH : (mapped ?? resolved);
+      }
+
+      for (const field of mainFieldsFor(options, kind, packageJson)) {
+        const target = packageJson[field];
+
+        if (typeof target !== "string" || target.length === 0) {
+          continue;
+        }
+
+        const resolved = await resolveExportTarget(packageDirectory, target);
+
+        if (resolved != null) {
+          const mapped = await applyBrowserFileMapping(resolved, kind, depth);
+
+          return mapped === false ? EMPTY_MODULE_PATH : (mapped ?? resolved);
+        }
+      }
+    }
+
+    if (subpath.length > 0) {
+      return lookup(`${packageDirectory ?? defaultPackageDir}/${subpath}`);
+    }
+
+    return lookup(packageDirectory ?? defaultPackageDir);
+  }
+
+  async function resolvePackageImport(
+    specifier: string,
+    importer: string,
+    kind: string,
+    depth = 0,
+  ): Promise<string | undefined> {
+    if (depth > 8) {
+      return undefined;
+    }
+
+    const packageDirectory = await findContainingPackage(importer);
 
     if (packageDirectory == null) {
       return undefined;
@@ -889,7 +1460,6 @@ function createPackageResolver(
     }
 
     const imports = packageJson.imports as Record<string, unknown>;
-
     let target = imports[specifier];
     let wildcard: string | undefined;
 
@@ -912,7 +1482,6 @@ function createPackageResolver(
         }
 
         wildcard = specifier.slice(prefix.length, specifier.length - suffix.length);
-
         target = candidate;
         break;
       }
@@ -922,7 +1491,7 @@ function createPackageResolver(
       return undefined;
     }
 
-    const conditionalTarget = resolveConditionalTarget(target);
+    const conditionalTarget = resolveConditionalTarget(target, conditionsForKind(options, kind));
 
     if (conditionalTarget == null) {
       return undefined;
@@ -932,71 +1501,228 @@ function createPackageResolver(
       wildcard == null ? conditionalTarget : conditionalTarget.replaceAll("*", wildcard);
 
     if (substituted.startsWith("#")) {
-      return resolvePackageImport(substituted, importer, depth + 1);
+      return resolvePackageImport(substituted, importer, kind, depth + 1);
     }
 
-    if (!substituted.startsWith("./")) {
+    if (substituted.startsWith(".")) {
+      return resolveExportTarget(packageDirectory, substituted);
+    }
+
+    return resolveBareImport(substituted, kind, depth + 1);
+  }
+
+  async function sideEffectsFor(path: string): Promise<boolean | undefined> {
+    const packageDirectory = await findContainingPackage(path);
+
+    if (packageDirectory == null) {
       return undefined;
     }
 
-    return resolveExportTarget(packageDirectory, substituted);
-  }
+    const packageJson = await readPackageJson(packageDirectory);
+    const sideEffects = packageJson?.sideEffects;
 
-  async function resolveBareImport(specifier: string): Promise<string | undefined> {
-    const { packageDir, subpath } = splitPackageSpec(specifier);
-
-    const packageJson = await readPackageJson(packageDir);
-
-    if (packageJson != null) {
-      /*
-       * exports is authoritative. Do not silently fall back to an internal
-       * file when a package declares exports but rejects the requested
-       * subpath.
-       */
-      if (packageJson.exports != null) {
-        return resolveExportsField(packageJson.exports, subpath, packageDir);
-      }
-
-      if (subpath.length > 0) {
-        return lookup(`${packageDir}/${subpath}`);
-      }
-
-      for (const field of ["browser", "module", "main"]) {
-        const target = packageJson[field];
-
-        if (typeof target !== "string" || target.length === 0) {
-          continue;
-        }
-
-        const resolved = await resolveExportTarget(packageDir, target);
-
-        if (resolved != null) {
-          return resolved;
-        }
-      }
+    if (sideEffects === false) {
+      return false;
     }
 
-    return subpath.length > 0 ? lookup(`${packageDir}/${subpath}`) : lookup(packageDir);
+    if (Array.isArray(sideEffects)) {
+      const relative = path.slice(packageDirectory.length + 1);
+      const patterns = sideEffects.filter((item): item is string => typeof item === "string");
+      const matches = patterns.some((pattern) =>
+        picomatch(pattern.replace(/^\.\//, ""), { dot: true })(relative),
+      );
+
+      return matches ? undefined : false;
+    }
+
+    return undefined;
   }
 
   return {
     resolveBareImport,
     resolvePackageImport,
+    applyBrowserSpecifierMapping,
+    applyBrowserFileMapping,
+    sideEffectsFor,
   };
 }
 
 async function resolveRelativeWorkspacePath(
   reader: WorkspaceReader,
   path: string,
+  extensions: readonly string[] = DEFAULT_RESOLVE_EXTENSIONS,
 ): Promise<string | undefined> {
-  return resolveWithListing(reader, path, RESOLVABLE_EXTENSIONS, INDEX_TRAILS);
+  return resolveWithListing(reader, path, extensions, indexTrailsFor(extensions));
+}
+
+/**
+ * Resolve one workspace-relative entry point using esbuild's extension and
+ * index rules. Exported so the extension can report missing entries before
+ * starting a build.
+ */
+export async function resolveWorkspaceEntry(
+  reader: WorkspaceReader,
+  entry: string,
+  resolveExtensions?: readonly string[],
+): Promise<string | undefined> {
+  const extensions = normalizeExtensionList(resolveExtensions);
+
+  return resolveRelativeWorkspacePath(reader, normalizePath(entry), extensions);
+}
+
+type ParsedTsconfig = {
+  raw: string;
+  options: Record<string, unknown>;
+  directory: string;
+  baseUrlDirectory: string;
+};
+
+async function readTsconfigFile(
+  reader: WorkspaceReader,
+  path: string,
+  seen: Set<string>,
+  depth = 0,
+): Promise<ParsedTsconfig | undefined> {
+  if (depth > 8 || seen.has(path)) {
+    return undefined;
+  }
+
+  seen.add(path);
+
+  const text = await reader.readText(path);
+
+  if (text == null) {
+    return undefined;
+  }
+
+  const json = parseJsoncSafe(text);
+
+  if (json == null) {
+    return undefined;
+  }
+
+  const directory = directoryOf(path);
+  const compilerOptions =
+    typeof json.compilerOptions === "object" &&
+    json.compilerOptions != null &&
+    !Array.isArray(json.compilerOptions)
+      ? (json.compilerOptions as Record<string, unknown>)
+      : {};
+
+  let inherited: ParsedTsconfig | undefined;
+
+  if (typeof json.extends === "string" && json.extends.startsWith(".")) {
+    const extendsPath = normalizePath(
+      json.extends.endsWith(".json")
+        ? `${directory}/${json.extends}`
+        : `${directory}/${json.extends}.json`,
+    );
+
+    inherited = await readTsconfigFile(reader, extendsPath, seen, depth + 1);
+  }
+
+  const options = { ...(inherited?.options ?? {}), ...compilerOptions };
+  const baseUrlDirectory =
+    typeof compilerOptions.baseUrl === "string"
+      ? joinWorkspacePath(directory, compilerOptions.baseUrl)
+      : (inherited?.baseUrlDirectory ?? directory);
+
+  return {
+    raw: text,
+    options,
+    directory,
+    baseUrlDirectory,
+  };
+}
+
+async function loadTsconfig(
+  reader: WorkspaceReader,
+  request: BuildRequest,
+): Promise<TsconfigResolution> {
+  const rawTsconfig =
+    request.tsconfigRaw == null
+      ? undefined
+      : typeof request.tsconfigRaw === "string"
+        ? request.tsconfigRaw
+        : JSON.stringify(request.tsconfigRaw);
+
+  if (rawTsconfig != null && rawTsconfig.trim().length > 0) {
+    const json = parseJsoncSafe(rawTsconfig) ?? {};
+    const options =
+      typeof json.compilerOptions === "object" &&
+      json.compilerOptions != null &&
+      !Array.isArray(json.compilerOptions)
+        ? (json.compilerOptions as Record<string, unknown>)
+        : {};
+
+    return {
+      raw: rawTsconfig,
+      directory: "",
+      ...(typeof options.baseUrl === "string"
+        ? { baseUrl: joinWorkspacePath("", options.baseUrl) }
+        : {}),
+      ...(typeof options.paths === "object" && options.paths != null
+        ? { paths: normalizeTsconfigPaths(options.paths) }
+        : {}),
+    };
+  }
+
+  const candidates =
+    request.tsconfig != null ? [request.tsconfig] : ["tsconfig.json", "jsconfig.json"];
+
+  for (const candidate of candidates) {
+    const parsed = await readTsconfigFile(reader, normalizePath(candidate), new Set());
+
+    if (parsed == null) {
+      continue;
+    }
+
+    const baseUrl =
+      typeof parsed.options.baseUrl === "string" ? parsed.baseUrlDirectory : undefined;
+
+    return {
+      /*
+       * Pass the merged compilerOptions rather than the original file: esbuild
+       * runs inside the wasm virtual filesystem and cannot follow "extends"
+       * from a workspace tsconfig on its own.
+       */
+      raw: JSON.stringify({ compilerOptions: parsed.options }),
+      path: normalizePath(candidate),
+      directory: parsed.directory,
+      ...(baseUrl != null ? { baseUrl } : {}),
+      ...(typeof parsed.options.paths === "object" && parsed.options.paths != null
+        ? { paths: normalizeTsconfigPaths(parsed.options.paths) }
+        : {}),
+    };
+  }
+
+  return { directory: "" };
+}
+
+function normalizeTsconfigPaths(value: object): Record<string, string[]> | undefined {
+  const paths: Record<string, string[]> = {};
+
+  for (const [key, targets] of Object.entries(value as Record<string, unknown>)) {
+    if (!Array.isArray(targets)) {
+      continue;
+    }
+
+    const normalized = targets.filter(
+      (target): target is string => typeof target === "string" && target.length > 0,
+    );
+
+    if (normalized.length > 0) {
+      paths[key] = normalized;
+    }
+  }
+
+  return Object.keys(paths).length > 0 ? paths : undefined;
 }
 
 function createWorkspaceFsPlugin(
   getReader: () => WorkspaceReader,
   getGeneration: () => number,
-  externalPaths: string[],
-  unresolvedImports: Set<string>,
+  options: ResolverOptions,
   dependencyPaths: Set<string>,
   loaderOverrides?: Record<string, string>,
 ): esbuild.Plugin {
@@ -1004,103 +1730,159 @@ function createWorkspaceFsPlugin(
     name: "dataverse-ide-workspace-fs",
 
     setup(build) {
-      const packageResolver = createPackageResolver(getReader, getGeneration);
+      const packageResolver = createPackageResolver(getReader, getGeneration, options);
 
-      /*
-       * Record every workspace path esbuild resolves, including files that
-       * fail to load. A failed rebuild still updates the watch set, so fixing
-       * the newly-added file triggers the next rebuild.
-       */
-      const workspaceResult = (path: string): esbuild.OnResolveResult => {
+      const workspaceResult = async (
+        path: string,
+        sideEffects?: boolean,
+      ): Promise<esbuild.OnResolveResult> => {
         const normalized = normalizePath(path);
 
         dependencyPaths.add(normalized);
 
+        const inferredSideEffects =
+          sideEffects === false ? false : await packageResolver.sideEffectsFor(normalized);
+
         return {
           path: normalized,
           namespace: "workspace",
+          ...(inferredSideEffects === false ? { sideEffects: false } : {}),
         };
+      };
+
+      const resolveSpecifier = async (
+        specifier: string,
+        importer: string,
+        kind: string,
+        depth = 0,
+      ): Promise<esbuild.OnResolveResult | undefined> => {
+        if (depth > 8) {
+          return undefined;
+        }
+
+        if (matchesExternal(specifier, options.external)) {
+          return { path: specifier, external: true };
+        }
+
+        const aliased = applyAlias(specifier, options.alias);
+
+        if (aliased !== specifier) {
+          return resolveSpecifier(aliased, importer, kind, depth + 1);
+        }
+
+        if (specifier.startsWith("#")) {
+          const resolved = await packageResolver.resolvePackageImport(
+            specifier.normalize("NFC"),
+            importer.normalize("NFC"),
+            kind,
+          );
+
+          return resolved == null ? undefined : workspaceResult(resolved);
+        }
+
+        const browserSpecifier = await packageResolver.applyBrowserSpecifierMapping(
+          specifier,
+          importer,
+          kind,
+          depth,
+        );
+
+        if (browserSpecifier === false) {
+          return workspaceResult(EMPTY_MODULE_PATH);
+        }
+
+        if (typeof browserSpecifier === "string") {
+          return resolveSpecifier(browserSpecifier, importer, kind, depth + 1);
+        }
+
+        if (isBareSpecifier(specifier)) {
+          if (
+            options.platform === "node" &&
+            (NODE_BUILTINS.has(specifier) || specifier.startsWith("node:"))
+          ) {
+            return { path: specifier, external: true };
+          }
+
+          if (options.packages === "external") {
+            return { path: specifier, external: true };
+          }
+
+          const tsconfigResolved = await resolveTsconfigPath(
+            getReader(),
+            specifier,
+            options.tsconfig,
+            options.resolveExtensions,
+          );
+
+          if (tsconfigResolved != null) {
+            return workspaceResult(tsconfigResolved);
+          }
+
+          const resolved = await packageResolver.resolveBareImport(normalizePath(specifier), kind);
+
+          if (resolved == null) {
+            return undefined;
+          }
+
+          if (resolved === EMPTY_MODULE_PATH) {
+            return workspaceResult(EMPTY_MODULE_PATH);
+          }
+
+          const browserMapped = await packageResolver.applyBrowserFileMapping(
+            resolved,
+            kind,
+            depth,
+          );
+
+          if (browserMapped === false) {
+            return workspaceResult(EMPTY_MODULE_PATH);
+          }
+
+          return workspaceResult(browserMapped ?? resolved);
+        }
+
+        const joined = joinFromImporter(importer, specifier);
+        const resolved = await resolveRelativeWorkspacePath(
+          getReader(),
+          joined,
+          options.resolveExtensions,
+        );
+
+        if (resolved == null) {
+          return undefined;
+        }
+
+        const browserMapped = await packageResolver.applyBrowserFileMapping(resolved, kind, depth);
+
+        if (browserMapped === false) {
+          return workspaceResult(EMPTY_MODULE_PATH);
+        }
+
+        return workspaceResult(browserMapped ?? resolved);
       };
 
       build.onResolve({ filter: /.*/ }, async (args) => {
         if (args.kind === "entry-point") {
-          return workspaceResult(args.path);
-        }
-
-        if (isConfiguredExternal(args.path, externalPaths)) {
-          return {
-            path: args.path,
-            external: true,
-          };
-        }
-
-        /*
-         * Package import aliases resolve from the closest containing
-         * package.json imports field.
-         */
-        if (args.path.startsWith("#")) {
-          const resolved = await packageResolver.resolvePackageImport(
-            args.path.normalize("NFC"),
-            args.importer.normalize("NFC"),
+          const resolved = await resolveRelativeWorkspacePath(
+            getReader(),
+            normalizePath(args.path),
+            options.resolveExtensions,
           );
 
-          if (resolved != null) {
-            return workspaceResult(resolved);
-          }
-
-          /*
-           * Leave unresolved # imports for esbuild to report. Unlike package
-           * imports, silently externalizing them is not a safe fallback.
-           */
-          return undefined;
-        }
-
-        /*
-         * Bare imports: Node builtins remain external; npm packages resolve
-         * from workspace node_modules via the direct reader.
-         */
-        if (!args.path.startsWith(".") && !args.path.startsWith("/")) {
-          if (NODE_BUILTINS.has(args.path) || args.path.startsWith("node:")) {
+          if (resolved == null) {
             return {
-              path: args.path,
-              external: true,
+              errors: [
+                {
+                  text: `Could not resolve entry point "${args.path}".`,
+                },
+              ],
             };
           }
 
-          const resolved = await packageResolver.resolveBareImport(normalizePath(args.path));
-
-          if (resolved != null) {
-            return workspaceResult(resolved);
-          }
-
-          unresolvedImports.add(`${args.path} imported by ${args.importer || "<entry point>"}`);
-
-          return {
-            path: args.path,
-            external: true,
-          };
-        }
-
-        /*
-         * Relative and workspace-root-relative imports.
-         */
-        const joined = joinFromImporter(args.importer, args.path);
-
-        const resolved = await resolveRelativeWorkspacePath(getReader(), joined);
-
-        if (resolved != null) {
           return workspaceResult(resolved);
         }
 
-        unresolvedImports.add(
-          `Relative import "${args.path}" imported by "${args.importer || "<entry point>"}" ` +
-            "was not found in the workspace and was left external in the output.",
-        );
-
-        return {
-          path: joined,
-          external: true,
-        };
+        return resolveSpecifier(args.path, args.importer, args.kind);
       });
 
       build.onLoad(
@@ -1110,7 +1892,19 @@ function createWorkspaceFsPlugin(
         },
         async (args) => {
           const normalizedPath = normalizePath(args.path);
-          const contents = await getReader().readText(normalizedPath);
+
+          if (normalizedPath === EMPTY_MODULE_PATH) {
+            return {
+              contents: "export default {};",
+              loader: "js",
+            };
+          }
+
+          const loader = getLoaderForPath(normalizedPath, loaderOverrides);
+          const binary = loader != null && BINARY_LOADERS.has(loader);
+          const contents = binary
+            ? await getReader().readBytes(normalizedPath)
+            : await getReader().readText(normalizedPath);
 
           if (contents == null) {
             return {
@@ -1122,16 +1916,87 @@ function createWorkspaceFsPlugin(
             };
           }
 
-          const loader = getLoaderForPath(normalizedPath, loaderOverrides);
-
           return {
             contents,
-            loader,
+            ...(loader != null ? { loader } : {}),
           };
         },
       );
     },
   };
+}
+
+async function resolveTsconfigPath(
+  reader: WorkspaceReader,
+  specifier: string,
+  tsconfig: TsconfigResolution,
+  resolveExtensions: readonly string[],
+): Promise<string | undefined> {
+  const baseDirectory = tsconfig.baseUrl ?? tsconfig.directory;
+
+  if (tsconfig.paths != null) {
+    for (const [pattern, targets] of Object.entries(tsconfig.paths)) {
+      const starIndex = pattern.indexOf("*");
+
+      if (starIndex === -1) {
+        if (pattern !== specifier) {
+          continue;
+        }
+
+        for (const target of targets) {
+          const resolved = await resolveWithListing(
+            reader,
+            joinWorkspacePath(baseDirectory, target),
+            resolveExtensions,
+            indexTrailsFor(resolveExtensions),
+          );
+
+          if (resolved != null) {
+            return resolved;
+          }
+        }
+
+        continue;
+      }
+
+      const prefix = pattern.slice(0, starIndex);
+      const suffix = pattern.slice(starIndex + 1);
+
+      if (
+        !specifier.startsWith(prefix) ||
+        !specifier.endsWith(suffix) ||
+        specifier.length < prefix.length + suffix.length
+      ) {
+        continue;
+      }
+
+      const wildcard = specifier.slice(prefix.length, specifier.length - suffix.length);
+
+      for (const target of targets) {
+        const resolved = await resolveWithListing(
+          reader,
+          joinWorkspacePath(baseDirectory, target.replaceAll("*", wildcard)),
+          resolveExtensions,
+          indexTrailsFor(resolveExtensions),
+        );
+
+        if (resolved != null) {
+          return resolved;
+        }
+      }
+    }
+  }
+
+  if (tsconfig.baseUrl != null) {
+    return resolveWithListing(
+      reader,
+      joinWorkspacePath(tsconfig.baseUrl, specifier),
+      resolveExtensions,
+      indexTrailsFor(resolveExtensions),
+    );
+  }
+
+  return undefined;
 }
 
 export async function runTransform(request: TransformRequest): Promise<BuildResponse> {
@@ -1165,6 +2030,7 @@ export async function runTransform(request: TransformRequest): Promise<BuildResp
       outputs: [
         {
           path: request.filename,
+          contents: new TextEncoder().encode(result.code),
           text: result.code,
         },
       ],
@@ -1204,7 +2070,7 @@ export async function transformForBundler(
   await ensureInitialized();
 
   const result = await esbuild.transform(options.source, {
-    loader: getLoaderForPath(options.filename),
+    loader: getLoaderForPath(options.filename) ?? "js",
     ...(options.format != null ? { format: options.format } : {}),
     target: "es2022",
     define: options.define,
@@ -1229,12 +2095,28 @@ export async function transformForBundler(
 type BuildState = {
   request: BuildRequest;
   reader: WorkspaceReader;
-  unresolvedImports: Set<string>;
   dependencyPaths: Set<string>;
   generation: number;
 };
 
-function createBuildPlugins(state: BuildState): esbuild.Plugin[] {
+function createResolverOptions(
+  request: BuildRequest,
+  tsconfig: TsconfigResolution,
+): ResolverOptions {
+  return {
+    platform: request.platform ?? "browser",
+    external: request.external ?? [],
+    alias: request.alias ?? {},
+    packages: request.packages ?? "bundle",
+    conditions: request.conditions,
+    mainFields: request.mainFields,
+    resolveExtensions: normalizeExtensionList(request.resolveExtensions),
+    nodePaths: request.nodePaths ?? [],
+    tsconfig,
+  };
+}
+
+function createBuildPlugins(state: BuildState, resolverOptions: ResolverOptions): esbuild.Plugin[] {
   const { request } = state;
   const solid = request.solid ?? "off";
   const plugins: esbuild.Plugin[] = [];
@@ -1259,8 +2141,7 @@ function createBuildPlugins(state: BuildState): esbuild.Plugin[] {
     createWorkspaceFsPlugin(
       () => state.reader,
       () => state.generation,
-      request.external ?? [],
-      state.unresolvedImports,
+      resolverOptions,
       state.dependencyPaths,
       request.loader,
     ),
@@ -1269,48 +2150,111 @@ function createBuildPlugins(state: BuildState): esbuild.Plugin[] {
   return plugins;
 }
 
-function createBuildOptions(
+function normalizeEntryPoint(entry: EntryPoint): string | { in: string; out: string } {
+  if (typeof entry === "string") {
+    return normalizePath(entry);
+  }
+
+  const input = normalizePath(entry.in);
+  const output = entry.out == null ? "" : normalizePath(entry.out);
+
+  return output.length === 0 ? input : { in: input, out: output };
+}
+
+function outputTextOption(
+  value: string | { js?: string; css?: string } | undefined,
+): Record<string, string> | undefined {
+  if (value == null) {
+    return undefined;
+  }
+
+  if (typeof value === "string") {
+    return { js: value };
+  }
+
+  return value as Record<string, string>;
+}
+
+function compileRegExp(pattern: string | undefined, name: string): RegExp | undefined {
+  if (pattern == null || pattern.length === 0) {
+    return undefined;
+  }
+
+  try {
+    return new RegExp(pattern);
+  } catch (error) {
+    throw new Error(
+      `${name} is not a valid regular expression: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+async function createBuildOptions(
   request: BuildRequest,
   plugins: esbuild.Plugin[],
-): esbuild.BuildOptions {
-  const entryPoint = normalizePath(request.entry);
-  const entryDirectory = entryPoint.includes("/")
-    ? entryPoint.slice(0, entryPoint.lastIndexOf("/"))
-    : ".";
+  tsconfig: TsconfigResolution,
+): Promise<esbuild.BuildOptions> {
+  const entryPoints = request.entries.map(normalizeEntryPoint);
+
+  if (entryPoints.length === 0) {
+    throw new Error("At least one entry point is required.");
+  }
+
+  const outdir = request.outfile == null ? (request.outdir ?? "out") : undefined;
 
   return {
-    entryPoints: [entryPoint],
+    entryPoints,
     bundle: request.bundle ?? true,
     write: false,
-    format: request.format ?? "esm",
-    platform: request.platform,
+    format: request.format,
+    platform: request.platform ?? "browser",
     charset: request.charset,
     globalName: request.globalName,
     minify: request.minify ?? false,
+    ...(request.minifyWhitespace === true ? { minifyWhitespace: true } : {}),
+    ...(request.minifyIdentifiers === true ? { minifyIdentifiers: true } : {}),
+    ...(request.minifySyntax === true ? { minifySyntax: true } : {}),
     sourcemap: request.sourcemap ?? false,
     sourceRoot: request.sourceRoot,
     sourcesContent: request.sourcesContent,
-    target: request.target ?? "es2022",
+    target: request.target,
     treeShaking: request.treeShaking,
+    ignoreAnnotations: request.ignoreAnnotations,
     keepNames: request.keepNames,
     legalComments: request.legalComments,
     lineLimit: request.lineLimit != null && request.lineLimit > 0 ? request.lineLimit : undefined,
     drop: request.drop,
-    banner: request.banner,
-    footer: request.footer,
+    dropLabels: request.dropLabels,
+    banner: outputTextOption(request.banner),
+    footer: outputTextOption(request.footer),
     pure: request.pure,
+    mangleProps: compileRegExp(request.mangleProps, "mangleProps"),
+    reserveProps: compileRegExp(request.reserveProps, "reserveProps"),
     jsx: request.jsx,
     jsxFactory: request.jsxFactory,
     jsxFragment: request.jsxFragment,
     jsxImportSource: request.jsxImportSource,
     jsxDev: request.jsxDev,
     jsxSideEffects: request.jsxSideEffects,
+    supported: request.supported,
     external: request.external,
     define: request.define,
+    inject: request.inject,
+    tsconfigRaw: tsconfig.raw,
+    conditions: request.conditions,
+    mainFields: request.mainFields,
+    resolveExtensions: normalizeExtensionList(request.resolveExtensions),
+    nodePaths: request.nodePaths,
+    packages: request.packages,
     splitting: request.splitting,
     entryNames: request.entryNames,
     chunkNames: request.chunkNames,
+    assetNames: request.assetNames,
+    publicPath: request.publicPath,
     outExtension: request.outExtension,
+    outbase: request.outbase,
+    outfile: request.outfile,
     logLevel: "silent",
     /*
      * Needed for the dependency set handed back to watch mode. The metafile
@@ -1319,11 +2263,12 @@ function createBuildOptions(
     metafile: true,
     plugins,
     /*
-     * Keep the entry's own directory out of the output path, so
-     * "src/app.ts" still writes "app.js" (plus sibling chunks/maps).
+     * outbase is left to esbuild unless configured. It derives the lowest
+     * common ancestor of every entry point, which keeps "src/app.ts" writing
+     * "app.js" while a multi-directory set ("src/a.ts", "lib/b.ts") writes
+     * "src/a.js" and "lib/b.js" without colliding.
      */
-    outbase: entryDirectory,
-    outdir: "out",
+    ...(outdir != null ? { outdir } : {}),
   };
 }
 
@@ -1335,38 +2280,61 @@ function createBuildOptions(
  */
 function buildRequestKey(request: BuildRequest): string {
   return JSON.stringify({
-    entry: normalizePath(request.entry),
-    format: request.format ?? "esm",
-    platform: request.platform,
+    entries: request.entries.map(normalizeEntryPoint),
+    format: request.format,
+    platform: request.platform ?? "browser",
     charset: request.charset,
     globalName: request.globalName,
     minify: request.minify ?? false,
+    ...(request.minifyWhitespace === true ? { minifyWhitespace: true } : {}),
+    ...(request.minifyIdentifiers === true ? { minifyIdentifiers: true } : {}),
+    ...(request.minifySyntax === true ? { minifySyntax: true } : {}),
     sourcemap: request.sourcemap ?? false,
     sourceRoot: request.sourceRoot,
     sourcesContent: request.sourcesContent,
-    target: request.target ?? "es2022",
+    target: request.target,
     treeShaking: request.treeShaking,
+    ignoreAnnotations: request.ignoreAnnotations,
     keepNames: request.keepNames,
     legalComments: request.legalComments,
     lineLimit: request.lineLimit,
     drop: request.drop,
+    dropLabels: request.dropLabels,
     banner: request.banner,
     footer: request.footer,
     pure: request.pure,
+    mangleProps: request.mangleProps,
+    reserveProps: request.reserveProps,
     jsx: request.jsx,
     jsxFactory: request.jsxFactory,
     jsxFragment: request.jsxFragment,
     jsxImportSource: request.jsxImportSource,
     jsxDev: request.jsxDev,
     jsxSideEffects: request.jsxSideEffects,
+    supported: request.supported,
     bundle: request.bundle ?? true,
     splitting: request.splitting,
     external: request.external ?? [],
+    alias: request.alias ?? {},
     define: request.define,
     loader: request.loader,
+    inject: request.inject ?? [],
+    tsconfig: request.tsconfig,
+    tsconfigRaw: request.tsconfigRaw,
+    conditions: request.conditions,
+    mainFields: request.mainFields,
+    resolveExtensions: request.resolveExtensions,
+    nodePaths: request.nodePaths ?? [],
+    packages: request.packages ?? "bundle",
+    outdir: request.outdir,
+    outfile: request.outfile,
+    outbase: request.outbase,
     entryNames: request.entryNames,
     chunkNames: request.chunkNames,
+    assetNames: request.assetNames,
+    publicPath: request.publicPath,
     outExtension: request.outExtension,
+    allowOverwrite: request.allowOverwrite,
     solid: request.solid ?? "off",
     virtualFiles: Object.keys(request.virtualFiles ?? {}).sort(),
   });
@@ -1407,39 +2375,70 @@ function collectDependencies(
   return [...dependencies].sort();
 }
 
+function normalizeOutputPath(request: BuildRequest, outputPath: string): string {
+  const normalized = normalizePath(outputPath);
+
+  if (request.outfile != null) {
+    const outfile = normalizePath(request.outfile);
+    const markerIndex = normalized.lastIndexOf(outfile);
+
+    if (markerIndex >= 0) {
+      return `${outfile}${normalized.slice(markerIndex + outfile.length)}`;
+    }
+
+    const directory = directoryOf(outfile);
+
+    return directory.length > 0
+      ? `${directory}/${normalized.split("/").pop() ?? normalized}`
+      : (normalized.split("/").pop() ?? normalized);
+  }
+
+  const outdir = normalizePath(request.outdir ?? "out");
+
+  if (outdir.length === 0 || outdir === ".") {
+    return normalized;
+  }
+
+  if (normalized === outdir) {
+    return "";
+  }
+
+  if (normalized.startsWith(`${outdir}/`)) {
+    return normalized;
+  }
+
+  const marker = `/${outdir}/`;
+  const markerIndex = normalized.lastIndexOf(marker);
+
+  if (markerIndex >= 0) {
+    return `${outdir}/${normalized.slice(markerIndex + marker.length)}`;
+  }
+
+  return normalized;
+}
+
 function toBuildResponse(
   request: BuildRequest,
   result: esbuild.BuildResult,
-  unresolvedImports: ReadonlySet<string>,
   dependencyPaths: ReadonlySet<string>,
 ): BuildSuccessResponse {
-  const warnings = [
-    ...result.warnings.map(
-      (warning) =>
-        `${warning.text}${
-          warning.location != null ? ` (${formatLocation(warning.location)})` : ""
-        }`,
-    ),
-
-    ...[...unresolvedImports]
-      .sort()
-      .map(
-        (detail) =>
-          `Could not resolve npm package "${detail}". ` +
-          "It was left external in the output bundle.",
-      ),
-  ];
-
   return {
     id: request.id,
     ok: true,
     outputs: (result.outputFiles ?? [])
       .filter((file) => file.contents != null)
       .map((file) => ({
-        path: file.path,
+        path: normalizeOutputPath(request, file.path),
+        contents: file.contents,
         text: file.text,
-      })),
-    warnings,
+      }))
+      .filter((file) => file.path.length > 0),
+    warnings: result.warnings.map(
+      (warning) =>
+        `${warning.text}${
+          warning.location != null ? ` (${formatLocation(warning.location)})` : ""
+        }`,
+    ),
     dependencies: collectDependencies(result, dependencyPaths),
   };
 }
@@ -1451,14 +2450,21 @@ export async function runBuild(request: BuildRequest): Promise<BuildResponse> {
     const state: BuildState = {
       request,
       reader: withVirtualFiles(request.workspace, request.virtualFiles),
-      unresolvedImports: new Set<string>(),
       dependencyPaths: new Set<string>(),
       generation: 0,
     };
 
-    const result = await esbuild.build(createBuildOptions(request, createBuildPlugins(state)));
+    const tsconfig = await loadTsconfig(state.reader, request);
 
-    return toBuildResponse(request, result, state.unresolvedImports, state.dependencyPaths);
+    if (tsconfig.path != null) {
+      state.dependencyPaths.add(tsconfig.path);
+    }
+
+    const plugins = createBuildPlugins(state, createResolverOptions(request, tsconfig));
+    const options = await createBuildOptions(request, plugins, tsconfig);
+    const result = await esbuild.build(options);
+
+    return toBuildResponse(request, result, state.dependencyPaths);
   } catch (error) {
     return {
       id: request.id,
@@ -1491,22 +2497,31 @@ export class EsbuildBuildSession {
     try {
       await ensureInitialized();
 
-      const key = buildRequestKey(request);
+      const reader = withVirtualFiles(request.workspace, request.virtualFiles);
+      const tsconfig = await loadTsconfig(reader, request);
+      /*
+       * Include the tsconfig contents in the context key so editing the file
+       * recreates the context instead of reusing stale compilerOptions.
+       */
+      const key = `${buildRequestKey(request)}\n${tsconfig.raw ?? ""}`;
 
       if (this.context == null || this.contextKey !== key) {
         await this.disposeContext();
 
         const state: BuildState = {
           request,
-          reader: withVirtualFiles(request.workspace, request.virtualFiles),
-          unresolvedImports: new Set<string>(),
+          reader,
           dependencyPaths: new Set<string>(),
           generation: 0,
         };
 
-        this.context = await esbuild.context(
-          createBuildOptions(request, createBuildPlugins(state)),
-        );
+        if (tsconfig.path != null) {
+          state.dependencyPaths.add(tsconfig.path);
+        }
+
+        const plugins = createBuildPlugins(state, createResolverOptions(request, tsconfig));
+
+        this.context = await esbuild.context(await createBuildOptions(request, plugins, tsconfig));
 
         this.contextKey = key;
         this.state = state;
@@ -1518,9 +2533,13 @@ export class EsbuildBuildSession {
         }
 
         state.request = request;
-        state.reader = withVirtualFiles(request.workspace, request.virtualFiles);
-        state.unresolvedImports.clear();
+        state.reader = reader;
         state.dependencyPaths.clear();
+
+        if (tsconfig.path != null) {
+          state.dependencyPaths.add(tsconfig.path);
+        }
+
         state.generation += 1;
       }
 
@@ -1530,12 +2549,7 @@ export class EsbuildBuildSession {
         throw new Error("esbuild build session lost its state.");
       }
 
-      return toBuildResponse(
-        request,
-        result,
-        this.state.unresolvedImports,
-        this.state.dependencyPaths,
-      );
+      return toBuildResponse(request, result, this.state.dependencyPaths);
     } catch (error) {
       const dependencies =
         this.state == null

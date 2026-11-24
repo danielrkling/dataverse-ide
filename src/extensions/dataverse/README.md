@@ -78,7 +78,7 @@ dataverse schema
 dataverse schema preview
 dataverse schema provision
 dataverse schema publish
-dataverse guide
+dataverse readme
 ```
 
 Uploads print the resource count and exit non-zero when any file fails.

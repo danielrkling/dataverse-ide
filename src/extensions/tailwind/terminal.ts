@@ -11,6 +11,7 @@ import type * as vscodeType from "vscode";
 import type { ExecResult } from "just-bash";
 
 import { registerTerminalCommand, type TerminalCommandDisposable } from "../terminal/registry.js";
+import { openExtensionReadme } from "../shared/readme.js";
 
 import { readTailwindConfig } from "./config.js";
 
@@ -24,7 +25,7 @@ Commands:
   tailwind toggle          toggle watch mode
   tailwind config          open tailwind.config.json
   tailwind output          show the tailwind output channel
-  tailwind guide           open the Tailwind guide
+  tailwind readme          open the Tailwind README in the Extensions view
 `;
 
 function ok(stdout = ""): ExecResult {
@@ -38,6 +39,7 @@ function error(message: string, exitCode = 1): ExecResult {
 export function registerTailwindTerminalCommands(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
+  extensionId: string,
 ): TerminalCommandDisposable {
   return registerTerminalCommand({
     name: "tailwind",
@@ -81,8 +83,8 @@ export function registerTailwindTerminalCommands(
           return ok();
         }
 
-        if (subcommand === "guide") {
-          await vscode.commands.executeCommand("dataverseIde.tailwind.openGuide");
+        if (subcommand === "readme" || subcommand === "guide") {
+          await openExtensionReadme(vscode, extensionId);
 
           return ok();
         }

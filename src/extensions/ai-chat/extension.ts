@@ -4,7 +4,6 @@ import { getService } from "@codingame/monaco-vscode-api";
 import { IViewsService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service";
 
 import { contributeExtensionManifest } from "../api.js";
-import { guideCommandId, registerGuide } from "../shared/guide.js";
 
 import { CHAT_VIEW_ID, registerChatPanel } from "./chatPanel.js";
 import { openChatEditor, registerChatEditor } from "./chatEditor.js";
@@ -23,8 +22,6 @@ import {
   modelIds,
   readAiChatSettings,
 } from "./settings.js";
-
-import guideContent from "./GUIDE.md?raw";
 
 import type { ExtensionContext, IdeExtension } from "../api.js";
 
@@ -134,12 +131,6 @@ export default {
 
     outputChannel.appendLine("[ai-chat] activating.");
 
-    const guideRegistration = registerGuide({
-      vscode,
-      extensionId: EXTENSION_ID,
-      content: guideContent,
-    });
-
     await contributeExtensionManifest({
       id: EXTENSION_ID,
       displayName: "Dataverse IDE AI Chat",
@@ -173,10 +164,6 @@ export default {
         {
           command: COMMAND_TEST_CONNECTION,
           title: "AI Chat: Test Connection",
-        },
-        {
-          command: guideCommandId(EXTENSION_ID),
-          title: "AI Chat: How-to Guide",
         },
       ],
       keybindings: [
@@ -300,6 +287,7 @@ export default {
           },
         },
       },
+      readme: true,
     });
 
     outputChannel.appendLine("[ai-chat] manifest contributions registered.");
@@ -482,7 +470,6 @@ export default {
         editorRegistration.dispose();
         panel.dispose();
         controller.dispose();
-        guideRegistration.dispose();
       },
     };
   },

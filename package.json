@@ -80,7 +80,7 @@
     "@codingame/monaco-vscode-workspace-trust-service-override": "^38.0.4",
     "@codingame/monaco-vscode-xml-default-extension": "^38.0.4",
     "@codingame/monaco-vscode-yaml-default-extension": "^38.0.4",
-    "@solidjs/babel-plugin": "^2.0.0-rc.20",
+    "@solidjs/babel-plugin": "2.0.2",
     "@tailwindcss/browser": "^4.3.3",
     "@types/wicg-file-system-access": "^2023.10.7",
     "@valibot/to-json-schema": "^1.8.0",

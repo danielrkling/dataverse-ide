@@ -12,6 +12,7 @@ import type { CommandContext, ExecResult } from "just-bash";
 
 import { registerTerminalCommand, type TerminalCommandDisposable } from "../terminal/registry.js";
 import { workspaceUriForShellPath } from "../terminal/workspaceUri.js";
+import { openExtensionReadme } from "../shared/readme.js";
 
 type UploadSummary = {
   files: number;
@@ -33,7 +34,7 @@ Commands:
   dataverse schema preview     show the schema plan
   dataverse schema provision   create missing tables and columns
   dataverse schema publish     publish schema tables
-  dataverse guide              open the Dataverse guide
+  dataverse readme             open the Dataverse README in the Extensions view
 `;
 
 function ok(stdout = ""): ExecResult {
@@ -67,6 +68,7 @@ function uploadResult(summary: UploadSummary | undefined): ExecResult {
 export function registerDataverseTerminalCommands(
   vscode: typeof vscodeType,
   rootUri: vscodeType.Uri,
+  extensionId: string,
 ): TerminalCommandDisposable {
   return registerTerminalCommand({
     name: "dataverse",
@@ -174,8 +176,8 @@ export function registerDataverseTerminalCommands(
           return error(`unknown schema action "${schemaAction}". Try \`dataverse --help\`.`);
         }
 
-        if (subcommand === "guide") {
-          await vscode.commands.executeCommand("dataverseIde.dataverse.openGuide");
+        if (subcommand === "readme" || subcommand === "guide") {
+          await openExtensionReadme(vscode, extensionId);
 
           return ok();
         }

@@ -1,11 +1,10 @@
 /*
  * Solid JSX compiler plugin for the main-thread esbuild build.
  *
- * Solid 2.x ships two compilers:
+ * Solid 2.0 ships two compilers:
  *
  *   - @solidjs/compiler (native / wasm) - used by vite-plugin-solid by default
- *   - @solidjs/babel-plugin            - the Babel implementation, still
- *                                        maintained and documented for 2.x
+ *   - @solidjs/babel-plugin 2.x        - the supported Babel integration
  *
  * Solid 1.x only has the Babel route (babel-preset-solid). This module wraps
  * both behind one esbuild plugin + one config option ("solid": "v1" | "v2"),
@@ -103,10 +102,16 @@ function isTsxFile(path: string): boolean {
 function compilerOptions(version: SolidCompilerVersion, dev: boolean): Record<string, unknown> {
   if (version === "v2") {
     return {
+      /*
+       * @solidjs/babel-plugin 2.0 defaults: moduleName @solidjs/web, generate
+       * dom, and sourceNames following dev. Keep them explicit so a future
+       * default change cannot silently alter IDE builds.
+       */
       moduleName: "@solidjs/web",
       generate: "dom",
       hydratable: false,
       dev,
+      sourceNames: dev,
     };
   }
 

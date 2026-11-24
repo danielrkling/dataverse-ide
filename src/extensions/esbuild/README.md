@@ -34,13 +34,18 @@ without a build server.
 3. Build one of three ways:
    - `esbuild: Build Current File` — builds the file in the active editor.
    - `esbuild: Build Workspace…` — picks a source file from a filtered workspace list.
-   - `esbuild: Build Configured Entry` — builds `entryPoints[0]` without a prompt.
+   - `esbuild: Build Configured Entries` — builds every configured entry point in one pass, without a prompt.
 4. Check the result in `dist/` and the log in **Output → Dataverse IDE: esbuild**.
 
 From the Dataverse shell, the same build is available as `esbuild src/app.ts` (or just
-`esbuild` for the configured entry), plus `esbuild watch`, `esbuild stop`, `esbuild config`
-and `esbuild output`. The terminal command also accepts esbuild CLI-style flags for one-off
-builds, for example:
+`esbuild` for all configured entries), plus `esbuild watch`, `esbuild stop`, `esbuild config`
+and `esbuild output`. Multiple positional entries are built together in one pass:
+
+```sh
+esbuild src/app.ts src/admin.ts
+```
+
+The terminal command also accepts esbuild CLI-style flags for one-off builds, for example:
 
 ```sh
 esbuild src/app.ts --bundle --minify --sourcemap --outfile=dist/app.min.js
@@ -59,7 +64,7 @@ The output keeps the entry's base name (`src/app.ts` → `dist/app.js`). Set `en
 | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
 | `esbuild: Build Current File`                          | Bundles the active editor's file. Alias: `esbuild: Build Active File…`.                                                  |
 | `esbuild: Build Workspace…`                            | Quick-picks a `.ts/.tsx/.js/.jsx/.mts/.cts` file (up to 200, excluding `node_modules`, `.ide-build`, `.git` and `dist`). |
-| `esbuild: Build Configured Entry`                      | Builds the first configured entry point.                                                                                 |
+| `esbuild: Build Configured Entries`                    | Builds every configured entry point in one pass.                                                                         |
 | `esbuild: Start Watch` / `Stop Watch` / `Toggle Watch` | Rebuilds when a file the build reaches is saved.                                                                         |
 | `esbuild: Open esbuild.config.json`                    | Creates the config on first use, then opens it.                                                                          |
 | `esbuild: Reload Config`                               | Re-reads the config without restarting the extension.                                                                    |
@@ -72,27 +77,36 @@ The output keeps the entry's base name (`src/app.ts` → `dist/app.js`). Set `en
 `dataverseIde.esbuild.configPath` (workspace-relative). The file is validated by a JSON
 Schema, so the editor completes keys and shows descriptions inline.
 
-| Key               | Default          | Notes                                                                                  |
-| ----------------- | ---------------- | -------------------------------------------------------------------------------------- |
-| `entryPoints`     | `["src/app.ts"]` | One or more workspace-relative source files.                                           |
-| `outdir`          | `"dist"`         | Workspace-relative output folder.                                                      |
-| `format`          | `"esm"`          | `esm`, `iife` or `cjs`.                                                                |
-| `platform`        | `"browser"`      | `browser`, `node` or `neutral`.                                                        |
-| `target`          | `"esnext"`       | esbuild target (for example `es2020`).                                                 |
-| `bundle`          | `true`           | Follow imports and inline them.                                                        |
-| `splitting`       | `false`          | Code splitting; requires `format: "esm"`.                                              |
-| `minify`          | `false`          | Minify the output.                                                                     |
-| `sourcemap`       | `false`          | `true`, `"linked"`, `"inline"`, `"external"` or `"both"`.                              |
-| `external`        | `[]`             | Import specifiers to leave unresolved in the bundle.                                   |
-| `define`          | `{}`             | Compile-time replacements, for example `{ "process.env.NODE_ENV": "\"production\"" }`. |
-| `jsx`             | `"transform"`    | `transform`, `preserve` or `automatic`.                                                |
-| `jsxImportSource` | —                | For automatic JSX, for example `solid-js` or `react`.                                  |
-| `solid`           | `"off"`          | `v1` or `v2` compiles workspace JSX/TSX with the matching Solid Babel plugin.          |
+| Key                 | Default          | Notes                                                                                  |
+| ------------------- | ---------------- | -------------------------------------------------------------------------------------- |
+| `entryPoints`       | `["src/app.ts"]` | Strings or `{ in, out }` objects; all entries are built together in one pass.          |
+| `outdir`            | `"dist"`         | Workspace-relative output folder.                                                      |
+| `outfile`           | —                | Single output file; mutually exclusive with multiple entry points.                     |
+| `format`            | `"esm"`          | `esm`, `iife` or `cjs`.                                                                |
+| `platform`          | `"browser"`      | `browser`, `node` or `neutral`. Resolution and builtin handling follow this.           |
+| `target`            | `"esnext"`       | esbuild target (for example `es2020`).                                                 |
+| `bundle`            | `true`           | Follow imports and inline them.                                                        |
+| `splitting`         | `false`          | Code splitting; requires `format: "esm"`.                                              |
+| `minify`            | `false`          | Minify the output. Granular flags are supported too.                                   |
+| `sourcemap`         | `false`          | `true`, `"linked"`, `"inline"`, `"external"` or `"both"`.                              |
+| `external`          | `[]`             | Import specifiers to leave unresolved; supports `*` wildcards.                         |
+| `alias`             | `{}`             | Substitute one package or path for another.                                            |
+| `define`            | `{}`             | Compile-time replacements, for example `{ "process.env.NODE_ENV": "\"production\"" }`. |
+| `tsconfig`          | auto             | Uses workspace `tsconfig.json`/`jsconfig.json` (paths, baseUrl, JSX/decorators).       |
+| `conditions`        | platform default | Additional package.json export conditions.                                             |
+| `mainFields`        | platform default | package.json entry fields, in order.                                                   |
+| `resolveExtensions` | esbuild default  | Implicit extension order (`.tsx`, `.ts`, `.jsx`, `.js`, `.css`, `.json`).              |
+| `jsx`               | tsconfig/esbuild | `transform`, `preserve` or `automatic`.                                                |
+| `jsxImportSource`   | —                | For automatic JSX, for example `solid-js` or `react`.                                  |
+| `solid`             | `"off"`          | `v1` or `v2` compiles workspace JSX/TSX with the matching Solid Babel plugin.          |
 
-Additional esbuild options (`entryNames`, `chunkNames`, `outExtension`, `charset`,
-`treeShaking`, `keepNames`, `legalComments`, `banner`, `footer`, `pure`, `drop`, `lineLimit`,
-`globalName`, `sourceRoot`, `sourcesContent`) are supported too — see the JSON Schema
-completions.
+Most remaining esbuild build options are supported (`outbase`, `entryNames`, `chunkNames`,
+`assetNames`, `publicPath`, `outExtension`, `allowOverwrite`, `charset`, `treeShaking`,
+`ignoreAnnotations`, `keepNames`, `legalComments`, `banner`, `footer`, `pure`, `drop`,
+`dropLabels`, `lineLimit`, `mangleProps`, `reserveProps`, `supported`, `globalName`,
+`sourceRoot`, `sourcesContent`, `loader`, `inject`, `nodePaths`, `packages`, `minify*`) — see
+the JSON Schema completions. Unresolved imports fail the build like normal esbuild; use
+`external`, `alias`, or `packages: "external"` for intentional runtime dependencies.
 
 ## Recipes
 
@@ -100,7 +114,7 @@ completions.
 
 1. Install the Solid runtime (Solid 2: `@solidjs/web` and `solid-js`; Solid 1: `solid-js`) with
    the npm extension.
-2. Run `esbuild: Solid Compiler…` and pick `v2` (Solid 2.x) or `v1` (Solid 1.x).
+2. Run `esbuild: Solid Compiler…` and pick `v2` (Solid 2.0) or `v1` (Solid 1.x).
 3. Build normally. Workspace `.jsx`/`.tsx` files are compiled with `@solidjs/babel-plugin`
    (`v2`) or `babel-preset-solid` (`v1`) before esbuild sees them; files in `node_modules`
    are left untouched.

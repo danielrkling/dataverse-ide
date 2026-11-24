@@ -61,7 +61,7 @@ identity|config|schema|guide]`; upload commands return file/uploaded/failure
   (`terminal/registry.ts`): `registerTerminalCommand({ name, execute })` returns a
   disposable; commands receive `(args, justBashContext, { vscode, rootUri, fs,
 output })`. Contributions are read at shell creation; built-ins (`open`, `code`,
-  `node`, `npm`) win name collisions. Documented in `terminal/GUIDE.md`.
+  `node`, `npm`) win name collisions. Documented in `terminal/README.md`.
 - [added 2026-11-06] terminal command history persists in browser storage
   (`terminal/history.ts`): the `terminalHistory` store in the shared
   `dataverse-ide` IndexedDB database, one record per workspace URI, last 1000

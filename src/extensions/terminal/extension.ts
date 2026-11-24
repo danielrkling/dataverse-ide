@@ -2,10 +2,6 @@ import type * as vscodeType from "vscode";
 
 import { contributeExtensionManifest } from "../api.js";
 
-import guideContent from "./GUIDE.md?raw";
-
-import { registerGuide } from "../shared/guide.js";
-
 import type { ExtensionContext, IdeExtension } from "../api.js";
 import type { DirectNodeEngine } from "../node-runtime/engine.js";
 import { NODE_PERMISSION_LEVELS, type NodePermissionLevel } from "../node-runtime/permissions.js";
@@ -18,7 +14,6 @@ import { createShellFs, type ShellFs } from "./shellFs.js";
 
 const COMMAND_NEW = "dataverseIde.terminal.new";
 const COMMAND_RUN = "dataverseIde.terminal.run";
-const COMMAND_GUIDE = "dataverseIde.terminal.openGuide";
 
 const CONFIG_SECTION = "dataverseIde.terminal";
 const PERMISSIONS_KEY = "permissions";
@@ -81,10 +76,6 @@ export default {
           command: COMMAND_RUN,
           title: "Terminal: Run Command…",
         },
-        {
-          command: COMMAND_GUIDE,
-          title: "Terminal: How-to Guide",
-        },
       ],
       configuration: {
         title: "Terminal",
@@ -114,12 +105,7 @@ export default {
           },
         },
       },
-    });
-
-    const guideRegistration = registerGuide({
-      vscode,
-      extensionId: "terminal",
-      content: guideContent,
+      readme: true,
     });
 
     const resources = new Map<vscodeType.Terminal, TerminalResources>();
@@ -279,7 +265,6 @@ export default {
         newCommand.dispose();
         runCommand.dispose();
         closeListener.dispose();
-        guideRegistration.dispose();
 
         for (const entry of allResources) {
           entry.fs.dispose();

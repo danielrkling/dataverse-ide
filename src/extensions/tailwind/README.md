@@ -54,7 +54,7 @@ tailwind stop
 tailwind toggle
 tailwind config
 tailwind output
-tailwind guide
+tailwind readme
 ```
 
 The command exits non-zero when compilation fails.

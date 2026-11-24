@@ -11,7 +11,11 @@ export type IdeExtensionHttp = {
 };
 
 export type ExtensionContext = {
+  /** Registry key, e.g. "node-runtime". */
   id: string;
+
+  /** Full manifest id, e.g. "dataverse-ide.dataverse-ide-node-runtime". */
+  fullId: string;
 
   vscode: typeof vscodeType;
 
@@ -46,6 +50,8 @@ import { getService } from "@codingame/monaco-vscode-api";
 import { IExtensionService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service";
 
 import { consumePlaceholder } from "./placeholders.js";
+import { registerExtensionIcon, withExtensionIcon } from "./icons.js";
+import { EXTENSION_README_PATH } from "./shared/readme.js";
 
 /*
  * Contribute command palette entries for an extension.
@@ -61,8 +67,10 @@ export async function contributeCommandManifest(input: {
   description: string;
   commands: { command: string; title: string }[];
   configuration?: ConfigurationContribution;
+  /** Advertise the extension's README.md in the Extensions view. */
+  readme?: boolean;
 }): Promise<void> {
-  const { getApi } = registerExtension(
+  const manifest = withExtensionIcon(
     {
       name: `dataverse-ide-${input.id}`,
       publisher: "dataverse-ide",
@@ -77,8 +85,16 @@ export async function contributeCommandManifest(input: {
         ...(input.configuration != null ? { configuration: input.configuration } : {}),
       },
     },
-    ExtensionHostKind.LocalProcess,
+    input.id,
   );
+
+  const { getApi, registerFileUrl } = registerExtension(
+    manifest,
+    ExtensionHostKind.LocalProcess,
+    input.readme === true ? { readmePath: EXTENSION_README_PATH } : undefined,
+  );
+
+  registerExtensionIcon(input.id, registerFileUrl);
 
   // Force the extension api to initialize so contributions are picked up.
   await getApi();
@@ -103,6 +119,7 @@ async function removeExtensionFromRegistry(id: string): Promise<void> {
  */
 export async function registerExtensionReplacingPlaceholder(
   manifest: IExtensionManifest,
+  options?: { readmePath?: string },
 ): Promise<RegisterLocalProcessExtensionResult> {
   const id = `${manifest.publisher}.${manifest.name}`;
 
@@ -110,7 +127,7 @@ export async function registerExtensionReplacingPlaceholder(
     await removeExtensionFromRegistry(id);
   }
 
-  return registerExtension(manifest, ExtensionHostKind.LocalProcess);
+  return registerExtension(manifest, ExtensionHostKind.LocalProcess, options);
 }
 
 /*
@@ -214,6 +231,8 @@ export async function contributeExtensionManifest(input: {
   menus?: MenuContribution[];
   submenus?: SubmenuContribution[];
   languageModelChatProviders?: LanguageModelChatProviderContribution[];
+  /** Advertise the extension's README.md in the Extensions view. */
+  readme?: boolean;
 }): Promise<void> {
   const contributes: Record<string, unknown> = {
     commands: input.commands,
@@ -281,23 +300,31 @@ export async function contributeExtensionManifest(input: {
     };
   }
 
-  const manifest: IExtensionManifest = {
-    name: `dataverse-ide-${input.id}`,
-    publisher: "dataverse-ide",
-    version: "0.1.0",
-    engines: {
-      vscode: "*",
+  const manifest: IExtensionManifest = withExtensionIcon(
+    {
+      name: `dataverse-ide-${input.id}`,
+      publisher: "dataverse-ide",
+      version: "0.1.0",
+      engines: {
+        vscode: "*",
+      },
+      displayName: input.displayName,
+      description: input.description,
+      contributes: contributes as IExtensionManifest["contributes"],
     },
-    displayName: input.displayName,
-    description: input.description,
-    contributes: contributes as IExtensionManifest["contributes"],
-  };
+    input.id,
+  );
 
-  const { getApi, registerFileUrl } = await registerExtensionReplacingPlaceholder(manifest);
+  const { getApi, registerFileUrl } = await registerExtensionReplacingPlaceholder(
+    manifest,
+    input.readme === true ? { readmePath: EXTENSION_README_PATH } : undefined,
+  );
 
   if (input.views != null) {
     registerFileUrl(activitybarIconPath(input.id), input.views.icon ?? DEFAULT_ACTIVITYBAR_ICON);
   }
+
+  registerExtensionIcon(input.id, registerFileUrl);
 
   // Force the extension api to initialize so contributions are picked up.
   await getApi();

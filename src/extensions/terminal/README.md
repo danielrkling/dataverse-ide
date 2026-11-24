@@ -26,7 +26,6 @@ no sync-back step.
 | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `Terminal: New Dataverse Shell` | Opens a new shell terminal.                                                                                                            |
 | `Terminal: Run Command…`        | Asks for a command and runs it in a new terminal. Other extensions can pass a command directly (for example npm's script play button). |
-| `Terminal: How-to Guide`        | Opens this guide.                                                                                                                      |
 
 The shell itself provides the usual just-bash commands: `ls`, `cat`, `grep`, `sed`, `awk`,
 `find`, `cp`, `mv`, `rm`, `mkdir`, `echo`, `printf`, `jq`, `yq`, `tar`, and more.
@@ -77,7 +76,7 @@ esbuild watch
 esbuild stop
 esbuild config
 esbuild output
-esbuild guide
+esbuild readme
 
 esbuild src/app.ts --bundle --minify --sourcemap --outfile=dist/app.min.js
 esbuild src/app.ts --format=cjs --target=es2020 --define:DEBUG=false
@@ -105,7 +104,7 @@ tailwind stop
 tailwind toggle
 tailwind config
 tailwind output
-tailwind guide
+tailwind readme
 ```
 
 `tailwind` uses the same compiler and `tailwind.config.json` as the Tailwind extension.

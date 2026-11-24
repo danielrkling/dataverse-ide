@@ -505,7 +505,7 @@ async function bundleAndImportModule(
   text: string;
 }> {
   const response = await runner.build({
-    entry,
+    entries: [entry],
     virtualFiles,
     bundle: true,
     format: "esm",

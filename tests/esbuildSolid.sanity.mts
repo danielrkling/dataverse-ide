@@ -3,7 +3,8 @@
  *
  * Run:
  *   npx esbuild tests/esbuildSolid.sanity.mts --bundle --platform=node --format=esm
- *     --external:@babel/* --external:@solidjs/babel-plugin --external:babel-preset-solid
+ *     --external:esbuild --external:@babel/* --external:@solidjs/babel-plugin
+ *     --external:babel-preset-solid --external:@babel/preset-typescript
  *     --outfile=tmp-esbuild-solid-sanity.mjs
  *   node tmp-esbuild-solid-sanity.mjs
  *

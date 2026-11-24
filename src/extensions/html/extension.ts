@@ -1,10 +1,8 @@
 import type * as vscodeType from "vscode";
 
 import { contributeExtensionManifest } from "../api.js";
-import { registerGuide } from "../shared/guide.js";
 import { createWatchStatus } from "../watchStatus.js";
 
-import guideContent from "./GUIDE.md?raw";
 import {
   captureDirtyDocuments,
   dirtyDocumentText,
@@ -174,10 +172,6 @@ export default {
           command: COMMAND_RELOAD_CONFIG,
           title: "HTML: Reload Config",
         },
-        {
-          command: "dataverseIde.html.openGuide",
-          title: "HTML: How-to Guide",
-        },
       ],
       configuration: {
         title: "Dataverse IDE HTML",
@@ -197,12 +191,7 @@ export default {
           },
         },
       },
-    });
-
-    const guideRegistration = registerGuide({
-      vscode,
-      extensionId: "html",
-      content: guideContent,
+      readme: true,
     });
 
     let currentConfig: HtmlConfig = { ...HTML_DEFAULT_CONFIG };
@@ -1058,8 +1047,6 @@ export default {
         openConfigCommand.dispose();
         showOutputCommand.dispose();
         reloadConfigCommand.dispose();
-
-        guideRegistration.dispose();
       },
     };
   },
